@@ -1,6 +1,7 @@
 """Render EditorialStoryboard to markdown and HTML — pure templates, no LLM."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -146,12 +147,11 @@ def render_html_preview(
             dur = _get_clip_duration(cid, clips_dir)
             if proxy:
                 # Compute relative path from output_dir to proxy
-                try:
-                    rel = proxy.relative_to(output_dir) if output_dir else proxy
-                except ValueError:
-                    # Different roots — compute manually
-                    rel = Path("..") / proxy.relative_to(clips_dir.parent)
-                clip_info[cid] = {"proxy": str(rel), "duration": dur}
+                if output_dir:
+                    rel = os.path.relpath(proxy, output_dir)
+                else:
+                    rel = str(proxy)
+                clip_info[cid] = {"proxy": rel, "duration": dur}
 
     # Extract thumbnails
     thumb_files = {}

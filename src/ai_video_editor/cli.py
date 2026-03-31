@@ -487,6 +487,79 @@ def cmd_brief(args, cfg: Config):
         print(f"  {DIM}No answers provided.{RESET}")
 
 
+def _find_storyboard_json(ep) -> Path | None:
+    """Find the latest structured storyboard JSON for an editorial project."""
+    storyboard_dir = ep.storyboard
+    candidates = [
+        storyboard_dir / "editorial_gemini_latest.json",
+        storyboard_dir / "editorial_claude_latest.json",
+    ]
+    if storyboard_dir.exists():
+        candidates.extend(sorted(storyboard_dir.glob("editorial_*_v*.json"), reverse=True))
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def cmd_preview(args, cfg: Config):
+    """Regenerate HTML preview from structured storyboard (no LLM, no ffmpeg)."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} 'vx preview' is only for editorial projects.")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+
+    json_path = _find_storyboard_json(ep)
+    if not json_path:
+        print(f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first.")
+        sys.exit(1)
+
+    _header(f"Preview: {name}")
+    print(f"  Storyboard: {json_path.name}")
+    print()
+
+    from .models import EditorialStoryboard
+    from .render import render_html_preview
+    from .versioning import next_version, versioned_dir, update_latest_symlink
+
+    sb = EditorialStoryboard.model_validate_json(json_path.read_text())
+    v = next_version(ep.root, "preview")
+    vdir = versioned_dir(ep.exports, v)
+
+    # Find existing rough cut to embed (use latest if available)
+    rough_cut_path = None
+    latest_export = ep.exports / "latest"
+    if latest_export.exists():
+        rc = latest_export / "rough_cut.mp4"
+        if rc.exists():
+            rough_cut_path = rc.resolve()
+
+    html = render_html_preview(
+        sb,
+        clips_dir=ep.clips_dir,
+        output_dir=vdir,
+        rough_cut_path=rough_cut_path,
+    )
+    preview_path = vdir / "preview.html"
+    preview_path.write_text(html)
+    update_latest_symlink(vdir)
+
+    print(f"  {BOLD}Version:{RESET}    v{v}")
+    print(f"  {GREEN}Preview:{RESET}    {preview_path}")
+
+
 def cmd_cut(args, cfg: Config):
     """Assemble rough cut video from structured storyboard (no LLM needed)."""
     name = args.project or _infer_project(cfg)
@@ -506,22 +579,7 @@ def cmd_cut(args, cfg: Config):
 
     ep = cfg.editorial_project(name)
 
-    # Find the structured JSON (prefer latest symlink)
-    storyboard_dir = ep.storyboard
-    json_candidates = [
-        storyboard_dir / "editorial_gemini_latest.json",
-        storyboard_dir / "editorial_claude_latest.json",
-    ]
-    # Also check versioned files
-    if storyboard_dir.exists():
-        json_candidates.extend(sorted(storyboard_dir.glob("editorial_*_v*.json"), reverse=True))
-
-    json_path = None
-    for candidate in json_candidates:
-        if candidate.exists():
-            json_path = candidate
-            break
-
+    json_path = _find_storyboard_json(ep)
     if not json_path:
         print(f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first.")
         sys.exit(1)
@@ -621,6 +679,7 @@ def main():
   vx status puma-run                  Show project status
   vx analyze puma-run                 Generate storyboard
   vx analyze puma-run --provider claude
+  vx preview puma-run                  Regenerate HTML preview (no LLM, no ffmpeg)
   vx cut puma-run                     Assemble rough cut from structured storyboard (no LLM)
   vx config --provider gemini         Set default provider
 """,
@@ -657,6 +716,10 @@ def main():
     p_brief = sub.add_parser("brief", help="Edit the editorial briefing (opens $EDITOR)")
     p_brief.add_argument("project", nargs="?", help="Project name")
 
+    # --- preview ---
+    p_preview = sub.add_parser("preview", help="Regenerate HTML preview (no LLM, no ffmpeg)")
+    p_preview.add_argument("project", nargs="?", help="Project name")
+
     # --- cut ---
     p_cut = sub.add_parser("cut", help="Assemble rough cut video (no LLM — uses structured JSON from analyze)")
     p_cut.add_argument("project", nargs="?", help="Project name")
@@ -685,6 +748,7 @@ def main():
         "analyze": cmd_analyze,
         "run": cmd_analyze,
         "brief": cmd_brief,
+        "preview": cmd_preview,
         "cut": cmd_cut,
         "config": cmd_config,
     }

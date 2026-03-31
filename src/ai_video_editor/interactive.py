@@ -71,14 +71,13 @@ def _new_project_flow(cfg):
         return
 
     source = questionary.path(
-        "Footage folder:",
-        instruction="(directory containing your raw video clips)",
+        "Footage folder (directory containing your raw video clips):",
         only_directories=True,
         style=VX_STYLE,
     ).ask()
     if not source:
         return
-    source_path = Path(source).expanduser().resolve()
+    source_path = Path(source.strip().strip("'\"")).expanduser().resolve()
 
     if not source_path.is_dir():
         print(f"\n  Error: {source_path} is not a directory\n")
@@ -222,6 +221,7 @@ def _project_actions(name, cfg):
         if has_preview:
             choices.append("Open preview in browser")
         if has_storyboard:
+            choices.append("Regenerate preview")
             choices.append("Assemble rough cut")
         choices.append("Run analysis (Phase 1 + 2)")
         choices.append("Edit briefing")
@@ -250,6 +250,32 @@ def _project_actions(name, cfg):
             cuts = sorted(ep.exports.glob("*/rough_cut.mp4"), reverse=True)
             if cuts:
                 subprocess.run(["open", str(cuts[0])])
+        elif action == "Regenerate preview":
+            from .models import EditorialStoryboard
+            from .render import render_html_preview
+            from .versioning import next_version, versioned_dir, update_latest_symlink
+            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
+            if json_files:
+                sb = EditorialStoryboard.model_validate_json(json_files[0].read_text())
+                v = next_version(ep.root, "preview")
+                vdir = versioned_dir(ep.exports, v)
+                # Embed existing rough cut if available
+                rough_cut_path = None
+                latest_export = ep.exports / "latest"
+                if latest_export.exists():
+                    rc = latest_export / "rough_cut.mp4"
+                    if rc.exists():
+                        rough_cut_path = rc.resolve()
+                html = render_html_preview(
+                    sb, clips_dir=ep.clips_dir, output_dir=vdir,
+                    rough_cut_path=rough_cut_path,
+                )
+                preview_path = vdir / "preview.html"
+                preview_path.write_text(html)
+                update_latest_symlink(vdir)
+                print(f"\n  Preview v{v} generated: {preview_path}")
+                if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
+                    subprocess.run(["open", str(preview_path)])
         elif action == "Assemble rough cut":
             from .rough_cut import run_rough_cut
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
