@@ -9,7 +9,9 @@ Commands:
     vx projects                  List all projects in the library
     vx status [project]          Show detailed project status
     vx preprocess [project]      Run preprocessing only
+    vx transcribe [project]      Transcribe audio (mlx-whisper local or Gemini cloud)
     vx analyze [project]         Run AI analysis and generate storyboard
+    vx cut [project]             Assemble rough cut video (no LLM)
     vx config [--key value]      Show or update workspace defaults
 """
 
@@ -796,9 +798,12 @@ def main():
   vx new recap video.mp4              Create descriptive project from single video
   vx projects                         List all projects
   vx status puma-run                  Show project status
+  vx transcribe puma-run               Transcribe audio (auto-detect provider)
+  vx transcribe puma-run --provider gemini   Use Gemini for richer transcripts (speakers, sounds)
+  vx transcribe puma-run --srt        Also generate SRT subtitle files
   vx analyze puma-run                 Generate storyboard
   vx analyze puma-run --provider claude
-  vx preview puma-run                  Regenerate HTML preview (no LLM, no ffmpeg)
+  vx preview puma-run                 Regenerate HTML preview (no LLM, no ffmpeg)
   vx cut puma-run                     Assemble rough cut from structured storyboard (no LLM)
   vx config --provider gemini         Set default provider
 """,
@@ -826,7 +831,7 @@ def main():
 
     # --- transcribe ---
     p_transcribe = sub.add_parser(
-        "transcribe", help="Run audio transcription (requires mlx-whisper)"
+        "transcribe", help="Transcribe audio (mlx-whisper local or Gemini cloud)"
     )
     p_transcribe.add_argument("project", nargs="?", help="Project name")
     p_transcribe.add_argument(
