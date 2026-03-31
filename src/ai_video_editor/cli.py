@@ -332,6 +332,25 @@ def cmd_status(args, cfg: Config):
                         status = f"{DIM}empty{RESET}"
                     print(f"  {d.name}: {status}")
 
+        # LLM usage
+        from .tracing import load_all_traces, summarize_traces
+
+        traces = load_all_traces(project_root)
+        if traces:
+            ts = summarize_traces(traces)
+            _header("LLM Usage")
+            print(
+                f"  {ts['calls']} API calls | "
+                f"{ts['total_tokens']:,} tokens | "
+                f"~${ts['estimated_cost_usd']:.4f}"
+            )
+            for phase, ps in ts.get("by_phase", {}).items():
+                print(
+                    f"    {phase}: {ps['calls']} calls, "
+                    f"{ps['total_tokens']:,} tokens, "
+                    f"~${ps['estimated_cost_usd']:.4f}"
+                )
+
     else:  # descriptive
         pp = cfg.project(name)
         cache = pp.cache_status()
@@ -507,6 +526,58 @@ def cmd_analyze(args, cfg: Config):
 
     ws = _read_workspace_config()
     provider = args.provider or meta.get("provider") or ws["provider"]
+
+    # Dry-run: estimate cost without making API calls
+    if getattr(args, "dry_run", False) and meta["type"] == "editorial":
+        from .tracing import estimate_phase1_cost, estimate_phase2_cost, estimate_transcription_cost
+
+        ep = cfg.editorial_project(name)
+        clips = ep.discover_clips()
+        # Estimate average clip duration from manifest
+        manifest_path = ep.master_manifest
+        avg_dur = 30.0  # default
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            durations = [c.get("duration_sec", 30) for c in manifest.get("clips", [])]
+            avg_dur = sum(durations) / len(durations) if durations else 30.0
+
+        _header(f"Dry Run: {name} ({len(clips)} clips, avg {avg_dur:.0f}s)")
+
+        t_est = estimate_transcription_cost(len(clips), avg_dur, cfg.transcribe.gemini_model)
+        p1_est = estimate_phase1_cost(len(clips), avg_dur, cfg.gemini.model)
+        p2_est = estimate_phase2_cost(len(clips), len(clips) * 3000, cfg.gemini.model)
+
+        total_cost = (
+            t_est["estimated_cost_usd"]
+            + p1_est["estimated_cost_usd"]
+            + p2_est["estimated_cost_usd"]
+        )
+        total_tokens = (
+            t_est["input_tokens"]
+            + t_est["output_tokens"]
+            + p1_est["input_tokens"]
+            + p1_est["output_tokens"]
+            + p2_est["input_tokens"]
+            + p2_est["output_tokens"]
+        )
+
+        print(f"\n  {'Phase':<15} {'Calls':>6} {'Input':>10} {'Output':>10} {'Est. Cost':>10}")
+        print(f"  {'─' * 55}")
+        print(
+            f"  {'Transcribe':<15} {t_est['calls']:>6} {t_est['input_tokens']:>10,} {t_est['output_tokens']:>10,} ${t_est['estimated_cost_usd']:>9.4f}"
+        )
+        print(
+            f"  {'Phase 1':<15} {p1_est['calls']:>6} {p1_est['input_tokens']:>10,} {p1_est['output_tokens']:>10,} ${p1_est['estimated_cost_usd']:>9.4f}"
+        )
+        print(
+            f"  {'Phase 2':<15} {p2_est['calls']:>6} {p2_est['input_tokens']:>10,} {p2_est['output_tokens']:>10,} ${p2_est['estimated_cost_usd']:>9.4f}"
+        )
+        print(f"  {'─' * 55}")
+        print(
+            f"  {'TOTAL':<15} {t_est['calls'] + p1_est['calls'] + p2_est['calls']:>6} {total_tokens:>21,} ${total_cost:>9.4f}"
+        )
+        print()
+        return
 
     _header(f"Analyzing: {name} ({provider})")
 
@@ -883,6 +954,11 @@ def main():
     )
     p_analyze.add_argument(
         "--no-interactive", action="store_true", help="Skip the editorial briefing questions"
+    )
+    p_analyze.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Estimate token usage and cost without making API calls",
     )
 
     # --- brief ---

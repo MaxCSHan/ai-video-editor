@@ -127,6 +127,7 @@ def transcribe_clip_gemini(
     clip_paths: ProjectPaths,
     cfg: TranscribeConfig,
     speaker_context: str | None = None,
+    tracer=None,
 ) -> dict | None:
     """Transcribe a clip via Gemini structured output from its proxy video.
 
@@ -160,7 +161,10 @@ def transcribe_clip_gemini(
 
     prompt = _build_gemini_prompt(speaker_context)
 
-    response = client.models.generate_content(
+    from .tracing import traced_gemini_generate
+
+    response = traced_gemini_generate(
+        client,
         model=cfg.gemini_model,
         contents=[
             types.Content(
@@ -175,6 +179,11 @@ def transcribe_clip_gemini(
             response_mime_type="application/json",
             response_schema=GeminiTranscript,
         ),
+        phase="transcribe",
+        clip_id=proxy_path.stem.replace("_proxy", ""),
+        tracer=tracer,
+        num_video_files=1,
+        prompt_chars=len(prompt),
     )
 
     gemini_result = GeminiTranscript.model_validate_json(response.text)

@@ -195,6 +195,7 @@ def _transcribe_single_clip(
     index: int,
     total: int,
     speaker_context: str | None = None,
+    tracer=None,
 ) -> tuple[str, dict | None]:
     """Transcribe a single clip. Returns (clip_id, transcript_dict)."""
     clip_paths = editorial_paths.clip_paths(clip_id)
@@ -216,7 +217,7 @@ def _transcribe_single_clip(
 
         print(f"  {label}: transcribing (gemini)...")
         transcript = transcribe_clip_gemini(
-            proxy_files[0], clip_paths, cfg, speaker_context=speaker_context
+            proxy_files[0], clip_paths, cfg, speaker_context=speaker_context, tracer=tracer
         )
     else:
         from .transcribe import transcribe_clip
@@ -242,6 +243,7 @@ def transcribe_all_clips(
     cfg: TranscribeConfig,
     provider: str = "mlx",
     speaker_context: str | None = None,
+    tracer=None,
 ) -> dict[str, dict]:
     """Transcribe all clips in parallel. Returns {clip_id: transcript_dict}."""
     total = len(clip_metadata)
@@ -263,6 +265,7 @@ def transcribe_all_clips(
                 i + 1,
                 total,
                 speaker_context,
+                tracer,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -324,6 +327,7 @@ def _review_single_clip_gemini(
     force: bool,
     index: int,
     total: int,
+    tracer=None,
 ) -> dict | None:
     """Review a single clip via Gemini. Returns review dict or None on failure."""
     from google import genai
@@ -367,7 +371,10 @@ def _review_single_clip_gemini(
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
-    response = client.models.generate_content(
+    from .tracing import traced_gemini_generate
+
+    response = traced_gemini_generate(
+        client,
         model=cfg.model,
         contents=[
             types.Content(
@@ -378,6 +385,11 @@ def _review_single_clip_gemini(
             )
         ],
         config=types.GenerateContentConfig(temperature=cfg.temperature),
+        phase="phase1",
+        clip_id=clip_id,
+        tracer=tracer,
+        num_video_files=1,
+        prompt_chars=len(prompt),
     )
 
     review = parse_clip_review(response.text)
@@ -395,6 +407,7 @@ def run_phase1_gemini(
     manifest: dict,
     cfg: GeminiConfig,
     force: bool = False,
+    tracer=None,
 ) -> list[dict]:
     """Phase 1 via Gemini: review clips in parallel."""
     clips = manifest["clips"]
@@ -411,6 +424,7 @@ def run_phase1_gemini(
                 force,
                 i + 1,
                 total,
+                tracer,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -525,6 +539,7 @@ def run_phase2(
     claude_cfg: ClaudeConfig | None = None,
     style: str = "vlog",
     user_context: dict | None = None,
+    tracer=None,
 ) -> Path:
     """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview."""
     from .models import EditorialStoryboard
@@ -561,8 +576,11 @@ def run_phase2(
         from google import genai
         from google.genai import types
 
+        from .tracing import traced_gemini_generate
+
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        response = client.models.generate_content(
+        response = traced_gemini_generate(
+            client,
             model=gemini_cfg.model,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -570,6 +588,9 @@ def run_phase2(
                 response_mime_type="application/json",
                 response_schema=EditorialStoryboard,
             ),
+            phase="phase2",
+            tracer=tracer,
+            prompt_chars=len(prompt),
         )
         storyboard = EditorialStoryboard.model_validate_json(response.text)
 
@@ -682,9 +703,13 @@ def run_editorial_pipeline(
     interactive: bool = True,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2."""
+    from .tracing import ProjectTracer
+
     cfg = cfg or DEFAULT_CONFIG
     editorial_paths = cfg.editorial_project(project_name)
     editorial_paths.ensure_dirs()
+
+    tracer = ProjectTracer(editorial_paths.root)
 
     # Discover clips
     print(f"[1/4] Discovering clips in {source_dir}...")
@@ -715,7 +740,12 @@ def run_editorial_pipeline(
 
         print(f"  Transcribing audio ({t_provider})...")
         transcripts = transcribe_all_clips(
-            clip_metadata, editorial_paths, cfg.transcribe, t_provider, speaker_context
+            clip_metadata,
+            editorial_paths,
+            cfg.transcribe,
+            t_provider,
+            speaker_context,
+            tracer=tracer,
         )
         count = len(transcripts)
         print(f"  Transcribed {count}/{len(clip_metadata)} clips with speech")
@@ -725,7 +755,9 @@ def run_editorial_pipeline(
     # Phase 1 — per-clip reviews
     print(f"[3/4] Phase 1: Reviewing clips with {provider}...")
     if provider == "gemini":
-        reviews = run_phase1_gemini(editorial_paths, manifest, cfg.gemini, force=force)
+        reviews = run_phase1_gemini(
+            editorial_paths, manifest, cfg.gemini, force=force, tracer=tracer
+        )
     elif provider == "claude":
         reviews = run_phase1_claude(editorial_paths, manifest, cfg.claude, force=force)
     else:
@@ -751,6 +783,8 @@ def run_editorial_pipeline(
         claude_cfg=cfg.claude,
         style=style,
         user_context=user_context,
+        tracer=tracer,
     )
 
+    tracer.print_summary("Pipeline Total")
     return output_path
