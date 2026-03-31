@@ -1,0 +1,36 @@
+# Project library (all media, proxies, frames, storyboards)
+library/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+.vx.json
+
+# Media files (keep example/ tracked via git-lfs or manual add)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

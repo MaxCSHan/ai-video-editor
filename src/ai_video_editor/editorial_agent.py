@@ -1,0 +1,464 @@
+"""Editorial Storyboard Agent — multi-clip analysis and creative assembly planning."""
+
+import json
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from .config import (
+    VIDEO_EXTENSIONS,
+    ClaudeConfig,
+    Config,
+    EditorialProjectPaths,
+    GeminiConfig,
+    PreprocessConfig,
+    DEFAULT_CONFIG,
+)
+from .editorial_prompts import (
+    build_clip_review_prompt,
+    build_editorial_assembly_prompt,
+    parse_clip_review,
+)
+from .versioning import (
+    next_version,
+    current_version,
+    versioned_path,
+    update_latest_symlink,
+)
+from .preprocess import (
+    create_proxy,
+    extract_frames,
+    detect_scenes,
+    extract_audio,
+    get_video_info,
+    ingest_source,
+)
+from .storyboard_format import format_duration
+
+
+# ---------------------------------------------------------------------------
+# Clip discovery
+# ---------------------------------------------------------------------------
+
+def discover_source_clips(source_dir: Path) -> list[Path]:
+    """Find all video files in a directory, sorted by name."""
+    clips = [
+        f for f in sorted(source_dir.iterdir())
+        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        and not f.name.startswith("._")  # macOS resource fork files
+    ]
+    return clips
+
+
+# ---------------------------------------------------------------------------
+# Multi-clip preprocessing
+# ---------------------------------------------------------------------------
+
+def _preprocess_single_clip(
+    clip_file: Path,
+    editorial_paths: EditorialProjectPaths,
+    cfg: PreprocessConfig,
+    index: int,
+    total: int,
+) -> dict:
+    """Preprocess a single clip. Returns clip metadata dict."""
+    clip_id = clip_file.stem
+    clip_paths = editorial_paths.clip_paths(clip_id)
+    clip_paths.ensure_dirs()
+
+    cache = clip_paths.cache_status()
+    all_cached = all(cache.values())
+
+    label = f"[{index}/{total}] {clip_id}"
+    if all_cached:
+        print(f"  {label}: cached")
+    else:
+        print(f"  {label}: preprocessing...")
+
+    source = ingest_source(clip_file, clip_paths)
+    video_info = get_video_info(source)
+    proxy_path = create_proxy(source, clip_paths, cfg)
+    extract_frames(source, clip_paths, cfg)
+    detect_scenes(source, clip_paths, cfg)
+    extract_audio(source, clip_paths, cfg)
+
+    if not all_cached:
+        print(f"  {label}: done")
+
+    return {
+        "clip_id": clip_id,
+        "filename": clip_file.name,
+        "duration_sec": video_info["duration_sec"],
+        "width": video_info["width"],
+        "height": video_info["height"],
+        "resolution": f"{video_info['width']}x{video_info['height']}",
+        "codec": video_info["codec"],
+        "fps": video_info["fps"],
+        "proxy_path": str(proxy_path),
+    }
+
+
+# Max parallel ffmpeg processes (avoid saturating CPU/disk)
+MAX_PREPROCESS_WORKERS = 4
+
+# Max parallel LLM API calls
+MAX_LLM_WORKERS = 5
+
+
+def preprocess_all_clips(
+    clip_files: list[Path],
+    editorial_paths: EditorialProjectPaths,
+    cfg: PreprocessConfig,
+) -> list[dict]:
+    """Preprocess all clips in parallel. Returns list of clip metadata."""
+    total = len(clip_files)
+
+    # Submit all clips to thread pool
+    futures = {}
+    with ThreadPoolExecutor(max_workers=MAX_PREPROCESS_WORKERS) as pool:
+        for i, clip_file in enumerate(clip_files):
+            fut = pool.submit(
+                _preprocess_single_clip, clip_file, editorial_paths, cfg, i + 1, total
+            )
+            futures[fut] = clip_file.stem
+
+        # Collect results preserving input order
+        results_by_id = {}
+        for fut in as_completed(futures):
+            clip_id = futures[fut]
+            try:
+                results_by_id[clip_id] = fut.result()
+            except Exception as e:
+                print(f"  ERROR preprocessing {clip_id}: {e}")
+
+    # Return in original file order
+    return [results_by_id[f.stem] for f in clip_files if f.stem in results_by_id]
+
+
+def build_master_manifest(
+    clip_metadata: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    project_name: str,
+) -> dict:
+    """Write and return the master manifest aggregating all clips."""
+    total_duration = sum(c["duration_sec"] for c in clip_metadata)
+    manifest = {
+        "project": project_name,
+        "clip_count": len(clip_metadata),
+        "total_duration_sec": total_duration,
+        "total_duration_fmt": format_duration(total_duration),
+        "clips": clip_metadata,
+    }
+    editorial_paths.master_manifest.write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Per-clip review
+# ---------------------------------------------------------------------------
+
+def _review_single_clip_gemini(
+    clip_info: dict,
+    editorial_paths: EditorialProjectPaths,
+    cfg: GeminiConfig,
+    force: bool,
+    index: int,
+    total: int,
+) -> dict | None:
+    """Review a single clip via Gemini. Returns review dict or None on failure."""
+    from google import genai
+    from google.genai import types
+
+    clip_id = clip_info["clip_id"]
+    clip_paths = editorial_paths.clip_paths(clip_id)
+    label = f"[{index}/{total}] {clip_id}"
+
+    # Check cache
+    latest_review = clip_paths.review / "review_gemini_latest.json"
+    legacy_review = clip_paths.review / "review_gemini.json"
+    if not force and (latest_review.exists() or legacy_review.exists()):
+        cached = latest_review if latest_review.exists() else legacy_review
+        print(f"  {label}: review cached")
+        return json.loads(cached.read_text())
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+    print(f"  {label}: uploading proxy...")
+    proxy_path = Path(clip_info["proxy_path"])
+    video_file = client.files.upload(file=str(proxy_path))
+
+    while video_file.state.name == "PROCESSING":
+        time.sleep(3)
+        video_file = client.files.get(name=video_file.name)
+
+    if video_file.state.name == "FAILED":
+        print(f"  {label}: WARNING — Gemini processing failed, skipping")
+        return None
+
+    prompt = build_clip_review_prompt(
+        clip_id=clip_id,
+        filename=clip_info["filename"],
+        duration_sec=clip_info["duration_sec"],
+        resolution=clip_info["resolution"],
+    )
+
+    print(f"  {label}: reviewing with {cfg.model}...")
+    response = client.models.generate_content(
+        model=cfg.model,
+        contents=[
+            types.Content(parts=[
+                types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                types.Part.from_text(text=prompt),
+            ])
+        ],
+        config=types.GenerateContentConfig(temperature=cfg.temperature),
+    )
+
+    review = parse_clip_review(response.text)
+
+    v = next_version(clip_paths.root, "review_gemini")
+    vpath = versioned_path(clip_paths.review / "review_gemini.json", v)
+    vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+    update_latest_symlink(vpath)
+    print(f"  {label}: review complete (v{v})")
+    return review
+
+
+def run_phase1_gemini(
+    editorial_paths: EditorialProjectPaths,
+    manifest: dict,
+    cfg: GeminiConfig,
+    force: bool = False,
+) -> list[dict]:
+    """Phase 1 via Gemini: review clips in parallel."""
+    clips = manifest["clips"]
+    total = len(clips)
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=MAX_LLM_WORKERS) as pool:
+        for i, clip_info in enumerate(clips):
+            fut = pool.submit(
+                _review_single_clip_gemini,
+                clip_info, editorial_paths, cfg, force, i + 1, total,
+            )
+            futures[fut] = clip_info["clip_id"]
+
+        results_by_id = {}
+        for fut in as_completed(futures):
+            clip_id = futures[fut]
+            try:
+                result = fut.result()
+                if result:
+                    results_by_id[clip_id] = result
+            except Exception as e:
+                print(f"  ERROR reviewing {clip_id}: {e}")
+
+    # Return in original clip order
+    return [results_by_id[c["clip_id"]] for c in clips if c["clip_id"] in results_by_id]
+
+
+def run_phase1_claude(
+    editorial_paths: EditorialProjectPaths,
+    manifest: dict,
+    cfg: ClaudeConfig,
+    force: bool = False,
+) -> list[dict]:
+    """Phase 1 via Claude: send each clip's frames, get structured JSON review."""
+    import base64
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set. See .env.example")
+    client = anthropic.Anthropic(api_key=api_key)
+
+    reviews = []
+    for i, clip_info in enumerate(manifest["clips"]):
+        clip_id = clip_info["clip_id"]
+        clip_paths = editorial_paths.clip_paths(clip_id)
+
+        # Check cache
+        latest_review = clip_paths.review / "review_claude_latest.json"
+        legacy_review = clip_paths.review / "review_claude.json"
+        if not force and (latest_review.exists() or legacy_review.exists()):
+            cached = latest_review if latest_review.exists() else legacy_review
+            print(f"  [{i+1}/{manifest['clip_count']}] {clip_id}: review cached")
+            reviews.append(json.loads(cached.read_text()))
+            continue
+
+        print(f"  [{i+1}/{manifest['clip_count']}] {clip_id}: loading frames...")
+        frames_manifest_path = clip_paths.frames / "manifest.json"
+        if not frames_manifest_path.exists():
+            print(f"    WARNING: No frames for {clip_id}, skipping")
+            continue
+        frames_manifest = json.loads(frames_manifest_path.read_text())
+
+        # Build image content — send all frames (or first batch if too many)
+        all_frames = frames_manifest["frames"]
+        frames_to_send = all_frames[:cfg.max_images_per_batch]
+
+        content = []
+        for frame in frames_to_send:
+            img_path = clip_paths.frames / frame["file"]
+            img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode("utf-8")
+            content.append({"type": "text", "text": f"[{frame['timestamp_fmt']}]"})
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+            })
+
+        prompt = build_clip_review_prompt(
+            clip_id=clip_id,
+            filename=clip_info["filename"],
+            duration_sec=clip_info["duration_sec"],
+            resolution=clip_info["resolution"],
+        )
+        content.append({"type": "text", "text": prompt})
+
+        print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
+        response = client.messages.create(
+            model=cfg.model,
+            max_tokens=cfg.max_tokens,
+            temperature=cfg.temperature,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        review = parse_clip_review(response.content[0].text)
+
+        v = next_version(clip_paths.root, "review_claude")
+        vpath = versioned_path(clip_paths.review / "review_claude.json", v)
+        vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+        update_latest_symlink(vpath)
+        reviews.append(review)
+
+    return reviews
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Editorial assembly
+# ---------------------------------------------------------------------------
+
+def run_phase2(
+    clip_reviews: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    project_name: str,
+    provider: str,
+    gemini_cfg: GeminiConfig | None = None,
+    claude_cfg: ClaudeConfig | None = None,
+    style: str = "vlog",
+) -> Path:
+    """Phase 2: send all clip reviews to AI for cross-clip editorial assembly."""
+    total_duration = sum(
+        sum(seg.get("duration_sec", 0) for seg in r.get("usable_segments", []))
+        for r in clip_reviews
+    )
+    # Fallback: use raw clip durations if usable_segments don't have duration
+    if total_duration == 0:
+        total_duration = sum(
+            r.get("duration_sec", 0) for r in clip_reviews
+            if "duration_sec" in r
+        )
+
+    prompt = build_editorial_assembly_prompt(
+        project_name=project_name,
+        clip_reviews=clip_reviews,
+        style=style,
+        clip_count=len(clip_reviews),
+        total_duration_sec=total_duration,
+    )
+
+    print(f"  Generating editorial storyboard ({provider})...")
+
+    if provider == "gemini":
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        response = client.models.generate_content(
+            model=gemini_cfg.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=gemini_cfg.temperature),
+        )
+        result_md = response.text
+    elif provider == "claude":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model=claude_cfg.model,
+            max_tokens=claude_cfg.max_tokens * 2,
+            temperature=claude_cfg.temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result_md = response.content[0].text
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+    editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
+    v = next_version(editorial_paths.root, "analyze")
+    base_name = f"editorial_{provider}.md"
+    output_path = versioned_path(editorial_paths.storyboard / base_name, v)
+    output_path.write_text(result_md)
+    update_latest_symlink(output_path)
+    print(f"  Editorial storyboard written to {output_path} (v{v})")
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline
+# ---------------------------------------------------------------------------
+
+def run_editorial_pipeline(
+    source_dir: Path,
+    project_name: str,
+    provider: str = "gemini",
+    style: str = "vlog",
+    cfg: Config | None = None,
+    force: bool = False,
+) -> Path:
+    """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2."""
+    cfg = cfg or DEFAULT_CONFIG
+    editorial_paths = cfg.editorial_project(project_name)
+    editorial_paths.ensure_dirs()
+
+    # Discover clips
+    print(f"[1/4] Discovering clips in {source_dir}...")
+    clip_files = discover_source_clips(source_dir)
+    if not clip_files:
+        raise RuntimeError(f"No video files found in {source_dir}")
+    total_label = ", ".join(f.name for f in clip_files[:5])
+    if len(clip_files) > 5:
+        total_label += f", ... ({len(clip_files)} total)"
+    print(f"  Found {len(clip_files)} clips: {total_label}")
+
+    # Preprocess all clips
+    print(f"[2/4] Preprocessing {len(clip_files)} clips...")
+    clip_metadata = preprocess_all_clips(clip_files, editorial_paths, cfg.preprocess)
+    manifest = build_master_manifest(clip_metadata, editorial_paths, project_name)
+    total_dur = format_duration(manifest["total_duration_sec"])
+    print(f"  Total raw footage: {total_dur}")
+
+    # Phase 1 — per-clip reviews
+    print(f"[3/4] Phase 1: Reviewing clips with {provider}...")
+    if provider == "gemini":
+        reviews = run_phase1_gemini(editorial_paths, manifest, cfg.gemini, force=force)
+    elif provider == "claude":
+        reviews = run_phase1_claude(editorial_paths, manifest, cfg.claude, force=force)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+    print(f"  Reviewed {len(reviews)} clips")
+
+    # Phase 2 — editorial assembly
+    print(f"[4/4] Phase 2: Generating editorial storyboard...")
+    output_path = run_phase2(
+        clip_reviews=reviews,
+        editorial_paths=editorial_paths,
+        project_name=project_name,
+        provider=provider,
+        gemini_cfg=cfg.gemini,
+        claude_cfg=cfg.claude,
+        style=style,
+    )
+
+    return output_path
