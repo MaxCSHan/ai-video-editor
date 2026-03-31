@@ -63,6 +63,32 @@ class GeminiTranscript(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Quick scan model (for smart briefing — one LLM call across all clips)
+# ---------------------------------------------------------------------------
+
+
+class PersonSighting(BaseModel):
+    description: str  # "man in green PUMA shirt with race bib #30860"
+    estimated_appearances: int  # how many clips they appear in
+    role_guess: str  # "main subject", "companion", "bystander", "camera person"
+
+
+class ClipSummary(BaseModel):
+    clip_id: str
+    summary: str  # one-line description
+    energy: str  # "high", "medium", "low"
+
+
+class QuickScanResult(BaseModel):
+    overall_summary: str  # 2-3 sentences about the footage as a whole
+    people: list[PersonSighting]
+    activities: list[str]  # observed activities/locations
+    mood: str  # overall mood/energy description
+    suggested_questions: list[str]  # targeted questions to ask the filmmaker
+    clip_summaries: list[ClipSummary] = []
+
+
+# ---------------------------------------------------------------------------
 # Editorial storyboard models
 # ---------------------------------------------------------------------------
 

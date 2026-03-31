@@ -659,6 +659,22 @@ def cmd_brief(args, cfg: Config):
     ep = cfg.editorial_project(name)
     context_path = project_root / "user_context.json"
 
+    ws = _read_workspace_config()
+    style = meta.get("style", ws.get("style", "vlog"))
+
+    # Smart briefing with AI scan
+    if getattr(args, "scan", False):
+        from .briefing import run_smart_briefing
+
+        _header(f"Smart Briefing: {name}")
+        # Delete cached scan to force fresh scan
+        scan_path = project_root / "quick_scan.json"
+        if scan_path.exists():
+            scan_path.unlink()
+
+        run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
+        return
+
     # Load Phase 1 reviews for smart template generation
     reviews = []
     for clip_id in ep.discover_clips():
@@ -669,9 +685,6 @@ def cmd_brief(args, cfg: Config):
                 f = next((x for x in found if not x.is_symlink()), found[0])
                 reviews.append(json.loads(f.read_text()))
                 break
-
-    ws = _read_workspace_config()
-    style = meta.get("style", ws.get("style", "vlog"))
 
     from .briefing import generate_template, parse_template, open_in_editor
 
@@ -978,8 +991,15 @@ def main():
     )
 
     # --- brief ---
-    p_brief = sub.add_parser("brief", help="Edit the editorial briefing (opens $EDITOR)")
+    p_brief = sub.add_parser(
+        "brief", help="Edit the editorial briefing (opens $EDITOR or AI-guided scan)"
+    )
     p_brief.add_argument("project", nargs="?", help="Project name")
+    p_brief.add_argument(
+        "--scan",
+        action="store_true",
+        help="Run AI quick scan of footage before asking questions (requires GEMINI_API_KEY)",
+    )
 
     # --- preview ---
     p_preview = sub.add_parser("preview", help="Regenerate HTML preview (no LLM, no ffmpeg)")

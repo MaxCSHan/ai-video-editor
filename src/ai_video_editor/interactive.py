@@ -240,7 +240,8 @@ def _project_actions(name, cfg):
             choices.append("Assemble rough cut")
         choices.append("Transcribe audio")
         choices.append("Run analysis (Phase 1 + 2)")
-        choices.append("Edit briefing")
+        choices.append("Edit briefing (AI-guided)")
+        choices.append("Edit briefing (manual)")
         choices.append("Show status")
         if has_rough_cut:
             choices.append("Open rough cut video")
@@ -309,7 +310,16 @@ def _project_actions(name, cfg):
             _run_transcription_interactive(name, cfg)
         elif action == "Run analysis (Phase 1 + 2)":
             _run_analyze(name, meta, cfg)
-        elif action == "Edit briefing":
+        elif action == "Edit briefing (AI-guided)":
+            style = meta.get("style", "vlog")
+            from .briefing import run_smart_briefing
+
+            # Delete cached scan to force fresh scan
+            scan_path = ep.root / "quick_scan.json"
+            if scan_path.exists():
+                scan_path.unlink()
+            run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
+        elif action == "Edit briefing (manual)":
             reviews = _load_reviews(ep)
             style = meta.get("style", "vlog")
             from .briefing import run_briefing

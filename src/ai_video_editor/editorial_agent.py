@@ -866,12 +866,22 @@ def run_editorial_pipeline(
         raise ValueError(f"Unknown provider: {provider}")
     print(f"  Reviewed {len(reviews)} clips")
 
-    # Briefing — optional interactive user context
+    # Briefing — optional interactive user context (smart briefing if Gemini available)
     user_context = None
     if interactive:
-        from .briefing import run_briefing
+        if os.environ.get("GEMINI_API_KEY"):
+            from .briefing import run_smart_briefing
 
-        user_context = run_briefing(reviews, style, editorial_paths.root)
+            user_context = run_smart_briefing(
+                editorial_paths,
+                style,
+                gemini_model=cfg.transcribe.gemini_model,
+                tracer=tracer,
+            )
+        else:
+            from .briefing import run_briefing
+
+            user_context = run_briefing(reviews, style, editorial_paths.root)
 
     # Phase 2 — editorial assembly
     step = "4/4" if not interactive else "4/4"
