@@ -457,6 +457,23 @@ def _run_transcription_interactive(name, cfg):
         return
     clip_metadata = [{"clip_id": cid} for cid in clips]
 
+    # Check for existing transcripts and offer overwrite
+    cached = [cid for cid in clips if ep.clip_paths(cid).has_transcript()]
+    if cached:
+        print(f"\n  {len(cached)}/{len(clips)} clips already have transcripts.")
+        if not questionary.confirm(
+            "Overwrite existing transcripts?", default=False, style=VX_STYLE
+        ).ask():
+            print("  Keeping cached transcripts (only un-transcribed clips will be processed).")
+        else:
+            for cid in cached:
+                audio_dir = ep.clip_paths(cid).audio
+                for f in ["transcript.json", "transcript.vtt", "transcript_preview.html"]:
+                    p = audio_dir / f
+                    if p.exists():
+                        p.unlink()
+            print(f"  Cleared {len(cached)} cached transcripts.")
+
     # Load speaker context from briefing
     speaker_context = None
     context_path = ep.root / "user_context.json"
