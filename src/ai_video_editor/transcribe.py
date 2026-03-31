@@ -93,13 +93,19 @@ def _build_transcript(whisper_result: dict, source_audio: str, model: str) -> di
 # ---------------------------------------------------------------------------
 
 GEMINI_TRANSCRIBE_PROMPT = """\
-Transcribe this video clip's audio completely. For each segment, identify:
-- The speaker (by name if recognizable, else Speaker_A, Speaker_B, etc.)
-- The type: "speech" for dialogue, "music" for songs/jingles, "sound_effect" for other sounds, "silence" for gaps
-- Precise start and end timestamps in seconds relative to the clip start
+You are watching a video clip. Transcribe the audio while using the visual context \
+to identify who is speaking (match voices to the people you see on screen).
 
-Be thorough: capture ALL dialogue, music, and notable sound effects.
-Short segments are fine — prefer accuracy over merging.
+Rules:
+- Only transcribe speech you can ACTUALLY HEAR. Do NOT invent or guess dialogue.
+- When no one is speaking, use type "silence", "music", or "sound_effect" as appropriate. \
+NEVER fabricate speech during quiet moments.
+- If you hear speech but cannot make out the words, use type "speech" with text "[inaudible]".
+- Identify speakers by matching their voice to the person visible on screen. \
+If you cannot identify them, use Speaker_A, Speaker_B, etc. consistently.
+- Timestamps in seconds relative to clip start. Sentence-level granularity is sufficient.
+- For music segments, include the song name if recognizable.
+- For sound effects, briefly describe the sound (e.g., "door slam", "crowd cheering").
 """
 
 
@@ -134,7 +140,7 @@ def transcribe_clip_gemini(
     from google import genai
     from google.genai import types
 
-    from .models import Transcript
+    from .models import GeminiTranscript
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -142,7 +148,7 @@ def transcribe_clip_gemini(
 
     client = genai.Client(api_key=api_key)
 
-    # Upload proxy video (retains audio at AAC 64k)
+    # Upload proxy video (retains audio at AAC 64k + visual context)
     video_file = client.files.upload(file=str(proxy_path))
 
     while video_file.state.name == "PROCESSING":
@@ -167,20 +173,65 @@ def transcribe_clip_gemini(
         config=types.GenerateContentConfig(
             temperature=0.2,
             response_mime_type="application/json",
-            response_schema=Transcript,
+            response_schema=GeminiTranscript,
         ),
     )
 
-    transcript = Transcript.model_validate_json(response.text)
-    result = transcript.model_dump()
+    gemini_result = GeminiTranscript.model_validate_json(response.text)
 
-    # Ensure provider is marked
-    result["provider"] = "gemini"
+    # Transform lean Gemini response into canonical transcript.json format
+    result = _gemini_to_canonical(gemini_result, cfg.gemini_model)
 
     # Ensure audio dir exists and cache
     clip_paths.audio.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+
+    # Generate VTT + preview HTML alongside the transcript
+    vtt_path = clip_paths.audio / "transcript.vtt"
+    generate_vtt(result, vtt_path)
+
+    preview_path = clip_paths.audio / "transcript_preview.html"
+    generate_transcript_preview(
+        clip_id=proxy_path.stem.replace("_proxy", ""),
+        proxy_path=proxy_path,
+        transcript=result,
+        vtt_path=vtt_path,
+        output_path=preview_path,
+    )
+
     return result
+
+
+def _gemini_to_canonical(gemini, model: str) -> dict:
+    """Transform GeminiTranscript into canonical transcript.json dict."""
+    segments = []
+    for seg in gemini.segments:
+        segments.append(
+            {
+                "start": round(seg.start, 3),
+                "end": round(seg.end, 3),
+                "text": seg.text,
+                "speaker": seg.speaker,
+                "type": seg.type,
+            }
+        )
+
+    # Build full text from speech segments only
+    speech_texts = [s.text for s in gemini.segments if s.type == "speech" and s.text]
+    full_text = " ".join(speech_texts)
+
+    duration_sec = segments[-1]["end"] if segments else 0.0
+
+    return {
+        "model": model,
+        "language": gemini.language,
+        "text": full_text,
+        "segments": segments,
+        "duration_sec": round(duration_sec, 3),
+        "has_speech": gemini.has_speech,
+        "speakers": gemini.speakers,
+        "provider": "gemini",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -235,23 +286,187 @@ def format_transcript_for_prompt(transcript: dict, max_chars: int = 3000) -> str
 def generate_srt(transcript: dict, output_path: Path) -> Path:
     """Generate SRT subtitle file from transcript.
 
-    Uses word-level timestamps when available for tighter cues,
-    otherwise falls back to segment-level timestamps.
+    Includes speaker prefixes and non-speech markers when available.
     """
     entries = []
     index = 1
 
     for seg in transcript.get("segments", []):
-        if not seg.get("text"):
+        text = seg.get("text", "")
+        if not text:
             continue
+
+        seg_type = seg.get("type", "speech")
+        speaker = seg.get("speaker")
+
+        if seg_type == "music":
+            cue_text = f"\u266a {text} \u266a" if text else "\u266a Music \u266a"
+        elif seg_type == "sound_effect":
+            cue_text = f"[{text}]"
+        elif seg_type == "silence":
+            continue
+        elif speaker:
+            cue_text = f"{speaker}: {text}"
+        else:
+            cue_text = text
+
         entries.append(
-            f"{index}\n"
-            f"{_srt_timecode(seg['start'])} --> {_srt_timecode(seg['end'])}\n"
-            f"{seg['text']}\n"
+            f"{index}\n{_srt_timecode(seg['start'])} --> {_srt_timecode(seg['end'])}\n{cue_text}\n"
         )
         index += 1
 
     output_path.write_text("\n".join(entries), encoding="utf-8")
+    return output_path
+
+
+def generate_vtt(transcript: dict, output_path: Path) -> Path:
+    """Generate WebVTT subtitle file from transcript.
+
+    Includes speaker prefixes and non-speech markers for use with HTML5 <video> <track>.
+    """
+    lines = ["WEBVTT", ""]
+
+    for seg in transcript.get("segments", []):
+        text = seg.get("text", "")
+        if not text:
+            continue
+
+        seg_type = seg.get("type", "speech")
+        speaker = seg.get("speaker")
+
+        if seg_type == "music":
+            cue_text = f"\u266a {text} \u266a" if text else "\u266a Music \u266a"
+        elif seg_type == "sound_effect":
+            cue_text = f"[{text}]" if text else "[sound effect]"
+        elif seg_type == "silence":
+            continue
+        elif speaker:
+            cue_text = f"{speaker}: {text}"
+        else:
+            cue_text = text
+
+        lines.append(f"{_vtt_timecode(seg['start'])} --> {_vtt_timecode(seg['end'])}")
+        lines.append(cue_text)
+        lines.append("")
+
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
+
+
+def _vtt_timecode(seconds: float) -> str:
+    """Convert seconds to WebVTT timecode format: MM:SS.mmm"""
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    return f"{m:02d}:{s:02d}.{ms:03d}"
+
+
+def generate_transcript_preview(
+    clip_id: str,
+    proxy_path: Path,
+    transcript: dict,
+    vtt_path: Path,
+    output_path: Path,
+) -> Path:
+    """Generate self-contained HTML preview: video with captions + clickable transcript."""
+    segments_json = json.dumps(transcript.get("segments", []))
+    proxy_rel = os.path.relpath(proxy_path, output_path.parent)
+    vtt_rel = os.path.relpath(vtt_path, output_path.parent)
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Transcript: {clip_id}</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: -apple-system, system-ui, sans-serif; background: #1a1a1a; color: #e0e0e0; }}
+.container {{ display: flex; height: 100vh; }}
+.video-panel {{ flex: 1; display: flex; flex-direction: column; padding: 16px; }}
+.video-panel h2 {{ margin-bottom: 8px; font-size: 14px; color: #888; }}
+video {{ width: 100%; max-height: 60vh; background: #000; border-radius: 8px; }}
+.info {{ margin-top: 12px; font-size: 12px; color: #666; }}
+.transcript-panel {{ width: 380px; border-left: 1px solid #333; overflow-y: auto; padding: 16px; }}
+.transcript-panel h2 {{ margin-bottom: 12px; font-size: 14px; color: #888; }}
+.seg {{ padding: 8px 10px; margin-bottom: 4px; border-radius: 6px; cursor: pointer; font-size: 13px;
+        line-height: 1.5; transition: background 0.15s; }}
+.seg:hover {{ background: #2a2a2a; }}
+.seg.active {{ background: #2d4a2d; }}
+.seg-time {{ color: #666; font-size: 11px; font-family: monospace; margin-right: 8px; }}
+.seg-speaker {{ color: #4fc3f7; font-weight: 600; }}
+.seg-type {{ color: #888; font-style: italic; }}
+.seg-music {{ color: #ce93d8; }}
+.seg-sfx {{ color: #ffb74d; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="video-panel">
+    <h2>{clip_id}</h2>
+    <video id="vid" controls>
+      <source src="{proxy_rel}" type="video/mp4">
+      <track id="captions" kind="captions" src="{vtt_rel}" srclang="en" label="Transcript" default>
+    </video>
+    <div class="info">
+      Speakers: {", ".join(transcript.get("speakers", [])) or "N/A"} |
+      Language: {transcript.get("language", "?")} |
+      Provider: {transcript.get("provider", "?")}
+    </div>
+  </div>
+  <div class="transcript-panel">
+    <h2>Transcript</h2>
+    <div id="segments"></div>
+  </div>
+</div>
+<script>
+const segments = {segments_json};
+const vid = document.getElementById('vid');
+const container = document.getElementById('segments');
+
+function fmtTime(s) {{
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m + ':' + String(sec).padStart(2, '0');
+}}
+
+segments.forEach((seg, i) => {{
+  const div = document.createElement('div');
+  div.className = 'seg';
+  div.dataset.index = i;
+
+  let content = '<span class="seg-time">' + fmtTime(seg.start) + '</span>';
+  if (seg.type === 'music') {{
+    content += '<span class="seg-music">\\u266a ' + (seg.text || 'Music') + ' \\u266a</span>';
+  }} else if (seg.type === 'sound_effect') {{
+    content += '<span class="seg-sfx">[' + (seg.text || 'sound effect') + ']</span>';
+  }} else if (seg.type === 'silence') {{
+    content += '<span class="seg-type">[silence]</span>';
+  }} else {{
+    if (seg.speaker) content += '<span class="seg-speaker">' + seg.speaker + ':</span> ';
+    content += seg.text;
+  }}
+  div.innerHTML = content;
+
+  div.onclick = () => {{ vid.currentTime = seg.start; vid.play(); }};
+  container.appendChild(div);
+}});
+
+vid.ontimeupdate = () => {{
+  const t = vid.currentTime;
+  document.querySelectorAll('.seg').forEach(el => {{
+    const i = parseInt(el.dataset.index);
+    const seg = segments[i];
+    const active = t >= seg.start && t < seg.end;
+    el.classList.toggle('active', active);
+    if (active) el.scrollIntoView({{ block: 'nearest', behavior: 'smooth' }});
+  }});
+}};
+</script>
+</body>
+</html>"""
+
+    output_path.write_text(html, encoding="utf-8")
     return output_path
 
 

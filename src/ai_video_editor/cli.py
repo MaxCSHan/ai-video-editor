@@ -451,15 +451,26 @@ def cmd_transcribe(args, cfg: Config):
     print(f"\n  {GREEN}Done.{RESET} {count}/{len(clips)} clips have speech")
 
     if getattr(args, "srt", False) and transcripts:
-        from .transcribe import generate_srt
+        from .transcribe import generate_srt, generate_vtt, generate_transcript_preview
 
-        print("\n  Generating SRT subtitles...")
+        print("\n  Generating subtitles + previews...")
         for clip_id, transcript in transcripts.items():
             clip_paths = ep.clip_paths(clip_id)
             srt_path = clip_paths.audio / f"{clip_id}.srt"
             generate_srt(transcript, srt_path)
-            print(f"    {clip_id}: {srt_path.name}")
-        print(f"  {GREEN}SRT files generated.{RESET}")
+            vtt_path = clip_paths.audio / "transcript.vtt"
+            generate_vtt(transcript, vtt_path)
+            # Generate preview if proxy exists
+            proxy_files = list(clip_paths.proxy.glob("*_proxy.mp4"))
+            if proxy_files:
+                preview_path = clip_paths.audio / "transcript_preview.html"
+                generate_transcript_preview(
+                    clip_id, proxy_files[0], transcript, vtt_path, preview_path
+                )
+                print(f"    {clip_id}: {srt_path.name}, {vtt_path.name}, {preview_path.name}")
+            else:
+                print(f"    {clip_id}: {srt_path.name}, {vtt_path.name}")
+        print(f"  {GREEN}Subtitle files generated.{RESET}")
 
 
 def cmd_analyze(args, cfg: Config):

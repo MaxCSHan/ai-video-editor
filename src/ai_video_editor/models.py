@@ -42,6 +42,26 @@ class Transcript(BaseModel):
     provider: str = "mlx"  # "mlx" | "gemini"
 
 
+# Dedicated Gemini response model — lean, no word-level detail, no mlx fields.
+# Used as response_schema for Gemini structured output. Transformed into the
+# canonical transcript.json format after receiving the response.
+
+
+class GeminiTranscriptSegment(BaseModel):
+    start: float  # seconds from clip start
+    end: float
+    text: str
+    speaker: str | None = None  # "Person_A", specific name, or None for non-speech
+    type: str = "speech"  # speech | music | sound_effect | silence
+
+
+class GeminiTranscript(BaseModel):
+    language: str
+    segments: list[GeminiTranscriptSegment]
+    speakers: list[str] = []  # unique speaker labels
+    has_speech: bool
+
+
 # ---------------------------------------------------------------------------
 # Editorial storyboard models
 # ---------------------------------------------------------------------------
