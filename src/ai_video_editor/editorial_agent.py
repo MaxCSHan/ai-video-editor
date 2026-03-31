@@ -24,6 +24,7 @@ from .versioning import (
     next_version,
     current_version,
     versioned_path,
+    versioned_dir,
     update_latest_symlink,
 )
 from .preprocess import (
@@ -89,6 +90,7 @@ def _preprocess_single_clip(
     return {
         "clip_id": clip_id,
         "filename": clip_file.name,
+        "source_path": str(clip_file.resolve()),
         "duration_sec": video_info["duration_sec"],
         "width": video_info["width"],
         "height": video_info["height"],
@@ -431,15 +433,16 @@ def run_phase2(
     md_path.write_text(render_markdown(storyboard))
     update_latest_symlink(md_path)
 
-    # 3. Rendered: HTML preview
-    preview_path = versioned_path(editorial_paths.storyboard / f"{base}_preview.html", v)
+    # 3. Rendered: HTML preview (in versioned exports dir)
+    export_dir = versioned_dir(editorial_paths.exports, v)
     html = render_html_preview(
         storyboard,
         clips_dir=editorial_paths.clips_dir,
-        output_dir=editorial_paths.storyboard,
+        output_dir=export_dir,
     )
+    preview_path = export_dir / "preview.html"
     preview_path.write_text(html)
-    update_latest_symlink(preview_path)
+    update_latest_symlink(export_dir)
 
     print(f"  v{v} outputs:")
     print(f"    JSON:    {json_path}")

@@ -49,11 +49,13 @@ def get_video_info(video_path: Path) -> dict:
 
 
 def ingest_source(video_path: Path, paths: ProjectPaths) -> Path:
-    """Copy or link source footage into the project's source/ directory."""
-    import shutil
+    """Symlink source footage into the project's source/ directory.
+
+    Uses a symlink instead of copying to avoid duplicating large 4K files.
+    """
     dest = paths.source / video_path.name
     if not dest.exists():
-        shutil.copy2(video_path, dest)
+        dest.symlink_to(video_path.resolve())
     return dest
 
 

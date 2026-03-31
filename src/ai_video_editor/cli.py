@@ -296,11 +296,16 @@ def cmd_status(args, cfg: Config):
         if exports_dir.exists():
             cut_dirs = sorted(d for d in exports_dir.iterdir() if d.is_dir() and d.name.startswith("v"))
             if cut_dirs:
-                _header("Cuts")
+                _header("Exports")
                 for d in cut_dirs:
                     has_video = (d / "rough_cut.mp4").exists()
                     has_preview = (d / "preview.html").exists()
-                    status = f"{GREEN}video+preview{RESET}" if (has_video and has_preview) else f"{YELLOW}partial{RESET}"
+                    if has_video and has_preview:
+                        status = f"{GREEN}video+preview{RESET}"
+                    elif has_preview:
+                        status = f"{CYAN}preview{RESET}"
+                    else:
+                        status = f"{DIM}empty{RESET}"
                     print(f"  {d.name}: {status}")
 
     else:  # descriptive

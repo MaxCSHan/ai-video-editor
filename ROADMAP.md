@@ -63,6 +63,13 @@
 - [x] Short segment warnings (<0.5s)
 - [x] Warnings section in HTML preview
 
+### Housekeeping
+- [x] `ingest_source()` uses symlink instead of copying 4K files
+- [x] Original source path stored in clip metadata (`manifest.json`); `rough_cut.py` resolves from manifest with legacy fallback
+- [x] Per-clip `storyboard/` and `exports/` dirs no longer created — `ProjectPaths.ensure_dirs()` trimmed to per-clip concerns only
+- [x] Consolidated HTML preview into `exports/vN/preview.html` — removed duplicate from `storyboard/`
+- [x] Cut writes into the analyze version's export dir (derived from storyboard JSON filename) instead of maintaining a separate version counter
+
 ---
 
 ## In Progress

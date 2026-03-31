@@ -87,8 +87,9 @@ class ProjectPaths:
         return self.root / "exports"
 
     def ensure_dirs(self):
+        """Create per-clip working dirs. Storyboard/exports are project-level concerns."""
         for p in [self.source, self.proxy, self.frames, self.scenes,
-                   self.audio, self.review, self.storyboard, self.exports]:
+                   self.audio, self.review]:
             p.mkdir(parents=True, exist_ok=True)
 
     def has_source(self) -> bool:

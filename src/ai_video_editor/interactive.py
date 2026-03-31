@@ -215,7 +215,7 @@ def _project_actions(name, cfg):
     while True:
         # Check state
         has_storyboard = any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
-        has_preview = any(ep.storyboard.glob("*_preview.html")) if ep.storyboard.exists() else False
+        has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
         has_rough_cut = any(ep.exports.glob("*/rough_cut.mp4")) if ep.exports.exists() else False
 
         choices = []
@@ -240,9 +240,12 @@ def _project_actions(name, cfg):
         if action is None or action == "back":
             break
         elif action == "Open preview in browser":
-            previews = sorted(ep.storyboard.glob("*_preview*.html"), reverse=True)
-            if previews:
-                subprocess.run(["open", str(previews[0])])
+            # Find latest preview in exports/
+            latest_export = ep.exports / "latest"
+            if latest_export.exists():
+                preview = latest_export / "preview.html"
+                if preview.exists():
+                    subprocess.run(["open", str(preview)])
         elif action == "Open rough cut video":
             cuts = sorted(ep.exports.glob("*/rough_cut.mp4"), reverse=True)
             if cuts:
