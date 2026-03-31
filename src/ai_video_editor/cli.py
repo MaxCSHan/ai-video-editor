@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from .config import (
@@ -35,6 +36,7 @@ from .storyboard_format import format_duration
 # ---------------------------------------------------------------------------
 # Project metadata (project.json in each project root)
 # ---------------------------------------------------------------------------
+
 
 def _project_meta_path(project_root: Path) -> Path:
     return project_root / "project.json"
@@ -108,6 +110,7 @@ def _header(text: str):
 # Commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_new(args, cfg: Config):
     """Create a new project from footage."""
     name = args.name
@@ -124,7 +127,9 @@ def cmd_new(args, cfg: Config):
 
     project_root = cfg.library_dir / name
     if project_root.exists() and _read_project_meta(project_root):
-        print(f"{YELLOW}Project '{name}' already exists.{RESET} Use {BOLD}vx analyze {name}{RESET} to re-run.")
+        print(
+            f"{YELLOW}Project '{name}' already exists.{RESET} Use {BOLD}vx analyze {name}{RESET} to re-run."
+        )
         sys.exit(1)
 
     _header(f"Creating {project_type} project: {name}")
@@ -135,7 +140,11 @@ def cmd_new(args, cfg: Config):
 
     # Create project structure
     if project_type == "editorial":
-        from .editorial_agent import discover_source_clips, preprocess_all_clips, build_master_manifest
+        from .editorial_agent import (
+            discover_source_clips,
+            preprocess_all_clips,
+            build_master_manifest,
+        )
 
         ep = cfg.editorial_project(name)
         ep.ensure_dirs()
@@ -184,11 +193,15 @@ def cmd_new(args, cfg: Config):
         result = run_full_preprocess(source, pp, cfg.preprocess)
         info = result["video_info"]
         print(f"  Duration: {BOLD}{format_duration(info['duration_sec'])}{RESET}")
-        print(f"  Proxy:    {result['proxy_path']} ({result['proxy_path'].stat().st_size / 1024 / 1024:.1f} MB)")
+        print(
+            f"  Proxy:    {result['proxy_path']} ({result['proxy_path'].stat().st_size / 1024 / 1024:.1f} MB)"
+        )
         print(f"  Frames:   {len(result['frames_manifest']['frames'])}")
         print(f"  Scenes:   {len(result['scenes'])}")
 
-    print(f"\n{GREEN}Project created.{RESET} Run {BOLD}vx analyze {name}{RESET} to generate the storyboard.")
+    print(
+        f"\n{GREEN}Project created.{RESET} Run {BOLD}vx analyze {name}{RESET} to generate the storyboard."
+    )
 
 
 def cmd_projects(args, cfg: Config):
@@ -198,8 +211,7 @@ def cmd_projects(args, cfg: Config):
         return
 
     projects = sorted(
-        d for d in cfg.library_dir.iterdir()
-        if d.is_dir() and _project_meta_path(d).exists()
+        d for d in cfg.library_dir.iterdir() if d.is_dir() and _project_meta_path(d).exists()
     )
 
     if not projects:
@@ -228,7 +240,9 @@ def cmd_projects(args, cfg: Config):
         status = f"{GREEN}done{RESET}" if has_storyboard else f"{YELLOW}pending{RESET}"
 
         print(f"  {BOLD}{meta['name']}{RESET}")
-        print(f"    {_tag(ptype)} {DIM}|{RESET} {label} {DIM}|{RESET} {provider} {DIM}|{RESET} {status} {DIM}|{RESET} {DIM}{created}{RESET}")
+        print(
+            f"    {_tag(ptype)} {DIM}|{RESET} {label} {DIM}|{RESET} {provider} {DIM}|{RESET} {status} {DIM}|{RESET} {DIM}{created}{RESET}"
+        )
         print()
 
 
@@ -267,11 +281,13 @@ def cmd_status(args, cfg: Config):
             provider = meta.get("provider", "gemini")
             reviewed = cp.has_review(provider)
 
+            has_transcript = cp.has_transcript()
             status_parts = [
                 f"proxy:{_check(cache['proxy'])}",
                 f"frames:{_check(cache['frames'])}",
                 f"scenes:{_check(cache['scenes'])}",
                 f"audio:{_check(cache['audio'])}",
+                f"transcript:{_check(has_transcript)}",
                 f"review:{_check(reviewed)}",
             ]
             print(f"  {clip_id}  {' '.join(status_parts)}")
@@ -279,9 +295,13 @@ def cmd_status(args, cfg: Config):
         # Storyboard status
         _header("Storyboard")
         storyboard_dir = ep.storyboard
-        md_files = sorted(storyboard_dir.glob("editorial_*_v*.md")) if storyboard_dir.exists() else []
+        md_files = (
+            sorted(storyboard_dir.glob("editorial_*_v*.md")) if storyboard_dir.exists() else []
+        )
         if not md_files:
-            md_files = list(storyboard_dir.glob("editorial_*.md")) if storyboard_dir.exists() else []
+            md_files = (
+                list(storyboard_dir.glob("editorial_*.md")) if storyboard_dir.exists() else []
+            )
         if md_files:
             for f in md_files:
                 if f.is_symlink():
@@ -294,7 +314,9 @@ def cmd_status(args, cfg: Config):
         # Exports/cuts status
         exports_dir = ep.exports
         if exports_dir.exists():
-            cut_dirs = sorted(d for d in exports_dir.iterdir() if d.is_dir() and d.name.startswith("v"))
+            cut_dirs = sorted(
+                d for d in exports_dir.iterdir() if d.is_dir() and d.name.startswith("v")
+            )
             if cut_dirs:
                 _header("Exports")
                 for d in cut_dirs:
@@ -335,13 +357,19 @@ def cmd_preprocess(args, cfg: Config):
     project_root = cfg.library_dir / name
     meta = _read_project_meta(project_root)
     if not meta:
-        print(f"{RED}Error:{RESET} Project '{name}' not found. Create it with: vx new {name} <source>")
+        print(
+            f"{RED}Error:{RESET} Project '{name}' not found. Create it with: vx new {name} <source>"
+        )
         sys.exit(1)
 
     _header(f"Preprocessing: {name}")
 
     if meta["type"] == "editorial":
-        from .editorial_agent import discover_source_clips, preprocess_all_clips, build_master_manifest
+        from .editorial_agent import (
+            discover_source_clips,
+            preprocess_all_clips,
+            build_master_manifest,
+        )
 
         ep = cfg.editorial_project(name)
         source_dir = Path(meta["source_dir"])
@@ -356,6 +384,60 @@ def cmd_preprocess(args, cfg: Config):
         source_file = Path(meta["source_file"])
         run_full_preprocess(source_file, pp, cfg.preprocess)
         print(f"\n  {GREEN}Done.{RESET}")
+
+
+def cmd_transcribe(args, cfg: Config):
+    """Run audio transcription on all clips (requires mlx-whisper)."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} 'vx transcribe' is only for editorial projects.")
+        sys.exit(1)
+
+    try:
+        import mlx_whisper  # noqa: F401
+    except ImportError:
+        print(f"{RED}Error:{RESET} mlx-whisper not installed. Run: uv pip install -e '.[whisper]'")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+    clips = ep.discover_clips()
+    if not clips:
+        print(f"{RED}Error:{RESET} No clips found in project '{name}'.")
+        sys.exit(1)
+
+    _header(f"Transcribing: {name} ({len(clips)} clips)")
+
+    from .editorial_agent import transcribe_all_clips
+
+    transcripts = transcribe_all_clips(
+        [{"clip_id": cid} for cid in clips],
+        ep,
+        cfg.transcribe,
+    )
+
+    count = len(transcripts)
+    print(f"\n  {GREEN}Done.{RESET} {count}/{len(clips)} clips have speech")
+
+    if getattr(args, "srt", False) and transcripts:
+        from .transcribe import generate_srt
+
+        print("\n  Generating SRT subtitles...")
+        for clip_id, transcript in transcripts.items():
+            clip_paths = ep.clip_paths(clip_id)
+            srt_path = clip_paths.audio / f"{clip_id}.srt"
+            generate_srt(transcript, srt_path)
+            print(f"    {clip_id}: {srt_path.name}")
+        print(f"  {GREEN}SRT files generated.{RESET}")
 
 
 def cmd_analyze(args, cfg: Config):
@@ -382,8 +464,8 @@ def cmd_analyze(args, cfg: Config):
         source_dir = Path(meta["source_dir"])
         style = meta.get("style", ws.get("style", "vlog"))
 
-        force = getattr(args, 'force', False)
-        interactive = not getattr(args, 'no_interactive', False)
+        force = getattr(args, "force", False)
+        interactive = not getattr(args, "no_interactive", False)
         output_path = run_editorial_pipeline(
             source_dir=source_dir,
             project_name=name,
@@ -482,7 +564,9 @@ def cmd_brief(args, cfg: Config):
         print(f"  {GREEN}Context saved ({len(answers)} fields):{RESET}")
         for k, v in answers.items():
             print(f"    {CYAN}{k}{RESET}: {v[:80]}{'...' if len(v) > 80 else ''}")
-        print(f"\n  Now run {BOLD}vx analyze {name}{RESET} to generate the storyboard with this context.")
+        print(
+            f"\n  Now run {BOLD}vx analyze {name}{RESET} to generate the storyboard with this context."
+        )
     else:
         print(f"  {DIM}No answers provided.{RESET}")
 
@@ -523,7 +607,9 @@ def cmd_preview(args, cfg: Config):
 
     json_path = _find_storyboard_json(ep)
     if not json_path:
-        print(f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first.")
+        print(
+            f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first."
+        )
         sys.exit(1)
 
     _header(f"Preview: {name}")
@@ -581,7 +667,9 @@ def cmd_cut(args, cfg: Config):
 
     json_path = _find_storyboard_json(ep)
     if not json_path:
-        print(f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first.")
+        print(
+            f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first."
+        )
         sys.exit(1)
 
     _header(f"Rough Cut: {name}")
@@ -634,13 +722,23 @@ def cmd_config(args, cfg: Config):
     _header("API Keys")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    print(f"  GEMINI_API_KEY:    {GREEN}set{RESET}" if gemini_key else f"  GEMINI_API_KEY:    {RED}not set{RESET}")
-    print(f"  ANTHROPIC_API_KEY: {GREEN}set{RESET}" if anthropic_key else f"  ANTHROPIC_API_KEY: {RED}not set{RESET}")
+    print(
+        f"  GEMINI_API_KEY:    {GREEN}set{RESET}"
+        if gemini_key
+        else f"  GEMINI_API_KEY:    {RED}not set{RESET}"
+    )
+    print(
+        f"  ANTHROPIC_API_KEY: {GREEN}set{RESET}"
+        if anthropic_key
+        else f"  ANTHROPIC_API_KEY: {RED}not set{RESET}"
+    )
 
     # Show preprocessing defaults
     _header("Preprocessing")
     pc = cfg.preprocess
-    print(f"  Proxy:     {pc.proxy_width}x{pc.proxy_height} @ {pc.proxy_fps}fps, CRF {pc.proxy_crf}")
+    print(
+        f"  Proxy:     {pc.proxy_width}x{pc.proxy_height} @ {pc.proxy_fps}fps, CRF {pc.proxy_crf}"
+    )
     print(f"  Frames:    every {pc.frame_interval_sec}s @ {pc.frame_width}x{pc.frame_height}")
     print(f"  Scene:     threshold {pc.scene_threshold}")
 
@@ -649,13 +747,13 @@ def cmd_config(args, cfg: Config):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _infer_project(cfg: Config) -> str | None:
     """Try to infer project name from the most recently modified project."""
     if not cfg.library_dir.exists():
         return None
     projects = [
-        d for d in cfg.library_dir.iterdir()
-        if d.is_dir() and _project_meta_path(d).exists()
+        d for d in cfg.library_dir.iterdir() if d.is_dir() and _project_meta_path(d).exists()
     ]
     if len(projects) == 1:
         return projects[0].name
@@ -665,6 +763,7 @@ def _infer_project(cfg: Config) -> str | None:
 # ---------------------------------------------------------------------------
 # Main CLI parser
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -705,12 +804,23 @@ def main():
     p_prep = sub.add_parser("preprocess", aliases=["prep"], help="Run preprocessing only")
     p_prep.add_argument("project", nargs="?", help="Project name")
 
+    # --- transcribe ---
+    p_transcribe = sub.add_parser(
+        "transcribe", help="Run audio transcription (requires mlx-whisper)"
+    )
+    p_transcribe.add_argument("project", nargs="?", help="Project name")
+    p_transcribe.add_argument("--srt", action="store_true", help="Also generate SRT subtitle files")
+
     # --- analyze ---
     p_analyze = sub.add_parser("analyze", aliases=["run"], help="Run AI analysis")
     p_analyze.add_argument("project", nargs="?", help="Project name")
     p_analyze.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
-    p_analyze.add_argument("--force", action="store_true", help="Re-run Phase 1 reviews (ignore cache)")
-    p_analyze.add_argument("--no-interactive", action="store_true", help="Skip the editorial briefing questions")
+    p_analyze.add_argument(
+        "--force", action="store_true", help="Re-run Phase 1 reviews (ignore cache)"
+    )
+    p_analyze.add_argument(
+        "--no-interactive", action="store_true", help="Skip the editorial briefing questions"
+    )
 
     # --- brief ---
     p_brief = sub.add_parser("brief", help="Edit the editorial briefing (opens $EDITOR)")
@@ -721,7 +831,9 @@ def main():
     p_preview.add_argument("project", nargs="?", help="Project name")
 
     # --- cut ---
-    p_cut = sub.add_parser("cut", help="Assemble rough cut video (no LLM — uses structured JSON from analyze)")
+    p_cut = sub.add_parser(
+        "cut", help="Assemble rough cut video (no LLM — uses structured JSON from analyze)"
+    )
     p_cut.add_argument("project", nargs="?", help="Project name")
 
     # --- config ---
@@ -735,6 +847,7 @@ def main():
     if not args.command:
         # No subcommand → launch interactive mode
         from .interactive import run_interactive
+
         run_interactive()
         sys.exit(0)
 
@@ -745,6 +858,7 @@ def main():
         "status": cmd_status,
         "preprocess": cmd_preprocess,
         "prep": cmd_preprocess,
+        "transcribe": cmd_transcribe,
         "analyze": cmd_analyze,
         "run": cmd_analyze,
         "brief": cmd_brief,

@@ -85,14 +85,29 @@ CRITICAL: Pay close attention to the PEOPLE in the footage. Use consistent label
 
 
 def build_clip_review_prompt(
-    clip_id: str, filename: str, duration_sec: float, resolution: str
+    clip_id: str,
+    filename: str,
+    duration_sec: float,
+    resolution: str,
+    transcript_text: str | None = None,
 ) -> str:
-    return CLIP_REVIEW_PROMPT.format(
+    prompt = CLIP_REVIEW_PROMPT.format(
         clip_id=clip_id,
         filename=filename,
         duration=format_duration(duration_sec),
         resolution=resolution,
     )
+    if transcript_text:
+        prompt += (
+            "\n\nAudio Transcript (from speech-to-text):\n"
+            "---\n"
+            f"{transcript_text}\n"
+            "---\n"
+            "Use this transcript to fill in the audio section accurately. "
+            "The speech_summary should reflect actual dialogue. "
+            "Match speech timestamps to key_moments and usable_segments."
+        )
+    return prompt
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +152,12 @@ def build_editorial_assembly_prompt(
     style: str,
     clip_count: int,
     total_duration_sec: float,
+    transcripts: dict[str, str] | None = None,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
     clip_ids = [r.get("clip_id", "unknown") for r in clip_reviews]
     example_clip_id = clip_ids[0] if clip_ids else "vid_001"
-    return EDITORIAL_ASSEMBLY_PROMPT.format(
+    prompt = EDITORIAL_ASSEMBLY_PROMPT.format(
         project_name=project_name,
         clip_count=clip_count,
         total_duration=format_duration(total_duration_sec),
@@ -150,11 +166,26 @@ def build_editorial_assembly_prompt(
         example_clip_id=example_clip_id,
         style=style,
     )
+    if transcripts:
+        sections = []
+        for clip_id, text in transcripts.items():
+            sections.append(f"### {clip_id}\n{text}")
+        prompt += (
+            "\n\n---\n\n"
+            "Audio Transcripts (speech-to-text):\n\n" + "\n\n".join(sections) + "\n\n---\n\n"
+            "Use these transcripts for editorial decisions:\n"
+            "- Identify dialogue-driven segments that should be preserved intact\n"
+            "- Find natural speech breaks for cut points\n"
+            "- Use dialogue content to drive narrative arc and story concept\n"
+            "- Note where speech and visuals complement or contrast each other"
+        )
+    return prompt
 
 
 # ---------------------------------------------------------------------------
 # JSON parsing helper
 # ---------------------------------------------------------------------------
+
 
 def parse_clip_review(response_text: str) -> dict:
     """Extract a JSON object from an AI response, handling code fences and surrounding text."""

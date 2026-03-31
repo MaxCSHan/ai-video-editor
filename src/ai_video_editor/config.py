@@ -49,8 +49,16 @@ class GeminiConfig:
 
 
 @dataclass
+class TranscribeConfig:
+    model: str = "mlx-community/whisper-large-v3-turbo"
+    word_timestamps: bool = True
+    language: str | None = None  # None = auto-detect
+
+
+@dataclass
 class ProjectPaths:
     """Per-project (or per-clip) directory layout."""
+
     root: Path
 
     @property
@@ -88,8 +96,7 @@ class ProjectPaths:
 
     def ensure_dirs(self):
         """Create per-clip working dirs. Storyboard/exports are project-level concerns."""
-        for p in [self.source, self.proxy, self.frames, self.scenes,
-                   self.audio, self.review]:
+        for p in [self.source, self.proxy, self.frames, self.scenes, self.audio, self.review]:
             p.mkdir(parents=True, exist_ok=True)
 
     def has_source(self) -> bool:
@@ -110,6 +117,9 @@ class ProjectPaths:
     def has_review(self, provider: str = "gemini") -> bool:
         return (self.review / f"review_{provider}.json").exists()
 
+    def has_transcript(self) -> bool:
+        return (self.audio / "transcript.json").exists()
+
     def cache_status(self) -> dict[str, bool]:
         return {
             "source": self.has_source(),
@@ -123,6 +133,7 @@ class ProjectPaths:
 @dataclass
 class EditorialProjectPaths:
     """Multi-clip editorial project layout."""
+
     root: Path
 
     @property
@@ -151,8 +162,7 @@ class EditorialProjectPaths:
         if not self.clips_dir.exists():
             return []
         return sorted(
-            d.name for d in self.clips_dir.iterdir()
-            if d.is_dir() and (d / "source").exists()
+            d.name for d in self.clips_dir.iterdir() if d.is_dir() and (d / "source").exists()
         )
 
     def ensure_dirs(self):
@@ -163,6 +173,7 @@ class EditorialProjectPaths:
 @dataclass
 class Config:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    transcribe: TranscribeConfig = field(default_factory=TranscribeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     library_dir: Path = field(default_factory=lambda: LIBRARY_DIR)

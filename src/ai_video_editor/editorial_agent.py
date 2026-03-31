@@ -13,6 +13,7 @@ from .config import (
     EditorialProjectPaths,
     GeminiConfig,
     PreprocessConfig,
+    TranscribeConfig,
     DEFAULT_CONFIG,
 )
 from .editorial_prompts import (
@@ -42,11 +43,14 @@ from .storyboard_format import format_duration
 # Clip discovery
 # ---------------------------------------------------------------------------
 
+
 def discover_source_clips(source_dir: Path) -> list[Path]:
     """Find all video files in a directory, sorted by name."""
     clips = [
-        f for f in sorted(source_dir.iterdir())
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        f
+        for f in sorted(source_dir.iterdir())
+        if f.is_file()
+        and f.suffix.lower() in VIDEO_EXTENSIONS
         and not f.name.startswith("._")  # macOS resource fork files
     ]
     return clips
@@ -55,6 +59,7 @@ def discover_source_clips(source_dir: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Multi-clip preprocessing
 # ---------------------------------------------------------------------------
+
 
 def _preprocess_single_clip(
     clip_file: Path,
@@ -157,8 +162,116 @@ def build_master_manifest(
 
 
 # ---------------------------------------------------------------------------
+# Transcription (optional — requires mlx-whisper)
+# ---------------------------------------------------------------------------
+
+MAX_TRANSCRIBE_WORKERS = 2  # Whisper uses ~3GB RAM per instance
+
+
+def _transcribe_single_clip(
+    clip_id: str,
+    editorial_paths: EditorialProjectPaths,
+    cfg: TranscribeConfig,
+    index: int,
+    total: int,
+) -> tuple[str, dict | None]:
+    """Transcribe a single clip's audio. Returns (clip_id, transcript_dict)."""
+    from .transcribe import transcribe_clip
+
+    clip_paths = editorial_paths.clip_paths(clip_id)
+    label = f"[{index}/{total}] {clip_id}"
+
+    if clip_paths.has_transcript():
+        print(f"  {label}: transcript cached")
+        transcript_path = clip_paths.audio / "transcript.json"
+        return clip_id, json.loads(transcript_path.read_text())
+
+    # Find the audio WAV file
+    wav_files = list(clip_paths.audio.glob("*.wav"))
+    if not wav_files:
+        print(f"  {label}: no audio found, skipping")
+        return clip_id, None
+
+    print(f"  {label}: transcribing...")
+    transcript = transcribe_clip(wav_files[0], clip_paths, cfg)
+    if transcript:
+        speech = "speech" if transcript.get("has_speech") else "no speech"
+        print(f"  {label}: done ({speech})")
+    return clip_id, transcript
+
+
+def transcribe_all_clips(
+    clip_metadata: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    cfg: TranscribeConfig,
+) -> dict[str, dict]:
+    """Transcribe all clips in parallel. Returns {clip_id: transcript_dict}."""
+    total = len(clip_metadata)
+    results = {}
+
+    with ThreadPoolExecutor(max_workers=MAX_TRANSCRIBE_WORKERS) as pool:
+        futures = {}
+        for i, clip_info in enumerate(clip_metadata):
+            fut = pool.submit(
+                _transcribe_single_clip,
+                clip_info["clip_id"],
+                editorial_paths,
+                cfg,
+                i + 1,
+                total,
+            )
+            futures[fut] = clip_info["clip_id"]
+
+        for fut in as_completed(futures):
+            clip_id = futures[fut]
+            try:
+                _, transcript = fut.result()
+                if transcript:
+                    results[clip_id] = transcript
+            except Exception as e:
+                print(f"  ERROR transcribing {clip_id}: {e}")
+
+    return results
+
+
+def _load_transcript_for_prompt(clip_paths) -> str | None:
+    """Load and format a clip's transcript for LLM prompt injection."""
+    transcript_path = clip_paths.audio / "transcript.json"
+    if not transcript_path.exists():
+        return None
+    from .transcribe import format_transcript_for_prompt
+
+    transcript = json.loads(transcript_path.read_text())
+    if not transcript.get("has_speech"):
+        return None
+    return format_transcript_for_prompt(transcript)
+
+
+def _load_all_transcripts_for_prompt(
+    clip_reviews: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    max_chars_per_clip: int = 2000,
+) -> dict[str, str] | None:
+    """Load formatted transcripts for all clips. Returns {clip_id: text} or None."""
+    from .transcribe import format_transcript_for_prompt
+
+    transcripts = {}
+    for review in clip_reviews:
+        clip_id = review.get("clip_id", "")
+        clip_paths = editorial_paths.clip_paths(clip_id)
+        transcript_path = clip_paths.audio / "transcript.json"
+        if transcript_path.exists():
+            t = json.loads(transcript_path.read_text())
+            if t.get("has_speech"):
+                transcripts[clip_id] = format_transcript_for_prompt(t, max_chars_per_clip)
+
+    return transcripts if transcripts else None
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 — Per-clip review
 # ---------------------------------------------------------------------------
+
 
 def _review_single_clip_gemini(
     clip_info: dict,
@@ -198,21 +311,27 @@ def _review_single_clip_gemini(
         print(f"  {label}: WARNING — Gemini processing failed, skipping")
         return None
 
+    # Load transcript if available
+    transcript_text = _load_transcript_for_prompt(clip_paths)
+
     prompt = build_clip_review_prompt(
         clip_id=clip_id,
         filename=clip_info["filename"],
         duration_sec=clip_info["duration_sec"],
         resolution=clip_info["resolution"],
+        transcript_text=transcript_text,
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
     response = client.models.generate_content(
         model=cfg.model,
         contents=[
-            types.Content(parts=[
-                types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
-                types.Part.from_text(text=prompt),
-            ])
+            types.Content(
+                parts=[
+                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                    types.Part.from_text(text=prompt),
+                ]
+            )
         ],
         config=types.GenerateContentConfig(temperature=cfg.temperature),
     )
@@ -242,7 +361,12 @@ def run_phase1_gemini(
         for i, clip_info in enumerate(clips):
             fut = pool.submit(
                 _review_single_clip_gemini,
-                clip_info, editorial_paths, cfg, force, i + 1, total,
+                clip_info,
+                editorial_paths,
+                cfg,
+                force,
+                i + 1,
+                total,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -285,11 +409,11 @@ def run_phase1_claude(
         legacy_review = clip_paths.review / "review_claude.json"
         if not force and (latest_review.exists() or legacy_review.exists()):
             cached = latest_review if latest_review.exists() else legacy_review
-            print(f"  [{i+1}/{manifest['clip_count']}] {clip_id}: review cached")
+            print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
             reviews.append(json.loads(cached.read_text()))
             continue
 
-        print(f"  [{i+1}/{manifest['clip_count']}] {clip_id}: loading frames...")
+        print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: loading frames...")
         frames_manifest_path = clip_paths.frames / "manifest.json"
         if not frames_manifest_path.exists():
             print(f"    WARNING: No frames for {clip_id}, skipping")
@@ -298,23 +422,29 @@ def run_phase1_claude(
 
         # Build image content — send all frames (or first batch if too many)
         all_frames = frames_manifest["frames"]
-        frames_to_send = all_frames[:cfg.max_images_per_batch]
+        frames_to_send = all_frames[: cfg.max_images_per_batch]
 
         content = []
         for frame in frames_to_send:
             img_path = clip_paths.frames / frame["file"]
             img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode("utf-8")
             content.append({"type": "text", "text": f"[{frame['timestamp_fmt']}]"})
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-            })
+            content.append(
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
+                }
+            )
+
+        # Load transcript if available
+        transcript_text = _load_transcript_for_prompt(clip_paths)
 
         prompt = build_clip_review_prompt(
             clip_id=clip_id,
             filename=clip_info["filename"],
             duration_sec=clip_info["duration_sec"],
             resolution=clip_info["resolution"],
+            transcript_text=transcript_text,
         )
         content.append({"type": "text", "text": prompt})
 
@@ -341,6 +471,7 @@ def run_phase1_claude(
 # Phase 2 — Editorial assembly
 # ---------------------------------------------------------------------------
 
+
 def run_phase2(
     clip_reviews: list[dict],
     editorial_paths: EditorialProjectPaths,
@@ -361,10 +492,10 @@ def run_phase2(
         for r in clip_reviews
     )
     if total_duration == 0:
-        total_duration = sum(
-            r.get("duration_sec", 0) for r in clip_reviews
-            if "duration_sec" in r
-        )
+        total_duration = sum(r.get("duration_sec", 0) for r in clip_reviews if "duration_sec" in r)
+
+    # Load transcripts for all clips
+    transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
     prompt = build_editorial_assembly_prompt(
         project_name=project_name,
@@ -372,6 +503,7 @@ def run_phase2(
         style=style,
         clip_count=len(clip_reviews),
         total_duration_sec=total_duration,
+        transcripts=transcripts,
     )
 
     # Inject user context if provided
@@ -405,7 +537,13 @@ def run_phase2(
             model=claude_cfg.model,
             max_tokens=claude_cfg.max_tokens * 2,
             temperature=claude_cfg.temperature,
-            messages=[{"role": "user", "content": prompt + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema."}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                    + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
+                }
+            ],
         )
         text = response.content[0].text.strip()
         if text.startswith("```"):
@@ -489,6 +627,7 @@ def _resolve_clip_id_refs(storyboard, known_ids: set[str]):
 # Full pipeline
 # ---------------------------------------------------------------------------
 
+
 def run_editorial_pipeline(
     source_dir: Path,
     project_name: str,
@@ -520,6 +659,17 @@ def run_editorial_pipeline(
     total_dur = format_duration(manifest["total_duration_sec"])
     print(f"  Total raw footage: {total_dur}")
 
+    # Transcription (optional — requires mlx-whisper)
+    try:
+        import mlx_whisper  # noqa: F401
+
+        print("  Transcribing audio (mlx-whisper)...")
+        transcripts = transcribe_all_clips(clip_metadata, editorial_paths, cfg.transcribe)
+        count = len(transcripts)
+        print(f"  Transcribed {count}/{len(clip_metadata)} clips with speech")
+    except ImportError:
+        print("  Skipping transcription (install with: uv pip install -e '.[whisper]')")
+
     # Phase 1 — per-clip reviews
     print(f"[3/4] Phase 1: Reviewing clips with {provider}...")
     if provider == "gemini":
@@ -534,6 +684,7 @@ def run_editorial_pipeline(
     user_context = None
     if interactive:
         from .briefing import run_briefing
+
         user_context = run_briefing(reviews, style, editorial_paths.root)
 
     # Phase 2 — editorial assembly

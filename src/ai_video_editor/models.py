@@ -10,6 +10,39 @@ These models are used for:
 from pydantic import BaseModel
 
 
+# ---------------------------------------------------------------------------
+# Transcript models (from mlx-whisper speech-to-text)
+# ---------------------------------------------------------------------------
+
+
+class TranscriptWord(BaseModel):
+    word: str
+    start: float
+    end: float
+
+
+class TranscriptSegment(BaseModel):
+    start: float
+    end: float
+    text: str
+    words: list[TranscriptWord] = []
+
+
+class Transcript(BaseModel):
+    source_audio: str
+    model: str
+    language: str
+    text: str
+    segments: list[TranscriptSegment]
+    duration_sec: float
+    has_speech: bool
+
+
+# ---------------------------------------------------------------------------
+# Editorial storyboard models
+# ---------------------------------------------------------------------------
+
+
 class CastMember(BaseModel):
     name: str
     description: str
