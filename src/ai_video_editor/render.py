@@ -10,11 +10,21 @@ from .storyboard_format import format_duration
 
 
 PURPOSE_COLORS = {
-    "hook": "#e74c3c", "establish": "#2c3e50", "context": "#2980b9",
-    "action": "#e67e22", "reaction": "#f39c12", "b_roll": "#7f8c8d",
-    "cutaway": "#95a5a6", "climax": "#c0392b", "payoff": "#27ae60",
-    "reflection": "#16a085", "outro": "#8e44ad", "stakes": "#d35400",
-    "build_up": "#f1c40f", "tension": "#e74c3c", "intro": "#3498db",
+    "hook": "#e74c3c",
+    "establish": "#2c3e50",
+    "context": "#2980b9",
+    "action": "#e67e22",
+    "reaction": "#f39c12",
+    "b_roll": "#7f8c8d",
+    "cutaway": "#95a5a6",
+    "climax": "#c0392b",
+    "payoff": "#27ae60",
+    "reflection": "#16a085",
+    "outro": "#8e44ad",
+    "stakes": "#d35400",
+    "build_up": "#f1c40f",
+    "tension": "#e74c3c",
+    "intro": "#3498db",
 }
 
 
@@ -22,11 +32,16 @@ PURPOSE_COLORS = {
 # Markdown rendering
 # ---------------------------------------------------------------------------
 
+
 def render_markdown(sb: EditorialStoryboard) -> str:
     lines = []
     lines.append(f"# {sb.title}")
-    lines.append(f"**Estimated final cut**: {format_duration(sb.estimated_duration_sec)} | **Style**: {sb.style}")
-    lines.append(f"**Segments**: {len(sb.segments)} | **Total segment time**: {format_duration(sb.total_segments_duration)}")
+    lines.append(
+        f"**Estimated final cut**: {format_duration(sb.estimated_duration_sec)} | **Style**: {sb.style}"
+    )
+    lines.append(
+        f"**Segments**: {len(sb.segments)} | **Total segment time**: {format_duration(sb.total_segments_duration)}"
+    )
     lines.append("")
     lines.append("## Story Concept")
     lines.append(sb.story_concept)
@@ -82,13 +97,26 @@ def render_markdown(sb: EditorialStoryboard) -> str:
 # HTML preview — interactive with video playback and range editing
 # ---------------------------------------------------------------------------
 
+
 def _extract_thumbnail(source_path: Path, timestamp_sec: float, output_path: Path) -> bool:
     if output_path.exists():
         return True
     result = subprocess.run(
-        ["ffmpeg", "-y", "-ss", str(timestamp_sec), "-i", str(source_path),
-         "-frames:v", "1", "-q:v", "5", str(output_path)],
-        capture_output=True, text=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(timestamp_sec),
+            "-i",
+            str(source_path),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "5",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
     )
     return result.returncode == 0
 
@@ -118,9 +146,12 @@ def _get_clip_duration(clip_id: str, clips_dir: Path) -> float:
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(source)],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         import json as _json
+
         return float(_json.loads(result.stdout)["format"]["duration"])
     except Exception:
         return 0
@@ -138,8 +169,9 @@ def render_html_preview(
     if thumbs_dir:
         thumbs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build clip info: proxy paths and durations
+    # Build clip info: proxy paths, durations, and transcripts
     clip_info = {}
+    clip_transcripts = {}
     if clips_dir:
         seen_clips = set(s.clip_id for s in sb.segments)
         for cid in seen_clips:
@@ -152,6 +184,14 @@ def render_html_preview(
                 else:
                     rel = str(proxy)
                 clip_info[cid] = {"proxy": rel, "duration": dur}
+
+            # Load transcript if available
+            transcript_path = clips_dir / cid / "audio" / "transcript.json"
+            if transcript_path.exists():
+                import json as _json2
+
+                t = _json2.loads(transcript_path.read_text())
+                clip_transcripts[cid] = t.get("segments", [])
 
     # Extract thumbnails
     thumb_files = {}
@@ -176,7 +216,9 @@ def render_html_preview(
         color = PURPOSE_COLORS.get(seg.purpose, "#95a5a6")
         width_pct = max((seg.duration_sec / total_dur) * 100, 1.5) if total_dur > 0 else 5
         thumb = thumb_files.get(seg.index, "")
-        thumb_html = f'<img src="thumbnails/{thumb}" />' if thumb else '<div class="no-thumb"></div>'
+        thumb_html = (
+            f'<img src="thumbnails/{thumb}" />' if thumb else '<div class="no-thumb"></div>'
+        )
 
         edl_rows += f"""
         <tr class="edl-row" data-seg-index="{seg.index}" onclick="openSegment({seg.index})">
@@ -212,8 +254,9 @@ def render_html_preview(
     pacing = "".join(f"<li>{n}</li>" for n in sb.pacing_notes)
     used = set(s.purpose for s in sb.segments)
     legend = "".join(
-        f'<span><span class="dot" style="background:{PURPOSE_COLORS.get(p,"#999")}"></span>{p.replace("_"," ")}</span>'
-        for p in PURPOSE_COLORS if p in used
+        f'<span><span class="dot" style="background:{PURPOSE_COLORS.get(p, "#999")}"></span>{p.replace("_", " ")}</span>'
+        for p in PURPOSE_COLORS
+        if p in used
     )
 
     video_html = ""
@@ -225,7 +268,9 @@ def render_html_preview(
     warn_html = ""
     if warnings:
         warn_items = "".join(f"<li>{w}</li>" for w in warnings)
-        warn_html = f'<h2 style="color:#e74c3c">Warnings</h2><ul style="color:#e74c3c">{warn_items}</ul>'
+        warn_html = (
+            f'<h2 style="color:#e74c3c">Warnings</h2><ul style="color:#e74c3c">{warn_items}</ul>'
+        )
 
     arc_html = "".join(
         f'<div class="arc-section"><div class="arc-title">{a.title}</div><div class="arc-body">{a.description[:250]}</div></div>'
@@ -313,6 +358,15 @@ def render_html_preview(
   .btn-danger {{ background: transparent; color: #e74c3c; border: 1px solid #e74c3c; }}
   .btn-danger:hover {{ background: rgba(231,76,60,0.1); }}
   .seg-description {{ margin-top: 12px; padding: 10px 14px; background: #1a1a1a; border-radius: 6px; color: #999; font-size: 13px; line-height: 1.5; }}
+  .seg-transcript {{ margin-top: 12px; padding: 12px 14px; background: #1a1a1a; border-radius: 6px; max-height: 200px; overflow-y: auto; }}
+  .seg-transcript-list {{ display: flex; flex-direction: column; gap: 4px; }}
+  .t-line {{ padding: 4px 8px; border-radius: 4px; font-size: 12px; line-height: 1.5; cursor: pointer; transition: background .15s; }}
+  .t-line:hover {{ background: #2a2a2a; }}
+  .t-line.t-active {{ background: #2d4a2d; }}
+  .t-time {{ color: #555; font-family: 'SF Mono', Menlo, monospace; font-size: 11px; margin-right: 6px; }}
+  .t-speaker {{ color: #4fc3f7; font-weight: 600; }}
+  .t-music {{ color: #ce93d8; font-style: italic; }}
+  .t-sfx {{ color: #ffb74d; font-style: italic; }}
 
   /* Toast notification */
   .toast {{ position: fixed; bottom: 24px; right: 24px; background: #2ecc71; color: #000; padding: 12px 20px; border-radius: 8px; font-weight: 600; font-size: 13px; z-index: 2000; transform: translateY(100px); opacity: 0; transition: all .3s ease; }}
@@ -411,6 +465,11 @@ def render_html_preview(
 
       <div class="seg-description" id="seg-description"></div>
 
+      <div class="seg-transcript" id="seg-transcript-panel" style="display:none">
+        <div class="seg-meta-label" style="margin-bottom:8px">Transcript</div>
+        <div class="seg-transcript-list" id="seg-transcript-list"></div>
+      </div>
+
       <div class="seg-actions">
         <div>
           <button class="btn btn-secondary" onclick="previewRange()">Preview Selection</button>
@@ -431,6 +490,7 @@ def render_html_preview(
 // --- Data ---
 const storyboard = {sb_json};
 const clipInfo = {json.dumps(clip_info)};
+const clipTranscripts = {json.dumps(clip_transcripts)};
 const purposeColors = {json.dumps(PURPOSE_COLORS)};
 let changes = {{}};  // segIndex -> {{in_sec, out_sec}}
 let currentSegIndex = null;
@@ -486,13 +546,14 @@ function openSegment(index) {{
     video.removeEventListener('loadedmetadata', handler);
   }});
 
-  // Playhead tracking
+  // Playhead tracking + transcript highlight
   video.ontimeupdate = () => {{
     const dur = ci.duration || video.duration;
     if (dur > 0) {{
       const pct = (video.currentTime / dur) * 100;
       document.getElementById('range-playhead').style.left = pct + '%';
     }}
+    updateTranscriptHighlight(video.currentTime);
   }};
 
   // Highlight active
@@ -501,6 +562,7 @@ function openSegment(index) {{
   document.querySelector(`.edl-row[data-seg-index="${{index}}"]`)?.classList.add('active');
 
   updateMeta(eff.in_sec, eff.out_sec, seg.purpose);
+  renderSegTranscript(seg.clip_id, eff.in_sec, eff.out_sec);
   modal.classList.add('open');
 }}
 
@@ -684,6 +746,59 @@ function exportJSON() {{
   a.click();
   URL.revokeObjectURL(url);
   showToast('Exported adjusted JSON');
+}}
+
+// --- Transcript in segment modal ---
+function renderSegTranscript(clipId, inSec, outSec) {{
+  const panel = document.getElementById('seg-transcript-panel');
+  const list = document.getElementById('seg-transcript-list');
+  list.innerHTML = '';
+  const segs = clipTranscripts[clipId];
+  if (!segs || segs.length === 0) {{ panel.style.display = 'none'; return; }}
+
+  // Filter transcript segments that overlap with this edit segment
+  const relevant = segs.filter(s => s.end > inSec && s.start < outSec);
+  if (relevant.length === 0) {{ panel.style.display = 'none'; return; }}
+
+  relevant.forEach((s, i) => {{
+    const div = document.createElement('div');
+    div.className = 't-line';
+    div.dataset.tStart = s.start;
+    div.dataset.tEnd = s.end;
+    const m = Math.floor(s.start / 60);
+    const sec = Math.floor(s.start % 60);
+    const ts = '<span class="t-time">' + m + ':' + String(sec).padStart(2,'0') + '</span>';
+
+    if (s.type === 'music') {{
+      div.innerHTML = ts + '<span class="t-music">\\u266a ' + (s.text || 'Music') + ' \\u266a</span>';
+    }} else if (s.type === 'sound_effect') {{
+      div.innerHTML = ts + '<span class="t-sfx">[' + (s.text || 'sound') + ']</span>';
+    }} else if (s.type === 'silence') {{
+      return;
+    }} else {{
+      const spk = s.speaker ? '<span class="t-speaker">' + s.speaker + ':</span> ' : '';
+      div.innerHTML = ts + spk + s.text;
+    }}
+
+    div.onclick = () => {{
+      document.getElementById('seg-video').currentTime = s.start;
+      document.getElementById('seg-video').play();
+    }};
+    list.appendChild(div);
+  }});
+
+  panel.style.display = 'block';
+}}
+
+// Highlight active transcript line during playback
+function updateTranscriptHighlight(currentTime) {{
+  document.querySelectorAll('.t-line').forEach(el => {{
+    const s = parseFloat(el.dataset.tStart);
+    const e = parseFloat(el.dataset.tEnd);
+    const active = currentTime >= s && currentTime < e;
+    el.classList.toggle('t-active', active);
+    if (active) el.scrollIntoView({{ block: 'nearest', behavior: 'smooth' }});
+  }});
 }}
 
 // Keyboard shortcuts
