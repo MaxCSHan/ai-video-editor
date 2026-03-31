@@ -541,11 +541,20 @@ def cmd_analyze(args, cfg: Config):
             durations = [c.get("duration_sec", 30) for c in manifest.get("clips", [])]
             avg_dur = sum(durations) / len(durations) if durations else 30.0
 
-        _header(f"Dry Run: {name} ({len(clips)} clips, avg {avg_dur:.0f}s)")
+        visual = getattr(args, "visual", False)
+        total_video_dur = avg_dur * len(clips)
+        mode = "visual" if visual else "text-only"
+        _header(f"Dry Run: {name} ({len(clips)} clips, avg {avg_dur:.0f}s, Phase 2: {mode})")
 
         t_est = estimate_transcription_cost(len(clips), avg_dur, cfg.transcribe.gemini_model)
         p1_est = estimate_phase1_cost(len(clips), avg_dur, cfg.gemini.model)
-        p2_est = estimate_phase2_cost(len(clips), len(clips) * 3000, cfg.gemini.model)
+        p2_est = estimate_phase2_cost(
+            len(clips),
+            len(clips) * 3000,
+            cfg.gemini.model,
+            visual=visual,
+            total_video_duration_sec=total_video_dur,
+        )
 
         total_cost = (
             t_est["estimated_cost_usd"]
@@ -589,6 +598,7 @@ def cmd_analyze(args, cfg: Config):
 
         force = getattr(args, "force", False)
         interactive = not getattr(args, "no_interactive", False)
+        visual = getattr(args, "visual", False)
         output_path = run_editorial_pipeline(
             source_dir=source_dir,
             project_name=name,
@@ -597,6 +607,7 @@ def cmd_analyze(args, cfg: Config):
             cfg=cfg,
             force=force,
             interactive=interactive,
+            visual=visual,
         )
     else:
         # Descriptive pipeline
@@ -954,6 +965,11 @@ def main():
     )
     p_analyze.add_argument(
         "--no-interactive", action="store_true", help="Skip the editorial briefing questions"
+    )
+    p_analyze.add_argument(
+        "--visual",
+        action="store_true",
+        help="Upload proxy videos to Phase 2 for visual editorial judgments",
     )
     p_analyze.add_argument(
         "--dry-run",

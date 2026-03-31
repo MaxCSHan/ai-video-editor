@@ -153,6 +153,7 @@ def build_editorial_assembly_prompt(
     clip_count: int,
     total_duration_sec: float,
     transcripts: dict[str, str] | None = None,
+    visual: bool = False,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
     clip_ids = [r.get("clip_id", "unknown") for r in clip_reviews]
@@ -166,6 +167,16 @@ def build_editorial_assembly_prompt(
         example_clip_id=example_clip_id,
         style=style,
     )
+    if visual:
+        prompt += (
+            "\n\nIMPORTANT: The actual proxy videos for all clips are attached. "
+            "Use them to make visual judgments:\n"
+            "- Assess energy, pacing, and composition directly from the footage\n"
+            "- Verify which moments have the strongest visual impact\n"
+            "- Match people across clips by their actual appearance\n"
+            "- Judge transitions based on visual continuity between clips\n"
+            "- Identify the best b-roll and establishing shots visually\n"
+        )
     if transcripts:
         sections = []
         for clip_id, text in transcripts.items():

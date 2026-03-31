@@ -281,6 +281,45 @@ def transcribe_all_clips(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Gemini File API URI cache (for reuse between Phase 1 and Phase 2)
+# ---------------------------------------------------------------------------
+
+FILE_API_CACHE_MAX_AGE_SEC = 90 * 60  # 90 minutes (Gemini keeps files for 2 hours)
+
+
+def _load_file_api_cache(editorial_paths: EditorialProjectPaths) -> dict:
+    """Load cached Gemini File API URIs."""
+    cache_path = editorial_paths.root / "file_api_cache.json"
+    if cache_path.exists():
+        return json.loads(cache_path.read_text())
+    return {}
+
+
+def _save_file_api_cache(editorial_paths: EditorialProjectPaths, cache: dict):
+    """Save Gemini File API URI cache."""
+    cache_path = editorial_paths.root / "file_api_cache.json"
+    cache_path.write_text(json.dumps(cache, indent=2))
+
+
+def _cache_file_uri(editorial_paths: EditorialProjectPaths, clip_id: str, uri: str):
+    """Cache a single file URI after upload."""
+    cache = _load_file_api_cache(editorial_paths)
+    cache[clip_id] = {"uri": uri, "cached_at": time.time()}
+    _save_file_api_cache(editorial_paths, cache)
+
+
+def _get_cached_uri(cache: dict, clip_id: str) -> str | None:
+    """Get a cached URI if still fresh (< 90 min old)."""
+    entry = cache.get(clip_id)
+    if not entry:
+        return None
+    age = time.time() - entry.get("cached_at", 0)
+    if age > FILE_API_CACHE_MAX_AGE_SEC:
+        return None
+    return entry.get("uri")
+
+
 def _load_transcript_for_prompt(clip_paths) -> str | None:
     """Load and format a clip's transcript for LLM prompt injection."""
     transcript_path = clip_paths.audio / "transcript.json"
@@ -358,6 +397,9 @@ def _review_single_clip_gemini(
     if video_file.state.name == "FAILED":
         print(f"  {label}: WARNING — Gemini processing failed, skipping")
         return None
+
+    # Cache the File API URI for potential reuse in Phase 2
+    _cache_file_uri(editorial_paths, clip_id, video_file.uri)
 
     # Load transcript if available
     transcript_text = _load_transcript_for_prompt(clip_paths)
@@ -530,6 +572,51 @@ def run_phase1_claude(
 # ---------------------------------------------------------------------------
 
 
+def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> list:
+    """Upload or reuse cached proxy videos for visual Phase 2.
+
+    Returns list of types.Part objects referencing the uploaded videos.
+    """
+    cache = _load_file_api_cache(editorial_paths)
+    parts = []
+    seen_clips = set()
+
+    for review in clip_reviews:
+        clip_id = review.get("clip_id", "")
+        if clip_id in seen_clips:
+            continue
+        seen_clips.add(clip_id)
+
+        # Try cached URI first
+        cached_uri = _get_cached_uri(cache, clip_id)
+        if cached_uri:
+            parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
+            continue
+
+        # Upload proxy
+        proxy_dir = editorial_paths.clips_dir / clip_id / "proxy"
+        proxy_files = list(proxy_dir.glob("*_proxy.mp4")) if proxy_dir.exists() else []
+        if not proxy_files:
+            continue
+
+        print(f"    Uploading proxy: {clip_id}...")
+        video_file = client.files.upload(file=str(proxy_files[0]))
+
+        while video_file.state.name == "PROCESSING":
+            time.sleep(3)
+            video_file = client.files.get(name=video_file.name)
+
+        if video_file.state.name == "FAILED":
+            print(f"    WARNING: upload failed for {clip_id}, skipping")
+            continue
+
+        _cache_file_uri(editorial_paths, clip_id, video_file.uri)
+        parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
+
+    print(f"    {len(parts)} proxy videos attached to Phase 2")
+    return parts
+
+
 def run_phase2(
     clip_reviews: list[dict],
     editorial_paths: EditorialProjectPaths,
@@ -540,6 +627,7 @@ def run_phase2(
     style: str = "vlog",
     user_context: dict | None = None,
     tracer=None,
+    visual: bool = False,
 ) -> Path:
     """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview."""
     from .models import EditorialStoryboard
@@ -563,6 +651,7 @@ def run_phase2(
         clip_count=len(clip_reviews),
         total_duration_sec=total_duration,
         transcripts=transcripts,
+        visual=visual,
     )
 
     # Inject user context if provided
@@ -570,7 +659,8 @@ def run_phase2(
         context_text = format_context_for_prompt(user_context)
         prompt = prompt + "\n\n" + context_text
 
-    print(f"  Generating editorial storyboard ({provider}, structured output)...")
+    mode_label = "visual" if visual else "text-only"
+    print(f"  Generating editorial storyboard ({provider}, {mode_label})...")
 
     if provider == "gemini":
         from google import genai
@@ -579,10 +669,20 @@ def run_phase2(
         from .tracing import traced_gemini_generate
 
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+        # Build contents: text-only or multipart with proxy videos
+        num_videos = 0
+        if visual:
+            video_parts = _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types)
+            num_videos = len(video_parts)
+            contents = [types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])]
+        else:
+            contents = prompt
+
         response = traced_gemini_generate(
             client,
             model=gemini_cfg.model,
-            contents=prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 temperature=gemini_cfg.temperature,
                 response_mime_type="application/json",
@@ -591,6 +691,7 @@ def run_phase2(
             phase="phase2",
             tracer=tracer,
             prompt_chars=len(prompt),
+            num_video_files=num_videos,
         )
         storyboard = EditorialStoryboard.model_validate_json(response.text)
 
@@ -701,6 +802,7 @@ def run_editorial_pipeline(
     cfg: Config | None = None,
     force: bool = False,
     interactive: bool = True,
+    visual: bool = False,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2."""
     from .tracing import ProjectTracer
@@ -784,6 +886,7 @@ def run_editorial_pipeline(
         style=style,
         user_context=user_context,
         tracer=tracer,
+        visual=visual,
     )
 
     tracer.print_summary("Pipeline Total")
