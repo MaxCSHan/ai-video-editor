@@ -194,7 +194,7 @@ def _transcribe_single_clip(
     provider: str,
     index: int,
     total: int,
-    speaker_hints: list[str] | None = None,
+    speaker_context: str | None = None,
 ) -> tuple[str, dict | None]:
     """Transcribe a single clip. Returns (clip_id, transcript_dict)."""
     clip_paths = editorial_paths.clip_paths(clip_id)
@@ -216,7 +216,7 @@ def _transcribe_single_clip(
 
         print(f"  {label}: transcribing (gemini)...")
         transcript = transcribe_clip_gemini(
-            proxy_files[0], clip_paths, cfg, speaker_hints=speaker_hints
+            proxy_files[0], clip_paths, cfg, speaker_context=speaker_context
         )
     else:
         from .transcribe import transcribe_clip
@@ -241,7 +241,7 @@ def transcribe_all_clips(
     editorial_paths: EditorialProjectPaths,
     cfg: TranscribeConfig,
     provider: str = "mlx",
-    speaker_hints: list[str] | None = None,
+    speaker_context: str | None = None,
 ) -> dict[str, dict]:
     """Transcribe all clips in parallel. Returns {clip_id: transcript_dict}."""
     total = len(clip_metadata)
@@ -262,7 +262,7 @@ def transcribe_all_clips(
                 provider,
                 i + 1,
                 total,
-                speaker_hints,
+                speaker_context,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -706,18 +706,16 @@ def run_editorial_pipeline(
     # Transcription (optional — mlx-whisper local or Gemini cloud)
     t_provider = _resolve_transcribe_provider(cfg.transcribe)
     if t_provider:
-        # Load speaker hints from briefing if available
-        speaker_hints = None
+        # Load speaker context from briefing if available
+        speaker_context = None
         context_path = editorial_paths.root / "user_context.json"
         if context_path.exists():
             ctx = json.loads(context_path.read_text())
-            people = ctx.get("people", "")
-            if people:
-                speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+            speaker_context = ctx.get("people", "") or None
 
         print(f"  Transcribing audio ({t_provider})...")
         transcripts = transcribe_all_clips(
-            clip_metadata, editorial_paths, cfg.transcribe, t_provider, speaker_hints
+            clip_metadata, editorial_paths, cfg.transcribe, t_provider, speaker_context
         )
         count = len(transcripts)
         print(f"  Transcribed {count}/{len(clip_metadata)} clips with speech")

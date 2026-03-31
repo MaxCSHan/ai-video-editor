@@ -109,15 +109,15 @@ If you cannot identify them, use Speaker_A, Speaker_B, etc. consistently.
 """
 
 
-def _build_gemini_prompt(speaker_hints: list[str] | None = None) -> str:
-    """Build transcription prompt, optionally including speaker hints from briefing."""
+def _build_gemini_prompt(speaker_context: str | None = None) -> str:
+    """Build transcription prompt, optionally including speaker context from briefing."""
     prompt = GEMINI_TRANSCRIBE_PROMPT
-    if speaker_hints:
-        names = "\n".join(f"- {name}" for name in speaker_hints)
+    if speaker_context:
         prompt += (
-            "\nKnown people in this footage:\n"
-            f"{names}\n"
-            "Use these names when you identify these speakers.\n"
+            "\nContext about the people in this footage (from the filmmaker):\n"
+            f"{speaker_context}\n\n"
+            "Use the names and descriptions above to identify speakers accurately. "
+            "Match voices to the people described.\n"
         )
     return prompt
 
@@ -126,7 +126,7 @@ def transcribe_clip_gemini(
     proxy_path: Path,
     clip_paths: ProjectPaths,
     cfg: TranscribeConfig,
-    speaker_hints: list[str] | None = None,
+    speaker_context: str | None = None,
 ) -> dict | None:
     """Transcribe a clip via Gemini structured output from its proxy video.
 
@@ -158,7 +158,7 @@ def transcribe_clip_gemini(
     if video_file.state.name == "FAILED":
         return None
 
-    prompt = _build_gemini_prompt(speaker_hints)
+    prompt = _build_gemini_prompt(speaker_context)
 
     response = client.models.generate_content(
         model=cfg.gemini_model,

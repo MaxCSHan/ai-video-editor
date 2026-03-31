@@ -426,16 +426,14 @@ def cmd_transcribe(args, cfg: Config):
         print(f"{RED}Error:{RESET} No clips found in project '{name}'.")
         sys.exit(1)
 
-    # Load speaker hints from briefing context if available
-    speaker_hints = None
+    # Load speaker context from briefing if available
+    speaker_context = None
     context_path = project_root / "user_context.json"
     if context_path.exists():
         import json as _json
 
         ctx = _json.loads(context_path.read_text())
-        people = ctx.get("people", "")
-        if people:
-            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+        speaker_context = ctx.get("people", "") or None
 
     _header(f"Transcribing: {name} ({len(clips)} clips, {provider})")
 
@@ -444,7 +442,7 @@ def cmd_transcribe(args, cfg: Config):
         ep,
         cfg.transcribe,
         provider=provider,
-        speaker_hints=speaker_hints,
+        speaker_context=speaker_context,
     )
 
     count = len(transcripts)

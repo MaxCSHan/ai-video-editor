@@ -396,18 +396,16 @@ def _run_transcription(ep, clip_metadata, cfg):
         print("\n  Skipping transcription (no provider available)")
         return
 
-    # Load speaker hints from briefing if available
-    speaker_hints = None
+    # Load speaker context from briefing if available
+    speaker_context = None
     context_path = ep.root / "user_context.json"
     if context_path.exists():
         ctx = json.loads(context_path.read_text())
-        people = ctx.get("people", "")
-        if people:
-            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+        speaker_context = ctx.get("people", "") or None
 
     print(f"\n  Transcribing audio ({t_provider})...\n")
     transcripts = transcribe_all_clips(
-        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_hints=speaker_hints
+        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_context=speaker_context
     )
     count = len(transcripts)
     print(f"\n  Transcribed {count}/{len(clip_metadata)} clips with speech")
@@ -459,18 +457,16 @@ def _run_transcription_interactive(name, cfg):
         return
     clip_metadata = [{"clip_id": cid} for cid in clips]
 
-    # Load speaker hints
-    speaker_hints = None
+    # Load speaker context from briefing
+    speaker_context = None
     context_path = ep.root / "user_context.json"
     if context_path.exists():
         ctx = json.loads(context_path.read_text())
-        people = ctx.get("people", "")
-        if people:
-            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+        speaker_context = ctx.get("people", "") or None
 
     print(f"\n  Transcribing {len(clips)} clips ({t_provider})...\n")
     transcripts = transcribe_all_clips(
-        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_hints=speaker_hints
+        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_context=speaker_context
     )
     count = len(transcripts)
     print(f"\n  Done. {count}/{len(clips)} clips have speech\n")
