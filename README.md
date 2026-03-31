@@ -1,95 +1,85 @@
-# AI Video Editor — Storyboard Generator
+# VX — AI Video Editor
 
-Turn unplanned trip footage into a polished vlog edit plan using AI.
+Turn raw trip footage into polished vlogs with AI. Point at a folder of clips, and VX reviews every clip, identifies people, builds a story arc, and produces an edit plan with precise cut points — then assembles a rough cut video.
+
+## Quick Start
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+cp .env.example .env   # Add your GEMINI_API_KEY
+
+vx                     # Launch interactive mode
+```
 
 ## How It Works
-
-The editorial pipeline has **4 phases**, each involving an LLM call with a distinct job:
 
 ```
 Raw Clips (folder)
       |
-      v
-  [Preprocess]  ←  ffmpeg: proxy, frames, scenes, audio (cached)
+  [Preprocess]     ffmpeg: downscale proxy, extract frames, detect scenes, audio
+      |                    (parallel, cached)
       |
-      v
-  [Phase 1]     ←  LLM reviews EACH clip individually
-  Per-clip         Input:  proxy video (Gemini) or frames (Claude)
-  Review           Output: structured JSON — summary, quality, people,
+  [Briefing]       Interactive questionnaire — name people, describe occasion,
+      |            set tone. Feeds context into Phase 2. (optional, skippable)
+      |
+  [Phase 1]        LLM reviews EACH clip individually
+                   Input:  proxy video (Gemini) or frames (Claude)
+                   Output: structured JSON — summary, quality, people,
                            key moments, usable/discard segments, audio
                    Cached per clip.
       |
-      v
-  [Phase 2]     ←  LLM acts as creative editor across ALL clips
-  Editorial        Input:  all Phase 1 review JSONs (text only)
-  Storyboard       Output: editorial markdown — story arc, cast, EDL table,
+  [Phase 2]        LLM acts as creative editor across ALL clips
+                   Input:  Phase 1 reviews + user briefing context
+                   Output: Pydantic structured JSON (enforced schema) —
+                           story arc, cast, EDL with precise in/out seconds,
                            pacing notes, music plan, technical notes
+                   Also renders: markdown + interactive HTML preview
       |
-      v
-  [Phase 3]     ←  LLM converts editorial plan to precise machine data
-  Structured       Input:  editorial markdown + proxy videos (visual grounding)
-  EDL              Output: structured JSON (enforced schema) — segments with
-                           exact in_sec/out_sec, purposes, transitions, cast
-      |
-      v
-  [Execute]     ←  ffmpeg: extract segments, concatenate rough cut
-  Rough Cut        Output: rough_cut.mp4 + timeline HTML preview
+  [Cut]            ffmpeg: extract segments at exact timestamps, concatenate
+                   Input:  structured JSON from Phase 2 (no LLM needed)
+                   Output: rough_cut.mp4 + HTML preview with embedded video
 ```
 
-**Each phase is cached.** Re-running skips completed work and jumps to the next phase.
+Each phase is **cached and versioned**. Re-running skips completed work.
 
-## CLI — `vx`
+## CLI
+
+### Interactive mode (recommended)
 
 ```bash
-vx new puma-run ~/footage/puma/       # Create project, preprocess all clips
-vx analyze puma-run                   # Phase 1 + Phase 2 → editorial storyboard
-vx cut puma-run                       # Phase 3 + assembly → rough cut + preview
+vx                                    # Guided workflow with menus and prompts
+```
 
+Walks you through: create project → preprocess → briefing → analyze → preview → cut.
+
+### Direct commands (for scripting)
+
+```bash
+vx new my-trip ~/footage/             # Create project from footage folder
+vx new recap video.mp4                # Single-video descriptive mode
+vx analyze my-trip                    # Phase 1 + 2 → structured storyboard
+vx analyze my-trip --force            # Re-run Phase 1 reviews
+vx analyze my-trip --no-interactive   # Skip briefing questions
+vx cut my-trip                        # Assemble rough cut (no LLM)
 vx projects                           # List all projects
-vx status puma-run                    # Per-clip cache/review status
-vx config                             # Show defaults, API key status
-vx config --provider claude           # Change default AI provider
+vx status my-trip                     # Detailed status with versions
+vx config --provider gemini           # Set defaults
 ```
 
-### Full workflow example
+### Interactive HTML preview
 
-```bash
-# Setup
-uv venv && uv pip install -e ".[dev]"
-cp .env.example .env  # Add GEMINI_API_KEY
-
-# Create project from raw footage folder
-vx new puma-run ~/footage/puma-night-run/
-
-# Generate editorial storyboard (Phase 1 + 2)
-vx analyze puma-run
-
-# Review the storyboard
-cat library/puma-run/storyboard/editorial_gemini.md
-
-# Generate structured EDL + rough cut video + HTML preview (Phase 3 + assembly)
-vx cut puma-run
-
-# Open the visual timeline preview
-open library/puma-run/exports/preview.html
-
-# Watch the AI-assembled rough cut
-open library/puma-run/exports/rough_cut.mp4
-```
-
-### Descriptive mode (single video)
-
-```bash
-vx new recap video.mp4                # Auto-detects single file → descriptive mode
-vx analyze recap                      # Shot-by-shot description of the video
-```
+The preview (`storyboard/*_preview.html`) is an interactive editor:
+- Click timeline segments to open a **video preview modal**
+- Embedded proxy video player with **adjustable in/out range handles**
+- Drag to adjust cut points, preview the selection
+- **Export adjusted JSON** to fine-tune before running `vx cut`
 
 ## Prerequisites
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) or pip
 - ffmpeg & ffprobe (`brew install ffmpeg`)
-- API key: `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY`
+- `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY` in `.env`
 
 ## Setup
 
@@ -97,53 +87,55 @@ vx analyze recap                      # Shot-by-shot description of the video
 cd ai-video-editor
 uv venv && uv pip install -e ".[dev]"
 cp .env.example .env
-# Edit .env with your API keys
 ```
 
 ## Project Library
 
 ```
 library/
-  puma-run/                           # Editorial project
-    project.json                      # Project metadata (type, provider, style)
-    manifest.json                     # Aggregated clip metadata
+  my-trip/                              # One project per shoot
+    project.json                        # Metadata (type, provider, style)
+    user_context.json                   # Briefing answers
+    manifest.json                       # Aggregated clip metadata
     clips/
-      vid_001/                        # Per-clip preprocessing (all cached)
-        source/vid_001.mp4            #   Original footage
-        proxy/vid_001_proxy.mp4       #   360x240 @1fps proxy for AI
-        frames/manifest.json          #   Frames every 5s + index
-        scenes/manifest.json          #   Scene-change keyframes
-        audio/vid_001.wav             #   Extracted audio
-        review/review_gemini.json     #   Phase 1: clip review (cached)
+      20260330_C0059/                   # Per-clip (parallel preprocessed, cached)
+        source/  proxy/  frames/  scenes/  audio/
+        review/review_gemini_v1.json    # Phase 1 review (versioned)
     storyboard/
-      editorial_gemini.md             # Phase 2: editorial storyboard
+      editorial_gemini_v1.json          # Phase 2: structured data (primary)
+      editorial_gemini_v1.md            # Rendered markdown view
+      editorial_gemini_v1_preview.html  # Interactive HTML preview
     exports/
-      edl.json                        # Phase 3: structured EDL
-      rough_cut.mp4                   # Assembled rough cut
-      preview.html                    # HTML timeline preview
-      thumbnails/                     # Per-segment thumbnails
-      segments/                       # Individual extracted segments
+      v1/                              # Versioned rough cuts
+        rough_cut.mp4
+        preview.html                   # Preview with embedded video
+        segments/  thumbnails/
 ```
 
 ## Source Code
 
 ```
 src/ai_video_editor/
-  cli.py                # Unified CLI (vx command)
+  cli.py               # CLI entry point (vx command)
+  interactive.py        # Interactive TUI mode (questionary)
+  briefing.py           # Editorial briefing questionnaire
+  models.py             # Pydantic models (EditorialStoryboard, Segment, etc.)
   config.py             # Settings, ProjectPaths, EditorialProjectPaths
-  preprocess.py         # ffmpeg: proxy, frames, scenes, audio (cached)
-  editorial_prompts.py  # Phase 1 + Phase 2 prompt templates
-  editorial_agent.py    # Multi-clip orchestrator (Phase 1 + 2)
-  rough_cut.py          # Phase 3 structured EDL + ffmpeg assembly + HTML preview
+  preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached)
+  editorial_prompts.py  # Phase 1 + 2 prompt templates
+  editorial_agent.py    # Multi-clip orchestrator
+  render.py             # Markdown + HTML rendering from Pydantic models
+  rough_cut.py          # Validation + ffmpeg assembly (no LLM)
+  versioning.py         # Run versioning with symlinks
   storyboard_format.py  # Descriptive storyboard template
-  gemini_analyze.py     # Gemini descriptive analysis
-  claude_analyze.py     # Claude descriptive analysis
+  gemini_analyze.py     # Gemini single-video descriptive analysis
+  claude_analyze.py     # Claude single-video descriptive analysis
 ```
 
-## LLM Calls Summary
+## LLM Calls
 
 | Phase | What | Input | Output | Cached? |
 |-------|------|-------|--------|---------|
-| 1 | Clip review | Proxy video or frames | JSON: quality, people, segments, audio | Per-clip |
-| 2 | Editorial assembly | All Phase 1 JSONs (text) | Markdown: story arc, EDL, pacing, music | Per-project |
-| 3 | Structured EDL | Editorial MD + proxy videos | JSON: precise in/out timestamps, transitions | Per-project |
+| 1 | Clip review | Proxy video or frames | JSON: quality, people, segments | Per-clip |
+| 2 | Editorial assembly | Phase 1 JSONs + user context | Pydantic JSON: arc, cast, EDL, music | Per-project (versioned) |
+| Cut | Assembly | Structured JSON | rough_cut.mp4 | **No LLM** — pure ffmpeg |

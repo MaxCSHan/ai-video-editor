@@ -378,6 +378,7 @@ def cmd_analyze(args, cfg: Config):
         style = meta.get("style", ws.get("style", "vlog"))
 
         force = getattr(args, 'force', False)
+        interactive = not getattr(args, 'no_interactive', False)
         output_path = run_editorial_pipeline(
             source_dir=source_dir,
             project_name=name,
@@ -385,6 +386,7 @@ def cmd_analyze(args, cfg: Config):
             style=style,
             cfg=cfg,
             force=force,
+            interactive=interactive,
         )
     else:
         # Descriptive pipeline
@@ -420,8 +422,68 @@ def cmd_analyze(args, cfg: Config):
     print(f"\n{GREEN}Storyboard ready:{RESET} {BOLD}{output_path}{RESET}")
 
 
+def cmd_brief(args, cfg: Config):
+    """Edit the editorial briefing — opens $EDITOR with a pre-filled template."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta or meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} Project '{name}' not found or not editorial.")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+    context_path = project_root / "user_context.json"
+
+    # Load Phase 1 reviews for smart template generation
+    reviews = []
+    for clip_id in ep.discover_clips():
+        cp = ep.clip_paths(clip_id)
+        for pattern in ["review_*_latest.json", "review_*.json"]:
+            found = list(cp.review.glob(pattern))
+            if found:
+                f = next((x for x in found if not x.is_symlink()), found[0])
+                reviews.append(json.loads(f.read_text()))
+                break
+
+    ws = _read_workspace_config()
+    style = meta.get("style", ws.get("style", "vlog"))
+
+    from .briefing import generate_template, parse_template, open_in_editor
+
+    # If context exists, pre-fill the template with existing answers
+    template = generate_template(reviews, style)
+    if context_path.exists():
+        existing = json.loads(context_path.read_text())
+        # Inject existing answers into template
+        for key, value in existing.items():
+            template = template.replace(f"\n{key}:\n", f"\n{key}: {value}\n")
+
+    _header(f"Editorial Briefing: {name}")
+    print(f"  Opening in $EDITOR ({os.environ.get('EDITOR', 'vim')})...")
+    print(f"  {DIM}Fill in what you can, save and close.{RESET}\n")
+
+    edited = open_in_editor(template)
+    if not edited:
+        print(f"  {DIM}No changes.{RESET}")
+        return
+
+    answers = parse_template(edited)
+    if answers:
+        context_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+        print(f"  {GREEN}Context saved ({len(answers)} fields):{RESET}")
+        for k, v in answers.items():
+            print(f"    {CYAN}{k}{RESET}: {v[:80]}{'...' if len(v) > 80 else ''}")
+        print(f"\n  Now run {BOLD}vx analyze {name}{RESET} to generate the storyboard with this context.")
+    else:
+        print(f"  {DIM}No answers provided.{RESET}")
+
+
 def cmd_cut(args, cfg: Config):
-    """Generate structured EDL, assemble rough cut, and produce HTML preview."""
+    """Assemble rough cut video from structured storyboard (no LLM needed)."""
     name = args.project or _infer_project(cfg)
     if not name:
         print(f"{RED}Error:{RESET} Specify a project name.")
@@ -434,41 +496,40 @@ def cmd_cut(args, cfg: Config):
         sys.exit(1)
 
     if meta["type"] != "editorial":
-        print(f"{RED}Error:{RESET} 'vx cut' is only for editorial projects. Use 'vx analyze' for descriptive.")
+        print(f"{RED}Error:{RESET} 'vx cut' is only for editorial projects.")
         sys.exit(1)
 
-    ws = _read_workspace_config()
-    provider = args.provider or meta.get("provider") or ws["provider"]
     ep = cfg.editorial_project(name)
 
-    # Find the editorial storyboard (prefer latest symlink, then versioned, then legacy)
+    # Find the structured JSON (prefer latest symlink)
     storyboard_dir = ep.storyboard
-    latest = storyboard_dir / f"editorial_{provider}_latest.md"
-    if latest.exists():
-        editorial_md_path = latest
-    else:
-        md_files = sorted(storyboard_dir.glob(f"editorial_{provider}*.md"), reverse=True) if storyboard_dir.exists() else []
-        if not md_files:
-            md_files = sorted(storyboard_dir.glob("editorial_*.md"), reverse=True) if storyboard_dir.exists() else []
-        if not md_files:
-            print(f"{RED}Error:{RESET} No editorial storyboard found. Run {BOLD}vx analyze {name}{RESET} first.")
-            sys.exit(1)
-        editorial_md_path = md_files[0]
+    json_candidates = [
+        storyboard_dir / "editorial_gemini_latest.json",
+        storyboard_dir / "editorial_claude_latest.json",
+    ]
+    # Also check versioned files
+    if storyboard_dir.exists():
+        json_candidates.extend(sorted(storyboard_dir.glob("editorial_*_v*.json"), reverse=True))
+
+    json_path = None
+    for candidate in json_candidates:
+        if candidate.exists():
+            json_path = candidate
+            break
+
+    if not json_path:
+        print(f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first.")
+        sys.exit(1)
 
     _header(f"Rough Cut: {name}")
-    print(f"  Storyboard: {editorial_md_path.name}")
-    print(f"  Provider:   {provider}")
+    print(f"  Storyboard: {json_path.name}")
     print()
 
     from .rough_cut import run_rough_cut
 
     result = run_rough_cut(
-        editorial_md_path=editorial_md_path,
+        storyboard_json_path=json_path,
         editorial_paths=ep,
-        provider=provider,
-        gemini_cfg=cfg.gemini,
-        claude_cfg=cfg.claude,
-        assemble=not args.preview_only,
     )
 
     v = result.get("version", "?")
@@ -478,7 +539,6 @@ def cmd_cut(args, cfg: Config):
     if "rough_cut" in result:
         size_mb = result["rough_cut"].stat().st_size / 1024 / 1024
         print(f"  {GREEN}Rough cut:{RESET}  {result['rough_cut']} ({size_mb:.1f} MB)")
-    print(f"  {GREEN}EDL JSON:{RESET}   {result['edl_path']}")
     print(f"  {GREEN}Preview:{RESET}    {result['preview']}")
     if warn_count:
         print(f"  {YELLOW}Warnings:{RESET}   {warn_count} issue(s) — see preview for details")
@@ -556,8 +616,7 @@ def main():
   vx status puma-run                  Show project status
   vx analyze puma-run                 Generate storyboard
   vx analyze puma-run --provider claude
-  vx cut puma-run                     Assemble rough cut + preview from storyboard
-  vx cut puma-run --preview-only      Just EDL + HTML preview, no video assembly
+  vx cut puma-run                     Assemble rough cut from structured storyboard (no LLM)
   vx config --provider gemini         Set default provider
 """,
     )
@@ -587,12 +646,15 @@ def main():
     p_analyze.add_argument("project", nargs="?", help="Project name")
     p_analyze.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
     p_analyze.add_argument("--force", action="store_true", help="Re-run Phase 1 reviews (ignore cache)")
+    p_analyze.add_argument("--no-interactive", action="store_true", help="Skip the editorial briefing questions")
+
+    # --- brief ---
+    p_brief = sub.add_parser("brief", help="Edit the editorial briefing (opens $EDITOR)")
+    p_brief.add_argument("project", nargs="?", help="Project name")
 
     # --- cut ---
-    p_cut = sub.add_parser("cut", help="Assemble rough cut from editorial storyboard")
+    p_cut = sub.add_parser("cut", help="Assemble rough cut video (no LLM — uses structured JSON from analyze)")
     p_cut.add_argument("project", nargs="?", help="Project name")
-    p_cut.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
-    p_cut.add_argument("--preview-only", action="store_true", help="Generate EDL + HTML preview only, skip video assembly")
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
@@ -603,7 +665,9 @@ def main():
     cfg = DEFAULT_CONFIG
 
     if not args.command:
-        parser.print_help()
+        # No subcommand → launch interactive mode
+        from .interactive import run_interactive
+        run_interactive()
         sys.exit(0)
 
     commands = {
@@ -615,6 +679,7 @@ def main():
         "prep": cmd_preprocess,
         "analyze": cmd_analyze,
         "run": cmd_analyze,
+        "brief": cmd_brief,
         "cut": cmd_cut,
         "config": cmd_config,
     }

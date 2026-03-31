@@ -347,13 +347,17 @@ def run_phase2(
     gemini_cfg: GeminiConfig | None = None,
     claude_cfg: ClaudeConfig | None = None,
     style: str = "vlog",
+    user_context: dict | None = None,
 ) -> Path:
-    """Phase 2: send all clip reviews to AI for cross-clip editorial assembly."""
+    """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview."""
+    from .models import EditorialStoryboard
+    from .render import render_markdown, render_html_preview
+    from .briefing import format_context_for_prompt
+
     total_duration = sum(
         sum(seg.get("duration_sec", 0) for seg in r.get("usable_segments", []))
         for r in clip_reviews
     )
-    # Fallback: use raw clip durations if usable_segments don't have duration
     if total_duration == 0:
         total_duration = sum(
             r.get("duration_sec", 0) for r in clip_reviews
@@ -368,7 +372,12 @@ def run_phase2(
         total_duration_sec=total_duration,
     )
 
-    print(f"  Generating editorial storyboard ({provider})...")
+    # Inject user context if provided
+    if user_context:
+        context_text = format_context_for_prompt(user_context)
+        prompt = prompt + "\n\n" + context_text
+
+    print(f"  Generating editorial storyboard ({provider}, structured output)...")
 
     if provider == "gemini":
         from google import genai
@@ -378,9 +387,14 @@ def run_phase2(
         response = client.models.generate_content(
             model=gemini_cfg.model,
             contents=prompt,
-            config=types.GenerateContentConfig(temperature=gemini_cfg.temperature),
+            config=types.GenerateContentConfig(
+                temperature=gemini_cfg.temperature,
+                response_mime_type="application/json",
+                response_schema=EditorialStoryboard,
+            ),
         )
-        result_md = response.text
+        storyboard = EditorialStoryboard.model_validate_json(response.text)
+
     elif provider == "claude":
         import anthropic
 
@@ -389,20 +403,83 @@ def run_phase2(
             model=claude_cfg.model,
             max_tokens=claude_cfg.max_tokens * 2,
             temperature=claude_cfg.temperature,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": prompt + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema."}],
         )
-        result_md = response.content[0].text
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        storyboard = EditorialStoryboard.model_validate_json(text)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
+    # Resolve abbreviated clip IDs (e.g., LLM returns "C0073" but clip_id is "20260330114125_C0073")
+    known_clip_ids = {r["clip_id"] for r in clip_reviews}
+    _resolve_clip_id_refs(storyboard, known_clip_ids)
+
+    # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
     v = next_version(editorial_paths.root, "analyze")
-    base_name = f"editorial_{provider}.md"
-    output_path = versioned_path(editorial_paths.storyboard / base_name, v)
-    output_path.write_text(result_md)
-    update_latest_symlink(output_path)
-    print(f"  Editorial storyboard written to {output_path} (v{v})")
-    return output_path
+    base = f"editorial_{provider}"
+
+    # 1. Primary: structured JSON
+    json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
+    json_path.write_text(storyboard.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    # 2. Rendered: markdown
+    md_path = versioned_path(editorial_paths.storyboard / f"{base}.md", v)
+    md_path.write_text(render_markdown(storyboard))
+    update_latest_symlink(md_path)
+
+    # 3. Rendered: HTML preview
+    preview_path = versioned_path(editorial_paths.storyboard / f"{base}_preview.html", v)
+    html = render_html_preview(
+        storyboard,
+        clips_dir=editorial_paths.clips_dir,
+        output_dir=editorial_paths.storyboard,
+    )
+    preview_path.write_text(html)
+    update_latest_symlink(preview_path)
+
+    print(f"  v{v} outputs:")
+    print(f"    JSON:    {json_path}")
+    print(f"    MD:      {md_path}")
+    print(f"    Preview: {preview_path}")
+    return json_path
+
+
+def _resolve_clip_id_refs(storyboard, known_ids: set[str]):
+    """Fix abbreviated clip IDs in the storyboard by matching against known IDs.
+
+    E.g., LLM returns "C0073" but actual clip_id is "20260330114125_C0073".
+    """
+    # Build a suffix lookup: "C0073" -> "20260330114125_C0073"
+    suffix_map = {}
+    for kid in known_ids:
+        # Try common abbreviation patterns
+        parts = kid.split("_")
+        for i in range(len(parts)):
+            suffix = "_".join(parts[i:])
+            if suffix not in suffix_map:
+                suffix_map[suffix] = kid
+
+    def resolve(clip_id: str) -> str:
+        if clip_id in known_ids:
+            return clip_id
+        if clip_id in suffix_map:
+            return suffix_map[clip_id]
+        # Try case-insensitive
+        for k, v in suffix_map.items():
+            if k.lower() == clip_id.lower():
+                return v
+        return clip_id  # give up, return as-is
+
+    for seg in storyboard.segments:
+        seg.clip_id = resolve(seg.clip_id)
+    for d in storyboard.discarded:
+        d.clip_id = resolve(d.clip_id)
+    for c in storyboard.cast:
+        c.appears_in = [resolve(cid) for cid in c.appears_in]
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +493,7 @@ def run_editorial_pipeline(
     style: str = "vlog",
     cfg: Config | None = None,
     force: bool = False,
+    interactive: bool = True,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2."""
     cfg = cfg or DEFAULT_CONFIG
@@ -449,8 +527,15 @@ def run_editorial_pipeline(
         raise ValueError(f"Unknown provider: {provider}")
     print(f"  Reviewed {len(reviews)} clips")
 
+    # Briefing — optional interactive user context
+    user_context = None
+    if interactive:
+        from .briefing import run_briefing
+        user_context = run_briefing(reviews, style, editorial_paths.root)
+
     # Phase 2 — editorial assembly
-    print(f"[4/4] Phase 2: Generating editorial storyboard...")
+    step = "4/4" if not interactive else "4/4"
+    print(f"[{step}] Phase 2: Generating editorial storyboard...")
     output_path = run_phase2(
         clip_reviews=reviews,
         editorial_paths=editorial_paths,
@@ -459,6 +544,7 @@ def run_editorial_pipeline(
         gemini_cfg=cfg.gemini,
         claude_cfg=cfg.claude,
         style=style,
+        user_context=user_context,
     )
 
     return output_path

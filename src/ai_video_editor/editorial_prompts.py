@@ -104,85 +104,30 @@ You are a professional video editor creating an editorial storyboard for a {styl
 
 You have reviewed {clip_count} clips totaling {total_duration} of raw footage.
 
+The available clip IDs are: {clip_ids}
+
 Here are the structured clip reviews:
 
 {clip_reviews_json}
 
 ---
 
-Now produce an EDITORIAL STORYBOARD — a creative assembly plan that a human editor can follow to cut this footage into a compelling {style}. Think like an editor who has watched all the dailies and is now mapping out the edit.
+Now produce an EDITORIAL STORYBOARD as structured JSON — a creative assembly plan for a compelling {style}.
 
-Consider:
+Think like an editor who has watched all the dailies:
 - What story can you tell with this footage?
 - What's the strongest opening hook?
-- How to build narrative momentum?
-- Where are the natural emotional beats?
+- How to build narrative momentum and emotional arc?
 - What footage is redundant or should be cut?
-- Where does the audio (speech, ambient) drive the edit vs where music should carry it?
-- **WHO are the people?** Match person descriptions across clips to identify the same individuals. Determine who is the main subject/vlogger and build the narrative around them. Ensure continuity — don't jump between clips featuring different people without context.
+- Where does audio (speech, ambient) drive the edit vs where music should carry it?
+- **WHO are the people?** Match person descriptions across clips. Determine who is the main subject. Ensure continuity.
 
-Use this EXACT markdown format:
-
-# Editorial Storyboard: {project_name}
-**Raw footage**: {clip_count} clips, {total_duration} total
-**Estimated final cut**: [your suggested duration]
-**Style**: {style}
-
-## Cast
-[Identify each person who appears across the clips. Match person labels from different clip reviews that refer to the same individual. Note who is the main subject/vlogger.]
-
-| Person | Description | Role | Appears In |
-|--------|-------------|------|------------|
-| Eric (person_A) | Man in blue PUMA shirt, bib #30860 | Main subject / vlogger | vid_001, vid_003, vid_005, ... |
-| ... | ... | ... | ... |
-
-## Story Concept
-[2-3 sentences: what is this video about? What story are we telling? What's the emotional arc?]
-
-## Story Arc
-
-### Opening Hook (0:00 - ~0:XX)
-[What grabs the viewer in the first 5-10 seconds? Be specific about which clip and timestamp.]
-
-### Introduction (~0:XX - ~X:XX)
-[Set up the context — where, who, what. Which clips establish the setting and characters?]
-
-### Body (~X:XX - ~X:XX)
-[The main content. Break into sub-sections if the activity has natural phases.]
-
-### Climax (~X:XX - ~X:XX)
-[The peak moment or payoff — the best footage.]
-
-### Outro (~X:XX - ~X:XX)
-[Wrap-up, reflection, or call to action.]
-
-## Edit Decision List (EDL)
-
-| # | Clip | In | Out | Dur | Purpose | Description | Transition |
-|---|------|----|-----|-----|---------|-------------|------------|
-| 1 | clip_id | M:SS | M:SS | Xs | hook | Brief description | Cut |
-| 2 | clip_id | M:SS | M:SS | Xs | establish | Brief description | Dissolve |
-[... continue for every segment in the final cut ...]
-
-## Discarded Clips
-| Clip | Duration | Reason |
-|------|----------|--------|
-| clip_id | M:SS | Why this clip was not used |
-
-## Pacing Notes
-- **0:00-0:30**: [pacing guidance — fast cuts, slow, etc.]
-- **0:30-2:00**: [...]
-[... continue for major sections ...]
-
-## Music & Audio Plan
-| Section | Time Range | Audio Strategy | Notes |
-|---------|------------|---------------|-------|
-| Opening | 0:00-0:15 | Upbeat music | No dialogue, let visuals + music hook |
-| Intro | 0:15-1:00 | Lower music, dialogue | Speaker sets up the activity |
-[... continue ...]
-
-## Technical Notes
-[Color grading suggestions, aspect ratio, speed ramps, text overlays, etc.]
+CRITICAL RULES for the structured output:
+- All timestamps must be in SECONDS (float) — these will be used directly by ffmpeg
+- clip_id MUST be the EXACT clip_id from the reviews above (e.g., "{example_clip_id}"). Do NOT abbreviate or shorten clip IDs.
+- in_sec and out_sec are relative to the START of each clip
+- Include every segment needed for the final cut, in chronological order of the output video
+- Be thorough — a complete edit plan that a human can execute
 """
 
 
@@ -194,11 +139,15 @@ def build_editorial_assembly_prompt(
     total_duration_sec: float,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
+    clip_ids = [r.get("clip_id", "unknown") for r in clip_reviews]
+    example_clip_id = clip_ids[0] if clip_ids else "vid_001"
     return EDITORIAL_ASSEMBLY_PROMPT.format(
         project_name=project_name,
         clip_count=clip_count,
         total_duration=format_duration(total_duration_sec),
         clip_reviews_json=reviews_json,
+        clip_ids=", ".join(clip_ids),
+        example_clip_id=example_clip_id,
         style=style,
     )
 
