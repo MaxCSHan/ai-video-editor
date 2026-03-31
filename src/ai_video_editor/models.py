@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
-# Transcript models (from mlx-whisper speech-to-text)
+# Transcript models (mlx-whisper local or Gemini structured output)
 # ---------------------------------------------------------------------------
 
 
@@ -26,6 +26,8 @@ class TranscriptSegment(BaseModel):
     end: float
     text: str
     words: list[TranscriptWord] = []
+    speaker: str | None = None  # "Jinx", "Speaker_A", etc. (Gemini only)
+    type: str = "speech"  # speech | music | sound_effect | silence
 
 
 class Transcript(BaseModel):
@@ -36,6 +38,8 @@ class Transcript(BaseModel):
     segments: list[TranscriptSegment]
     duration_sec: float
     has_speech: bool
+    speakers: list[str] = []  # unique speaker labels detected (Gemini only)
+    provider: str = "mlx"  # "mlx" | "gemini"
 
 
 # ---------------------------------------------------------------------------

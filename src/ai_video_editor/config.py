@@ -50,9 +50,14 @@ class GeminiConfig:
 
 @dataclass
 class TranscribeConfig:
+    # mlx-whisper settings (local)
     model: str = "mlx-community/whisper-large-v3-turbo"
     word_timestamps: bool = True
     language: str | None = None  # None = auto-detect
+    # Provider selection: "auto" | "mlx" | "gemini"
+    provider: str = "auto"
+    # Gemini transcription settings (cloud)
+    gemini_model: str = "gemini-3-flash-preview"
 
 
 @dataclass

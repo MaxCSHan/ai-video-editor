@@ -387,7 +387,7 @@ def cmd_preprocess(args, cfg: Config):
 
 
 def cmd_transcribe(args, cfg: Config):
-    """Run audio transcription on all clips (requires mlx-whisper)."""
+    """Run audio transcription on all clips (mlx-whisper or Gemini)."""
     name = args.project or _infer_project(cfg)
     if not name:
         print(f"{RED}Error:{RESET} Specify a project name.")
@@ -403,10 +403,19 @@ def cmd_transcribe(args, cfg: Config):
         print(f"{RED}Error:{RESET} 'vx transcribe' is only for editorial projects.")
         sys.exit(1)
 
-    try:
-        import mlx_whisper  # noqa: F401
-    except ImportError:
-        print(f"{RED}Error:{RESET} mlx-whisper not installed. Run: uv pip install -e '.[whisper]'")
+    from .editorial_agent import _resolve_transcribe_provider, transcribe_all_clips
+
+    # Override provider from CLI flag if specified
+    if args.provider:
+        cfg.transcribe.provider = args.provider
+
+    provider = _resolve_transcribe_provider(cfg.transcribe)
+    if not provider:
+        print(
+            f"{RED}Error:{RESET} No transcription provider available.\n"
+            f"  Install mlx-whisper: uv pip install -e '.[whisper]'\n"
+            f"  Or set GEMINI_API_KEY for cloud transcription."
+        )
         sys.exit(1)
 
     ep = cfg.editorial_project(name)
@@ -415,14 +424,25 @@ def cmd_transcribe(args, cfg: Config):
         print(f"{RED}Error:{RESET} No clips found in project '{name}'.")
         sys.exit(1)
 
-    _header(f"Transcribing: {name} ({len(clips)} clips)")
+    # Load speaker hints from briefing context if available
+    speaker_hints = None
+    context_path = project_root / "user_context.json"
+    if context_path.exists():
+        import json as _json
 
-    from .editorial_agent import transcribe_all_clips
+        ctx = _json.loads(context_path.read_text())
+        people = ctx.get("people", "")
+        if people:
+            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+
+    _header(f"Transcribing: {name} ({len(clips)} clips, {provider})")
 
     transcripts = transcribe_all_clips(
         [{"clip_id": cid} for cid in clips],
         ep,
         cfg.transcribe,
+        provider=provider,
+        speaker_hints=speaker_hints,
     )
 
     count = len(transcripts)
@@ -809,6 +829,11 @@ def main():
         "transcribe", help="Run audio transcription (requires mlx-whisper)"
     )
     p_transcribe.add_argument("project", nargs="?", help="Project name")
+    p_transcribe.add_argument(
+        "--provider",
+        choices=["mlx", "gemini"],
+        help="Transcription provider (default: auto-detect)",
+    )
     p_transcribe.add_argument("--srt", action="store_true", help="Also generate SRT subtitle files")
 
     # --- analyze ---

@@ -162,22 +162,41 @@ def build_master_manifest(
 
 
 # ---------------------------------------------------------------------------
-# Transcription (optional — requires mlx-whisper)
+# Transcription (mlx-whisper local or Gemini cloud)
 # ---------------------------------------------------------------------------
 
-MAX_TRANSCRIBE_WORKERS = 2  # Whisper uses ~3GB RAM per instance
+MAX_TRANSCRIBE_WORKERS_MLX = 2  # Whisper uses ~3GB RAM per instance
+MAX_TRANSCRIBE_WORKERS_GEMINI = MAX_LLM_WORKERS  # API-bound, not RAM-bound
+
+
+def _resolve_transcribe_provider(cfg: TranscribeConfig) -> str | None:
+    """Resolve transcription provider from config. Returns 'mlx', 'gemini', or None."""
+    if cfg.provider == "mlx":
+        return "mlx"
+    if cfg.provider == "gemini":
+        return "gemini"
+    # auto: try mlx first, then gemini
+    try:
+        import mlx_whisper  # noqa: F401
+
+        return "mlx"
+    except ImportError:
+        pass
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
+    return None
 
 
 def _transcribe_single_clip(
     clip_id: str,
     editorial_paths: EditorialProjectPaths,
     cfg: TranscribeConfig,
+    provider: str,
     index: int,
     total: int,
+    speaker_hints: list[str] | None = None,
 ) -> tuple[str, dict | None]:
-    """Transcribe a single clip's audio. Returns (clip_id, transcript_dict)."""
-    from .transcribe import transcribe_clip
-
+    """Transcribe a single clip. Returns (clip_id, transcript_dict)."""
     clip_paths = editorial_paths.clip_paths(clip_id)
     label = f"[{index}/{total}] {clip_id}"
 
@@ -186,14 +205,31 @@ def _transcribe_single_clip(
         transcript_path = clip_paths.audio / "transcript.json"
         return clip_id, json.loads(transcript_path.read_text())
 
-    # Find the audio WAV file
-    wav_files = list(clip_paths.audio.glob("*.wav"))
-    if not wav_files:
-        print(f"  {label}: no audio found, skipping")
-        return clip_id, None
+    if provider == "gemini":
+        from .transcribe import transcribe_clip_gemini
 
-    print(f"  {label}: transcribing...")
-    transcript = transcribe_clip(wav_files[0], clip_paths, cfg)
+        # Find proxy video
+        proxy_files = list(clip_paths.proxy.glob("*_proxy.mp4"))
+        if not proxy_files:
+            print(f"  {label}: no proxy found, skipping")
+            return clip_id, None
+
+        print(f"  {label}: transcribing (gemini)...")
+        transcript = transcribe_clip_gemini(
+            proxy_files[0], clip_paths, cfg, speaker_hints=speaker_hints
+        )
+    else:
+        from .transcribe import transcribe_clip
+
+        # Find audio WAV file
+        wav_files = list(clip_paths.audio.glob("*.wav"))
+        if not wav_files:
+            print(f"  {label}: no audio found, skipping")
+            return clip_id, None
+
+        print(f"  {label}: transcribing (mlx)...")
+        transcript = transcribe_clip(wav_files[0], clip_paths, cfg)
+
     if transcript:
         speech = "speech" if transcript.get("has_speech") else "no speech"
         print(f"  {label}: done ({speech})")
@@ -204,12 +240,18 @@ def transcribe_all_clips(
     clip_metadata: list[dict],
     editorial_paths: EditorialProjectPaths,
     cfg: TranscribeConfig,
+    provider: str = "mlx",
+    speaker_hints: list[str] | None = None,
 ) -> dict[str, dict]:
     """Transcribe all clips in parallel. Returns {clip_id: transcript_dict}."""
     total = len(clip_metadata)
     results = {}
 
-    with ThreadPoolExecutor(max_workers=MAX_TRANSCRIBE_WORKERS) as pool:
+    max_workers = (
+        MAX_TRANSCRIBE_WORKERS_GEMINI if provider == "gemini" else MAX_TRANSCRIBE_WORKERS_MLX
+    )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for i, clip_info in enumerate(clip_metadata):
             fut = pool.submit(
@@ -217,8 +259,10 @@ def transcribe_all_clips(
                 clip_info["clip_id"],
                 editorial_paths,
                 cfg,
+                provider,
                 i + 1,
                 total,
+                speaker_hints,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -659,16 +703,26 @@ def run_editorial_pipeline(
     total_dur = format_duration(manifest["total_duration_sec"])
     print(f"  Total raw footage: {total_dur}")
 
-    # Transcription (optional — requires mlx-whisper)
-    try:
-        import mlx_whisper  # noqa: F401
+    # Transcription (optional — mlx-whisper local or Gemini cloud)
+    t_provider = _resolve_transcribe_provider(cfg.transcribe)
+    if t_provider:
+        # Load speaker hints from briefing if available
+        speaker_hints = None
+        context_path = editorial_paths.root / "user_context.json"
+        if context_path.exists():
+            ctx = json.loads(context_path.read_text())
+            people = ctx.get("people", "")
+            if people:
+                speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
 
-        print("  Transcribing audio (mlx-whisper)...")
-        transcripts = transcribe_all_clips(clip_metadata, editorial_paths, cfg.transcribe)
+        print(f"  Transcribing audio ({t_provider})...")
+        transcripts = transcribe_all_clips(
+            clip_metadata, editorial_paths, cfg.transcribe, t_provider, speaker_hints
+        )
         count = len(transcripts)
         print(f"  Transcribed {count}/{len(clip_metadata)} clips with speech")
-    except ImportError:
-        print("  Skipping transcription (install with: uv pip install -e '.[whisper]')")
+    else:
+        print("  Skipping transcription (no provider: install mlx-whisper or set GEMINI_API_KEY)")
 
     # Phase 1 — per-clip reviews
     print(f"[3/4] Phase 1: Reviewing clips with {provider}...")
