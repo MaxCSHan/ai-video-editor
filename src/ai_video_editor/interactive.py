@@ -11,16 +11,18 @@ from questionary import Style
 
 from .config import DEFAULT_CONFIG, LIBRARY_DIR
 
-VX_STYLE = Style([
-    ("qmark", "fg:#2ecc71 bold"),
-    ("question", "fg:#ffffff bold"),
-    ("answer", "fg:#2ecc71"),
-    ("pointer", "fg:#2ecc71 bold"),
-    ("highlighted", "fg:#2ecc71 bold"),
-    ("selected", "fg:#2ecc71"),
-    ("instruction", "fg:#666666"),
-    ("text", "fg:#aaaaaa"),
-])
+VX_STYLE = Style(
+    [
+        ("qmark", "fg:#2ecc71 bold"),
+        ("question", "fg:#ffffff bold"),
+        ("answer", "fg:#2ecc71"),
+        ("pointer", "fg:#2ecc71 bold"),
+        ("highlighted", "fg:#2ecc71 bold"),
+        ("selected", "fg:#2ecc71"),
+        ("instruction", "fg:#666666"),
+        ("text", "fg:#aaaaaa"),
+    ]
+)
 
 BANNER = """
 \033[1m  VX — AI Video Editor\033[0m
@@ -31,6 +33,7 @@ BANNER = """
 def run_interactive():
     """Main interactive loop."""
     from dotenv import load_dotenv
+
     load_dotenv()
 
     print(BANNER)
@@ -108,8 +111,12 @@ def _new_project_flow(cfg):
     print(f"  Style: {style}, Provider: {provider}\n")
 
     from .editorial_agent import (
-        discover_source_clips, preprocess_all_clips,
-        build_master_manifest, run_phase1_gemini, run_phase1_claude, run_phase2,
+        discover_source_clips,
+        preprocess_all_clips,
+        build_master_manifest,
+        run_phase1_gemini,
+        run_phase1_claude,
+        run_phase2,
     )
 
     ep = cfg.editorial_project(name)
@@ -117,6 +124,7 @@ def _new_project_flow(cfg):
 
     # Save project metadata
     from datetime import datetime, timezone
+
     meta = {
         "name": name,
         "type": "editorial",
@@ -143,6 +151,9 @@ def _new_project_flow(cfg):
     manifest = build_master_manifest(clip_metadata, ep, name)
     print(f"\n  Total footage: {manifest['total_duration_fmt']}")
 
+    # Transcription
+    _run_transcription(ep, clip_metadata, cfg)
+
     # Phase 1
     if not questionary.confirm("Run Phase 1 clip reviews?", default=True, style=VX_STYLE).ask():
         print("\n  Skipped. Run 'vx analyze' later.\n")
@@ -157,10 +168,13 @@ def _new_project_flow(cfg):
 
     # Briefing
     from .briefing import run_briefing
+
     user_context = run_briefing(reviews, style, ep.root)
 
     # Phase 2
-    if not questionary.confirm("Generate editorial storyboard?", default=True, style=VX_STYLE).ask():
+    if not questionary.confirm(
+        "Generate editorial storyboard?", default=True, style=VX_STYLE
+    ).ask():
         print("\n  Context saved. Run 'vx analyze' later.\n")
         return
 
@@ -187,8 +201,7 @@ def _open_project_flow(cfg):
         return
 
     projects = sorted(
-        d.name for d in cfg.library_dir.iterdir()
-        if d.is_dir() and (d / "project.json").exists()
+        d.name for d in cfg.library_dir.iterdir() if d.is_dir() and (d / "project.json").exists()
     )
     if not projects:
         print("\n  No projects yet.\n")
@@ -213,7 +226,9 @@ def _project_actions(name, cfg):
 
     while True:
         # Check state
-        has_storyboard = any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
+        has_storyboard = (
+            any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
+        )
         has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
         has_rough_cut = any(ep.exports.glob("*/rough_cut.mp4")) if ep.exports.exists() else False
 
@@ -223,6 +238,7 @@ def _project_actions(name, cfg):
         if has_storyboard:
             choices.append("Regenerate preview")
             choices.append("Assemble rough cut")
+        choices.append("Transcribe audio")
         choices.append("Run analysis (Phase 1 + 2)")
         choices.append("Edit briefing")
         choices.append("Show status")
@@ -254,6 +270,7 @@ def _project_actions(name, cfg):
             from .models import EditorialStoryboard
             from .render import render_html_preview
             from .versioning import next_version, versioned_dir, update_latest_symlink
+
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
                 sb = EditorialStoryboard.model_validate_json(json_files[0].read_text())
@@ -267,7 +284,9 @@ def _project_actions(name, cfg):
                     if rc.exists():
                         rough_cut_path = rc.resolve()
                 html = render_html_preview(
-                    sb, clips_dir=ep.clips_dir, output_dir=vdir,
+                    sb,
+                    clips_dir=ep.clips_dir,
+                    output_dir=vdir,
                     rough_cut_path=rough_cut_path,
                 )
                 preview_path = vdir / "preview.html"
@@ -278,6 +297,7 @@ def _project_actions(name, cfg):
                     subprocess.run(["open", str(preview_path)])
         elif action == "Assemble rough cut":
             from .rough_cut import run_rough_cut
+
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
                 print(f"\n  Assembling rough cut...\n")
@@ -285,12 +305,15 @@ def _project_actions(name, cfg):
                 print(f"\n  Done! v{result['version']}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(result["preview"])])
+        elif action == "Transcribe audio":
+            _run_transcription_interactive(name, cfg)
         elif action == "Run analysis (Phase 1 + 2)":
             _run_analyze(name, meta, cfg)
         elif action == "Edit briefing":
             reviews = _load_reviews(ep)
             style = meta.get("style", "vlog")
             from .briefing import run_briefing
+
             # Delete existing context to force fresh questions
             ctx_path = ep.root / "user_context.json"
             if ctx_path.exists():
@@ -303,8 +326,12 @@ def _project_actions(name, cfg):
 def _run_analyze(name, meta, cfg):
     """Run the full analysis pipeline."""
     from .editorial_agent import (
-        discover_source_clips, preprocess_all_clips,
-        build_master_manifest, run_phase1_gemini, run_phase1_claude, run_phase2,
+        discover_source_clips,
+        preprocess_all_clips,
+        build_master_manifest,
+        run_phase1_gemini,
+        run_phase1_claude,
+        run_phase2,
     )
     from .briefing import run_briefing
 
@@ -317,6 +344,9 @@ def _run_analyze(name, meta, cfg):
     print(f"\n  {len(clips)} clips, preprocessing...\n")
     clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, ep, name)
+
+    # Transcription
+    _run_transcription(ep, clip_metadata, cfg)
 
     print(f"\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
@@ -346,11 +376,104 @@ def _load_reviews(ep):
     for clip_id in ep.discover_clips():
         cp = ep.clip_paths(clip_id)
         for pattern in ["review_*_latest.json", "review_*.json"]:
-            found = [f for f in cp.review.glob(pattern) if not f.name.endswith("_latest.json") or f.is_symlink()]
+            found = [
+                f
+                for f in cp.review.glob(pattern)
+                if not f.name.endswith("_latest.json") or f.is_symlink()
+            ]
             if found:
                 reviews.append(json.loads(found[0].read_text()))
                 break
     return reviews
+
+
+def _run_transcription(ep, clip_metadata, cfg):
+    """Run transcription as part of a pipeline flow (non-interactive provider selection)."""
+    from .editorial_agent import _resolve_transcribe_provider, transcribe_all_clips
+
+    t_provider = _resolve_transcribe_provider(cfg.transcribe)
+    if not t_provider:
+        print("\n  Skipping transcription (no provider available)")
+        return
+
+    # Load speaker hints from briefing if available
+    speaker_hints = None
+    context_path = ep.root / "user_context.json"
+    if context_path.exists():
+        ctx = json.loads(context_path.read_text())
+        people = ctx.get("people", "")
+        if people:
+            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+
+    print(f"\n  Transcribing audio ({t_provider})...\n")
+    transcripts = transcribe_all_clips(
+        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_hints=speaker_hints
+    )
+    count = len(transcripts)
+    print(f"\n  Transcribed {count}/{len(clip_metadata)} clips with speech")
+
+
+def _run_transcription_interactive(name, cfg):
+    """Run transcription from project actions menu with provider choice."""
+    from .editorial_agent import (
+        _resolve_transcribe_provider,
+        discover_source_clips,
+        preprocess_all_clips,
+        transcribe_all_clips,
+    )
+
+    ep = cfg.editorial_project(name)
+    meta = json.loads((ep.root / "project.json").read_text())
+
+    # Let user pick provider
+    available = []
+    try:
+        import mlx_whisper  # noqa: F401
+
+        available.append("mlx (local, fast, no API cost)")
+    except ImportError:
+        pass
+    if os.environ.get("GEMINI_API_KEY"):
+        available.append("gemini (cloud, speakers + sound events)")
+    if not available:
+        print("\n  No transcription provider available.")
+        print("  Install mlx-whisper or set GEMINI_API_KEY.\n")
+        return
+
+    if len(available) == 1:
+        t_provider = available[0].split(" ")[0]
+    else:
+        choice = questionary.select(
+            "Transcription provider:",
+            choices=available,
+            style=VX_STYLE,
+        ).ask()
+        if not choice:
+            return
+        t_provider = choice.split(" ")[0]
+
+    # Build clip metadata from existing clips
+    clips = ep.discover_clips()
+    if not clips:
+        print("\n  No clips found.\n")
+        return
+    clip_metadata = [{"clip_id": cid} for cid in clips]
+
+    # Load speaker hints
+    speaker_hints = None
+    context_path = ep.root / "user_context.json"
+    if context_path.exists():
+        ctx = json.loads(context_path.read_text())
+        people = ctx.get("people", "")
+        if people:
+            speaker_hints = [p.strip() for p in people.split(",") if p.strip()]
+
+    print(f"\n  Transcribing {len(clips)} clips ({t_provider})...\n")
+    transcripts = transcribe_all_clips(
+        clip_metadata, ep, cfg.transcribe, provider=t_provider, speaker_hints=speaker_hints
+    )
+    count = len(transcripts)
+    print(f"\n  Done. {count}/{len(clips)} clips have speech\n")
 
 
 def _show_status(name, meta, cfg):
@@ -363,8 +486,13 @@ def _show_status(name, meta, cfg):
     for cid in clips:
         cp = ep.clip_paths(cid)
         cached = [k for k, v in cp.cache_status().items() if v]
+        transcribed = "transcribed" if cp.has_transcript() else ""
         reviewed = "reviewed" if cp.has_review(provider) else "pending"
-        print(f"    {cid}: {', '.join(cached)} | {reviewed}")
+        parts = ", ".join(cached)
+        if transcribed:
+            parts += f" | {transcribed}"
+        parts += f" | {reviewed}"
+        print(f"    {cid}: {parts}")
 
     storyboards = list(ep.storyboard.glob("editorial_*_v*.json")) if ep.storyboard.exists() else []
     if storyboards:
@@ -377,7 +505,11 @@ def _show_status(name, meta, cfg):
 def _settings_flow(cfg):
     """Edit workspace settings."""
     ws_path = Path(".vx.json")
-    ws = json.loads(ws_path.read_text()) if ws_path.exists() else {"provider": "gemini", "style": "vlog"}
+    ws = (
+        json.loads(ws_path.read_text())
+        if ws_path.exists()
+        else {"provider": "gemini", "style": "vlog"}
+    )
 
     provider = questionary.select(
         "Default AI provider:",
