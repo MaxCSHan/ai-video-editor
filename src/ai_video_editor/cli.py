@@ -426,6 +426,27 @@ def cmd_transcribe(args, cfg: Config):
         print(f"{RED}Error:{RESET} No clips found in project '{name}'.")
         sys.exit(1)
 
+    # Check for existing transcripts and offer overwrite
+    force = getattr(args, "force", False)
+    cached = [cid for cid in clips if ep.clip_paths(cid).has_transcript()]
+    if cached:
+        print(f"\n  {YELLOW}{len(cached)}/{len(clips)} clips already have transcripts.{RESET}")
+        if force:
+            overwrite = True
+        else:
+            answer = input("  Overwrite existing transcripts? [y/N] ").strip().lower()
+            overwrite = answer in ("y", "yes")
+        if overwrite:
+            for cid in cached:
+                audio_dir = ep.clip_paths(cid).audio
+                for f in ["transcript.json", "transcript.vtt", "transcript_preview.html"]:
+                    p = audio_dir / f
+                    if p.exists():
+                        p.unlink()
+            print(f"  Cleared {len(cached)} cached transcripts.")
+        else:
+            print("  Keeping cached transcripts (only un-transcribed clips will be processed).")
+
     # Load speaker context from briefing if available
     speaker_context = None
     context_path = project_root / "user_context.json"
@@ -847,6 +868,9 @@ def main():
         "--provider",
         choices=["mlx", "gemini"],
         help="Transcription provider (default: auto-detect)",
+    )
+    p_transcribe.add_argument(
+        "--force", action="store_true", help="Overwrite existing transcripts without asking"
     )
     p_transcribe.add_argument("--srt", action="store_true", help="Also generate SRT subtitle files")
 
