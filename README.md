@@ -1,6 +1,71 @@
 # VX — AI Video Editor
 
-Turn raw trip footage into polished vlogs with AI. Point at a folder of clips, and VX reviews every clip, identifies people, builds a story arc, and produces an edit plan with precise cut points — then assembles a rough cut video.
+Turn raw trip footage into polished vlogs with AI.
+
+## Philosophy
+
+This project exists because most people come back from trips with hours of raw clips and never edit them. The gap between "raw footage on a hard drive" and "a video worth sharing" is enormous — it requires the eye of an editor, the patience to review every clip, and the craft to assemble a story.
+
+VX automates the editor's thinking, not just the cutting. Here's what that means:
+
+**An editor's real job is not cutting video.** It's watching all the dailies, understanding what story the footage can tell, identifying the strongest moments, and making hundreds of small decisions about what to keep, what to cut, and in what order. The mechanical act of cutting is the easy part. VX focuses on automating the hard part — the editorial judgment.
+
+**The footage dictates the story.** You don't start with a script and find clips to match it. You start with what you actually shot — shaky B-roll, accidental recordings, someone talking with their mouth full — and find the best possible story within those constraints. The AI reviews every clip the same way an editor would: what's usable? what's the energy? who's in it? where are the moments?
+
+**Context makes the difference.** An editor who knows "that's my sister, this was her first time surfing" makes a fundamentally different video than one who just sees "woman on surfboard." The briefing system exists because the filmmaker's intent and relationships are the single biggest input to editorial quality. The AI can see what's in the frame; only you know why it matters.
+
+**Structure before style.** A good edit follows: hook the viewer, establish context, build through the body, hit a climax, close with an outro. This isn't a formula — it's how stories work. VX produces a story arc with these beats mapped to specific clips and timestamps, because a well-structured 2-minute video beats a meandering 10-minute one every time.
+
+**The output must be usable or it's worthless.** This is automation, not assistance. If the AI produces a storyboard that a human still needs to heavily rework, we've just added a step instead of removing one. Every segment in the EDL has precise in/out timestamps in seconds. The rough cut assembles from these without any human intervention. The HTML preview lets you verify and adjust, but the default should be good enough to share.
+
+**Iterate, don't perfect.** The versioning system exists because the first AI pass won't be the best. Run analyze, review, adjust the briefing, run again. Each version is preserved. The interactive preview lets you nudge cut points without re-running the AI. The goal is convergence: each pass gets closer to what you want.
+
+## How It Works
+
+```
+Raw Clips                       You shot 17 clips on your trip.
+    │                           4K, handheld, no plan, mixed quality.
+    │
+    ▼
+┌─────────┐                     ffmpeg downscales each clip to a tiny proxy
+│ Ingest  │                     (360p, 1fps, ~5MB). Extracts frames, detects
+└────┬────┘                     scene changes, pulls audio. Runs 4 clips in
+     │                          parallel. Cached — never re-processed.
+     ▼
+┌──────────┐                    You answer a few questions: who's in it,
+│ Briefing │  (optional)        what was the occasion, what tone you want.
+└────┬─────┘                    Saved as context for the AI editor.
+     │
+     ▼
+┌─────────────┐                 The AI watches each clip's proxy video and
+│  Phase 1    │                 produces a structured review: what's in it,
+│ Clip Review │                 who appears, quality assessment, which parts
+└──────┬──────┘                 are usable vs throwaway, key moments.
+       │                        One LLM call per clip. Cached per clip.
+       ▼
+┌─────────────┐                 The AI acts as creative editor. It sees ALL
+│  Phase 2    │                 clip reviews + your briefing context, then
+│  Editorial  │                 produces a complete edit plan: story arc,
+│  Assembly   │                 cast, EDL with precise in/out timestamps
+└──────┬──────┘                 (in seconds), pacing, music cues, technical
+       │                        notes. One LLM call. Structured output
+       │                        (Pydantic model enforced by the API).
+       │
+       ├──→ editorial.json       The structured data. Source of truth.
+       ├──→ editorial.md         Human-readable rendered view.
+       └──→ preview.html         Interactive: click segments to preview
+                                 video, drag to adjust cut points,
+                                 export refined JSON.
+       │
+       ▼
+┌─────────┐                     Loads the JSON. Validates timestamps against
+│   Cut   │                     actual clip durations (clamps out-of-bounds).
+│  (ffmpeg)│                     Extracts each segment, concatenates into
+└────┬────┘                     rough_cut.mp4. No LLM call — pure execution.
+     │
+     └──→ rough_cut.mp4          Watch it. If it's not right, adjust the
+          preview.html           preview, export new JSON, re-cut.
+```
 
 ## Quick Start
 
@@ -11,37 +76,6 @@ cp .env.example .env   # Add your GEMINI_API_KEY
 vx                     # Launch interactive mode
 ```
 
-## How It Works
-
-```
-Raw Clips (folder)
-      |
-  [Preprocess]     ffmpeg: downscale proxy, extract frames, detect scenes, audio
-      |                    (parallel, cached)
-      |
-  [Briefing]       Interactive questionnaire — name people, describe occasion,
-      |            set tone. Feeds context into Phase 2. (optional, skippable)
-      |
-  [Phase 1]        LLM reviews EACH clip individually
-                   Input:  proxy video (Gemini) or frames (Claude)
-                   Output: structured JSON — summary, quality, people,
-                           key moments, usable/discard segments, audio
-                   Cached per clip.
-      |
-  [Phase 2]        LLM acts as creative editor across ALL clips
-                   Input:  Phase 1 reviews + user briefing context
-                   Output: Pydantic structured JSON (enforced schema) —
-                           story arc, cast, EDL with precise in/out seconds,
-                           pacing notes, music plan, technical notes
-                   Also renders: markdown + interactive HTML preview
-      |
-  [Cut]            ffmpeg: extract segments at exact timestamps, concatenate
-                   Input:  structured JSON from Phase 2 (no LLM needed)
-                   Output: rough_cut.mp4 + HTML preview with embedded video
-```
-
-Each phase is **cached and versioned**. Re-running skips completed work.
-
 ## CLI
 
 ### Interactive mode (recommended)
@@ -50,29 +84,27 @@ Each phase is **cached and versioned**. Re-running skips completed work.
 vx                                    # Guided workflow with menus and prompts
 ```
 
-Walks you through: create project → preprocess → briefing → analyze → preview → cut.
-
-### Direct commands (for scripting)
+### Direct commands
 
 ```bash
-vx new my-trip ~/footage/             # Create project from footage folder
-vx new recap video.mp4                # Single-video descriptive mode
-vx analyze my-trip                    # Phase 1 + 2 → structured storyboard
-vx analyze my-trip --force            # Re-run Phase 1 reviews
+vx new my-trip ~/footage/             # Create project, preprocess clips
+vx analyze my-trip                    # Briefing + Phase 1 + Phase 2
+vx analyze my-trip --force            # Re-run Phase 1 reviews from scratch
 vx analyze my-trip --no-interactive   # Skip briefing questions
 vx cut my-trip                        # Assemble rough cut (no LLM)
+
 vx projects                           # List all projects
-vx status my-trip                     # Detailed status with versions
+vx status my-trip                     # Per-clip cache and version status
 vx config --provider gemini           # Set defaults
 ```
 
 ### Interactive HTML preview
 
-The preview (`storyboard/*_preview.html`) is an interactive editor:
-- Click timeline segments to open a **video preview modal**
-- Embedded proxy video player with **adjustable in/out range handles**
-- Drag to adjust cut points, preview the selection
-- **Export adjusted JSON** to fine-tune before running `vx cut`
+The preview (`storyboard/*_preview.html`) is an editing tool:
+- Click timeline segments → video preview modal with the clip's proxy
+- Draggable in/out range handles to adjust cut points
+- Preview the selected range, play the full clip for context
+- Export adjusted JSON → feed back into `vx cut`
 
 ## Prerequisites
 
@@ -93,22 +125,24 @@ cp .env.example .env
 
 ```
 library/
-  my-trip/                              # One project per shoot
-    project.json                        # Metadata (type, provider, style)
-    user_context.json                   # Briefing answers
+  my-trip/
+    project.json                        # Type, provider, style, versions
+    user_context.json                   # Briefing answers (people, tone, etc.)
     manifest.json                       # Aggregated clip metadata
     clips/
       20260330_C0059/                   # Per-clip (parallel preprocessed, cached)
         source/  proxy/  frames/  scenes/  audio/
-        review/review_gemini_v1.json    # Phase 1 review (versioned)
+        review/
+          review_gemini_v1.json         # Phase 1 review (versioned, cached)
+          review_gemini_latest.json     # Symlink → latest version
     storyboard/
-      editorial_gemini_v1.json          # Phase 2: structured data (primary)
-      editorial_gemini_v1.md            # Rendered markdown view
+      editorial_gemini_v1.json          # Phase 2: structured data (source of truth)
+      editorial_gemini_v1.md            # Rendered markdown
       editorial_gemini_v1_preview.html  # Interactive HTML preview
     exports/
-      v1/                              # Versioned rough cuts
+      v1/                               # Versioned rough cuts
         rough_cut.mp4
-        preview.html                   # Preview with embedded video
+        preview.html
         segments/  thumbnails/
 ```
 
@@ -117,25 +151,25 @@ library/
 ```
 src/ai_video_editor/
   cli.py               # CLI entry point (vx command)
-  interactive.py        # Interactive TUI mode (questionary)
+  interactive.py        # Interactive TUI (questionary/prompt_toolkit)
   briefing.py           # Editorial briefing questionnaire
   models.py             # Pydantic models (EditorialStoryboard, Segment, etc.)
-  config.py             # Settings, ProjectPaths, EditorialProjectPaths
+  config.py             # Settings, paths, provider configs
   preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached)
-  editorial_prompts.py  # Phase 1 + 2 prompt templates
+  editorial_prompts.py  # Phase 1 + 2 prompt engineering
   editorial_agent.py    # Multi-clip orchestrator
-  render.py             # Markdown + HTML rendering from Pydantic models
+  render.py             # Markdown + interactive HTML from Pydantic models
   rough_cut.py          # Validation + ffmpeg assembly (no LLM)
   versioning.py         # Run versioning with symlinks
-  storyboard_format.py  # Descriptive storyboard template
-  gemini_analyze.py     # Gemini single-video descriptive analysis
-  claude_analyze.py     # Claude single-video descriptive analysis
 ```
 
 ## LLM Calls
 
-| Phase | What | Input | Output | Cached? |
-|-------|------|-------|--------|---------|
-| 1 | Clip review | Proxy video or frames | JSON: quality, people, segments | Per-clip |
-| 2 | Editorial assembly | Phase 1 JSONs + user context | Pydantic JSON: arc, cast, EDL, music | Per-project (versioned) |
-| Cut | Assembly | Structured JSON | rough_cut.mp4 | **No LLM** — pure ffmpeg |
+| What | Input | Output | LLM? |
+|------|-------|--------|------|
+| Preprocess | Raw 4K clips | Proxy, frames, scenes, audio | No — ffmpeg |
+| Briefing | User answers questions | user_context.json | No — interactive |
+| Phase 1 | Proxy video per clip | Structured review JSON | Yes — per clip, cached |
+| Phase 2 | All reviews + briefing | EditorialStoryboard (Pydantic JSON) | Yes — one call |
+| Render | Structured JSON | Markdown + HTML preview | No — templates |
+| Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
