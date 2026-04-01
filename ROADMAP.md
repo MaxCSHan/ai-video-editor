@@ -40,18 +40,23 @@
 ### Interactive TUI
 - [x] `vx` (no args) launches guided interactive mode via questionary/prompt_toolkit
 - [x] Main menu: New project / Open existing / Settings / Quit
-- [x] New project flow: name → footage folder (tab-complete) → style selector → preprocess → review → briefing → analyze
-- [x] Project actions menu: preview, cut, re-analyze, edit briefing, status
-- [x] Editorial briefing: smart questions based on Phase 1 (detected people, flagged highlights)
+- [x] New project flow: name → footage folder → clip selection → style → preprocess → transcribe → review → briefing → analyze
+- [x] Project actions menu: preview, cut, re-analyze, transcribe, manage clips, edit briefing (AI-guided/manual), status
+- [x] Editorial briefing: AI-guided (quick scan + targeted questions) or manual (smart hints from Phase 1)
+- [x] Transcription with provider selection (mlx/gemini) and overwrite prompt for cached transcripts
+- [x] Visual Phase 2 opt-in prompt during analysis
+- [x] LLM usage tracing with cost summary after pipeline runs
+- [x] Status display includes transcript status and cumulative LLM cost
 - [x] Tone selector: preset choices + custom option
 
 ### CLI (Direct Commands)
 - [x] `vx new <name> <source>` — auto-detect editorial vs descriptive
-- [x] `vx analyze` — Phase 1 + 2, with `--force` and `--no-interactive` flags
+- [x] `vx transcribe` — audio transcription with `--provider gemini|mlx`, `--force`, `--srt`
+- [x] `vx brief` — edit briefing context in $EDITOR; `--scan` for AI-guided briefing
+- [x] `vx analyze` — Phase 1 + 2, with `--force`, `--no-interactive`, `--visual`, `--dry-run` flags
 - [x] `vx cut` — load structured JSON, validate, ffmpeg assembly (no LLM)
-- [x] `vx brief` — edit briefing context in $EDITOR
 - [x] `vx projects` / `vx ls` — list all projects with status
-- [x] `vx status` — per-clip cache/review status with version counts
+- [x] `vx status` — per-clip cache/review/transcript status, LLM usage summary
 - [x] `vx preprocess` / `vx prep` — preprocessing only
 - [x] `vx config` — show/set defaults, API key status
 
@@ -60,9 +65,11 @@
 - [x] Segment detail modal with embedded proxy video player
 - [x] Draggable in/out range handles for cut point adjustment
 - [x] Preview selected range / play full clip buttons
+- [x] Transcript overlay in segment modal: shows dialogue for the segment's time range, clickable lines seek video, auto-highlights during playback
 - [x] Cast table, story arc cards, music plan, technical notes
 - [x] Export adjusted JSON for human-in-the-loop refinement
 - [x] Keyboard shortcuts (Space play/pause, Escape close)
+- [x] Per-clip transcript preview HTML (video + VTT captions + clickable sidebar)
 
 ### Versioning
 - [x] Auto-incrementing version per phase (analyze v1, v2...; cut v1, v2...)
@@ -101,11 +108,44 @@
 ## Planned — Near Term
 
 ### Audio Transcription
-- [ ] Integrate `mlx-whisper` for local speech-to-text (Apple Silicon optimized)
-- [ ] Timestamped transcript JSON per clip
-- [ ] Feed transcripts into Phase 1 review (what was said, when)
-- [ ] Phase 2 uses dialogue content for narrative decisions
-- [ ] Subtitle/caption generation from transcripts
+- [x] Dual-provider transcription: mlx-whisper (local, Apple Silicon) and Gemini (cloud, structured output)
+- [x] Gemini transcription with speaker identification, sound event detection, visual context from proxy video
+- [x] Dedicated `GeminiTranscript` Pydantic model for structured output (no word-level waste)
+- [x] Anti-hallucination prompt: uses visual context, marks silence/music/sound_effect types correctly
+- [x] Timestamped transcript JSON per clip (cached, with overwrite prompt)
+- [x] Feed transcripts into Phase 1 review (what was said, when, by whom)
+- [x] Phase 2 uses dialogue content for narrative decisions
+- [x] SRT + WebVTT subtitle generation with speaker prefixes and non-speech markers
+- [x] Per-clip transcript preview HTML (video + VTT captions + clickable transcript sidebar)
+- [x] Transcript overlay in editorial preview (segment modal shows relevant dialogue, auto-highlights during playback)
+- [x] Rich speaker context from `user_context.json` passed as free-form text to Gemini prompt (not comma-split)
+- [x] `vx transcribe` CLI with `--provider gemini|mlx`, `--force`, `--srt` flags
+- [x] Auto-provider detection: mlx if installed → gemini if API key set → skip
+
+### LLM Call Tracing & Cost Management
+- [x] `tracing.py` module: records tokens, cost, timing for every Gemini API call
+- [x] `traced_gemini_generate()` wrapper extracts `response.usage_metadata` automatically
+- [x] Cost estimation table for Gemini and Claude models (per 1M tokens)
+- [x] Append-only `traces.jsonl` per project — full audit trail of API calls
+- [x] `vx analyze --dry-run`: estimate tokens and cost per phase before committing
+- [x] `vx status` shows cumulative LLM usage with per-phase breakdown
+- [x] Pipeline prints cost summary after completion
+
+### Visual Phase 2 (Proxy Videos in Editorial Assembly)
+- [x] `vx analyze --visual`: uploads all proxy videos to Phase 2 Gemini call
+- [x] Phase 2 LLM sees actual footage for visual judgments (energy, composition, continuity)
+- [x] File API URI caching from Phase 1 uploads (90-min TTL, avoids redundant uploads)
+- [x] Phase 2 prompt enhanced with visual context instructions when videos attached
+- [x] Dry-run shows cost comparison: text-only vs visual mode
+
+### Smart Briefing (AI-Guided Context Gathering)
+- [x] Quick scan: single Gemini call watches all proxy videos, produces structured overview
+- [x] `QuickScanResult` Pydantic model: people sightings, activities, mood, suggested questions
+- [x] AI asks targeted questions based on what it actually saw ("Who is the person in the green shirt?")
+- [x] Replaces blind briefing with informed briefing — user responds to specific observations
+- [x] `vx brief --scan`: standalone AI-guided briefing with fresh scan
+- [x] Interactive TUI: "Edit briefing (AI-guided)" vs "Edit briefing (manual)"
+- [x] Auto-used in pipeline when GEMINI_API_KEY available, falls back to manual
 
 ### Multi-Track Audio Assembly
 - [ ] Parse `audio_note` field from EDL segments (already in the data model)
@@ -116,6 +156,8 @@
 - [ ] Background music track mixing
 
 ### Improved Phase 1 (Holistic Context)
+- [x] Transcripts injected into Phase 1 prompt (what was said, when, by whom)
+- [ ] Pass user_context.json into each Phase 1 review (filmmaker's intent, people names)
 - [ ] Pass clip list overview to each Phase 1 review so the agent knows the full shooting context
 - [ ] Sequential clip review with accumulated context (each review informed by previous)
 - [ ] Or: single-pass multi-clip review where Gemini sees all proxies at once (up to 10)
@@ -189,11 +231,12 @@
 
 ### Design Principles
 1. **Structured data first**: Pydantic models are the source of truth. Markdown and HTML are rendered views.
-2. **LLM calls are minimal**: Phase 1 (per-clip) + Phase 2 (assembly) only. Everything after is deterministic.
-3. **Cache everything**: Preprocessing and Phase 1 reviews cached per-clip. Re-runs are fast.
+2. **LLM calls are minimal and traced**: Transcribe + Phase 1 + Phase 2 + optional quick scan. Every call logs tokens, cost, and timing to `traces.jsonl`.
+3. **Cache everything**: Preprocessing, transcription, and Phase 1 reviews cached per-clip. Re-runs are fast.
 4. **Version everything**: Every LLM output is versioned. Compare, rollback, iterate.
 5. **Human-in-the-loop**: AI proposes, user adjusts via interactive preview, then execute.
 6. **No build step**: HTML preview is self-contained. No React, no bundling, opens in any browser.
+7. **Cost visibility**: Dry-run estimation before committing, per-phase cost breakdown in status, cumulative tracking across runs.
 
 ### Tech Stack
 - **Python 3.11+** with Pydantic for data models

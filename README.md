@@ -41,9 +41,15 @@ Raw Clips                       You shot 17 clips on your trip.
      │                          H.265), and fit mode (pad/crop) when sources
      │                          are mixed.
      ▼
-┌──────────┐                    You answer a few questions: who's in it,
-│ Briefing │  (optional)        what was the occasion, what tone you want.
-└────┬─────┘                    Saved as context for the AI editor.
+┌──────────────┐                AI transcribes each clip's audio via
+│ Transcription│                Gemini (speaker ID, sound events) or
+└──────┬───────┘                mlx-whisper (local). Cached per clip.
+       │                        VTT + preview HTML for verification.
+       ▼
+┌──────────┐                    AI quick-scans all footage, then asks
+│ Briefing │  (AI-guided)       targeted questions based on what it saw:
+└────┬─────┘                    "Who is the person in the green shirt?"
+     │                          Saved as context for the AI editor.
      │
      ▼
 ┌─────────────┐                 The AI watches each clip's proxy video and
@@ -53,12 +59,13 @@ Raw Clips                       You shot 17 clips on your trip.
        │                        One LLM call per clip. Cached per clip.
        ▼
 ┌─────────────┐                 The AI acts as creative editor. It sees ALL
-│  Phase 2    │                 clip reviews + your briefing context, then
-│  Editorial  │                 produces a complete edit plan: story arc,
-│  Assembly   │                 cast, EDL with precise in/out timestamps
-└──────┬──────┘                 (in seconds), pacing, music cues, technical
-       │                        notes. One LLM call. Structured output
-       │                        (Pydantic model enforced by the API).
+│  Phase 2    │                 clip reviews + transcripts + your briefing
+│  Editorial  │                 context. With --visual, it also sees all
+│  Assembly   │                 proxy videos. Produces a complete edit plan:
+└──────┬──────┘                 story arc, cast, EDL with precise in/out
+       │                        timestamps (in seconds), pacing, music cues.
+       │                        One LLM call. Structured output (Pydantic
+       │                        model enforced by the API).
        │
        ├──→ editorial.json       The structured data. Source of truth.
        ├──→ editorial.md         Human-readable rendered view.
@@ -98,13 +105,20 @@ vx                                    # Guided workflow with menus and prompts
 
 ```bash
 vx new my-trip ~/footage/             # Create project, preprocess clips
+vx transcribe my-trip                 # Transcribe audio (auto-detect provider)
+vx transcribe my-trip --provider gemini  # Gemini: speaker ID + sound events
+vx transcribe my-trip --provider mlx  # mlx-whisper: local, fast, no API cost
+vx transcribe my-trip --force --srt   # Overwrite cached + generate SRT/VTT
+vx brief my-trip --scan               # AI-guided briefing (quick scan + questions)
 vx analyze my-trip                    # Briefing + Phase 1 + Phase 2
+vx analyze my-trip --visual           # Phase 2 sees proxy videos (richer edits)
+vx analyze my-trip --dry-run          # Estimate token usage and cost
 vx analyze my-trip --force            # Re-run Phase 1 reviews from scratch
 vx analyze my-trip --no-interactive   # Skip briefing questions
 vx cut my-trip                        # Assemble rough cut (no LLM)
 
 vx projects                           # List all projects
-vx status my-trip                     # Per-clip cache and version status
+vx status my-trip                     # Per-clip cache, versions, LLM usage
 vx config --provider gemini           # Set defaults
 ```
 
@@ -138,21 +152,28 @@ library/
   my-trip/
     project.json                        # Type, provider, style, versions
     user_context.json                   # Briefing answers (people, tone, etc.)
+    quick_scan.json                     # AI quick scan results (smart briefing)
     manifest.json                       # Aggregated clip metadata
+    traces.jsonl                        # LLM call traces (tokens, cost, timing)
+    file_api_cache.json                 # Gemini File API URI cache (for reuse)
     clips/
       20260330_C0059/                   # Per-clip (parallel preprocessed, cached)
-        source/  proxy/  frames/  scenes/  audio/
+        source/  proxy/  frames/  scenes/
+        audio/
+          *.wav                         # Extracted audio (16kHz mono)
+          transcript.json               # Speech-to-text (mlx-whisper or Gemini)
+          transcript.vtt                # WebVTT subtitles
+          transcript_preview.html       # Video + captions side-by-side viewer
         review/
           review_gemini_v1.json         # Phase 1 review (versioned, cached)
           review_gemini_latest.json     # Symlink → latest version
     storyboard/
       editorial_gemini_v1.json          # Phase 2: structured data (source of truth)
       editorial_gemini_v1.md            # Rendered markdown
-      editorial_gemini_v1_preview.html  # Interactive HTML preview
     exports/
       v1/                               # Versioned rough cuts
         rough_cut.mp4
-        preview.html
+        preview.html                    # Interactive preview (with transcript overlay)
         segments/  thumbnails/
 ```
 
@@ -162,13 +183,15 @@ library/
 src/ai_video_editor/
   cli.py               # CLI entry point (vx command)
   interactive.py        # Interactive TUI (questionary/prompt_toolkit)
-  briefing.py           # Editorial briefing questionnaire
-  models.py             # Pydantic models (EditorialStoryboard, Segment, etc.)
+  briefing.py           # Editorial briefing + AI-guided smart briefing (quick scan)
+  transcribe.py         # Audio transcription (mlx-whisper local + Gemini cloud)
+  tracing.py            # LLM call tracing (tokens, cost, timing per API call)
+  models.py             # Pydantic models (EditorialStoryboard, Transcript, etc.)
   config.py             # Settings, paths, provider configs, OutputFormat
   preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached, hwaccel)
   format_analyzer.py    # Source format detection, Live Photo filter, output recommendation
   editorial_prompts.py  # Phase 1 + 2 prompt engineering
-  editorial_agent.py    # Multi-clip orchestrator
+  editorial_agent.py    # Multi-clip orchestrator (transcribe, review, assemble)
   render.py             # Markdown + interactive HTML from Pydantic models
   rough_cut.py          # Validation + format-normalized ffmpeg assembly (no LLM)
   versioning.py         # Run versioning with symlinks
@@ -179,8 +202,10 @@ src/ai_video_editor/
 | What | Input | Output | LLM? |
 |------|-------|--------|------|
 | Preprocess | Raw 4K clips | Proxy, frames, scenes, audio | No — ffmpeg |
-| Briefing | User answers questions | user_context.json | No — interactive |
-| Phase 1 | Proxy video per clip | Structured review JSON | Yes — per clip, cached |
-| Phase 2 | All reviews + briefing | EditorialStoryboard (Pydantic JSON) | Yes — one call |
-| Render | Structured JSON | Markdown + HTML preview | No — templates |
+| Transcribe | Proxy video or WAV | transcript.json + VTT + preview | Yes — per clip, cached (Gemini or mlx-whisper) |
+| Quick Scan | All proxy videos | Quick overview for smart briefing | Yes — one call (Gemini) |
+| Briefing | AI scan + user answers | user_context.json | Interactive (AI-guided or manual) |
+| Phase 1 | Proxy video + transcript | Structured review JSON | Yes — per clip, cached |
+| Phase 2 | Reviews + transcripts + briefing (+ videos with --visual) | EditorialStoryboard (Pydantic JSON) | Yes — one call |
+| Render | Structured JSON | Markdown + HTML preview (with transcript overlay) | No — templates |
 | Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
