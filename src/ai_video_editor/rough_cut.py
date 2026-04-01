@@ -545,6 +545,34 @@ def _resolve_font_path(font_name: str) -> str:
     return font_name  # last resort: pass as-is
 
 
+def _resolve_macos_cjk_font(style: str = "sans-serif") -> str:
+    """Find a CJK-capable font on macOS.
+
+    PingFang is the primary system CJK sans-serif since El Capitan (10.11).
+    Falls back through other CJK-capable system fonts.
+    """
+    if style == "serif":
+        candidates = [
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+        ]
+    else:
+        candidates = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    # Absolute last resort — Avenir has no CJK but at least renders Latin
+    return "/System/Library/Fonts/Avenir Next.ttc"
+
+
 def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None) -> list[str]:
     """Build ffmpeg drawtext filter strings for a list of MonologueOverlay objects.
 
@@ -553,11 +581,11 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
     """
     import platform
 
-    # Font resolution — prefer modern geometric sans-serif with CJK support
+    # Font resolution — must use CJK-capable fonts for Chinese/Japanese/Korean text
     if platform.system() == "Darwin":
         font_map = {
-            "sans-serif": "/System/Library/Fonts/Avenir Next.ttc",
-            "handwritten": "/System/Library/Fonts/Noteworthy.ttc",
+            "sans-serif": _resolve_macos_cjk_font(),
+            "handwritten": _resolve_macos_cjk_font(style="serif"),
         }
     else:
         font_map = {
@@ -632,7 +660,7 @@ def _build_caption_drawtext(
     import platform
 
     if platform.system() == "Darwin":
-        font_file = "/System/Library/Fonts/Avenir Next.ttc"
+        font_file = _resolve_macos_cjk_font()
     else:
         font_file = _resolve_font_path("sans-serif:lang=zh")
 
