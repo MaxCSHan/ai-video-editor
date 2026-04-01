@@ -217,15 +217,28 @@ def _new_project_flow(cfg):
     print(f"\n  Phase 1: Reviewing clips with {provider}...\n")
     if provider == "gemini":
         reviews, failed = run_phase1_gemini(
-            ep, manifest, cfg.gemini, tracer=tracer, style_supplement=p1_supplement,
+            ep,
+            manifest,
+            cfg.gemini,
+            tracer=tracer,
+            style_supplement=p1_supplement,
         )
     else:
         reviews, failed = run_phase1_claude(
-            ep, manifest, cfg.claude, style_supplement=p1_supplement,
+            ep,
+            manifest,
+            cfg.claude,
+            style_supplement=p1_supplement,
         )
     reviews, failed = _retry_failed_phase1(
-        failed, reviews, ep, manifest, provider, cfg,
-        tracer=tracer, style_supplement=p1_supplement,
+        failed,
+        reviews,
+        ep,
+        manifest,
+        provider,
+        cfg,
+        tracer=tracer,
+        style_supplement=p1_supplement,
     )
     print(f"\n  Reviewed {len(reviews)} clips")
 
@@ -484,10 +497,12 @@ def _project_actions(name, cfg):
 
             current_preset = meta.get("style_preset")
             all_presets = _list_presets()
-            preset_choices = [questionary.Choice(
-                "None (standard editing)" + (" (current)" if not current_preset else ""),
-                value=None,
-            )]
+            preset_choices = [
+                questionary.Choice(
+                    "None (standard editing)" + (" (current)" if not current_preset else ""),
+                    value=None,
+                )
+            ]
             for p in all_presets:
                 label = f"{p.label} — {p.description}"
                 if p.key == current_preset:
@@ -495,7 +510,9 @@ def _project_actions(name, cfg):
                 preset_choices.append(questionary.Choice(label, value=p.key))
 
             new_key = questionary.select(
-                "Style preset:", choices=preset_choices, style=VX_STYLE,
+                "Style preset:",
+                choices=preset_choices,
+                style=VX_STYLE,
             ).ask()
 
             if new_key != current_preset:
@@ -635,15 +652,28 @@ def _run_analyze(name, meta, cfg):
     print(f"\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
         reviews, failed = run_phase1_gemini(
-            ep, manifest, cfg.gemini, tracer=tracer, style_supplement=p1_supplement,
+            ep,
+            manifest,
+            cfg.gemini,
+            tracer=tracer,
+            style_supplement=p1_supplement,
         )
     else:
         reviews, failed = run_phase1_claude(
-            ep, manifest, cfg.claude, style_supplement=p1_supplement,
+            ep,
+            manifest,
+            cfg.claude,
+            style_supplement=p1_supplement,
         )
     reviews, failed = _retry_failed_phase1(
-        failed, reviews, ep, manifest, provider, cfg,
-        tracer=tracer, style_supplement=p1_supplement,
+        failed,
+        reviews,
+        ep,
+        manifest,
+        provider,
+        cfg,
+        tracer=tracer,
+        style_supplement=p1_supplement,
     )
 
     # Briefing — smart if Gemini available
@@ -856,8 +886,13 @@ def _run_format_selection(clip_metadata, meta, ep):
     codec = questionary.select(
         "Output codec:",
         choices=[
-            questionary.Choice("H.264 (fast, universal compatibility)", value="libx264"),
-            questionary.Choice("H.265 (smaller files, slower encode)", value="libx265"),
+            questionary.Choice(
+                "Auto (hardware-accelerated on Apple Silicon, software fallback)", value="auto"
+            ),
+            questionary.Choice(
+                "H.264 software (libx264, universal compatibility)", value="libx264"
+            ),
+            questionary.Choice("H.265 software (libx265, smaller files)", value="libx265"),
         ],
         style=VX_STYLE,
     ).ask()

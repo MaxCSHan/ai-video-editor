@@ -79,6 +79,7 @@ def _detect_orientation(width: int, height: int) -> str:
 # ---------------------------------------------------------------------------
 
 _hwaccel_available: bool | None = None
+_hwenc_codecs: dict[str, str] | None = None
 
 
 def get_hwaccel_args() -> list[str]:
@@ -101,6 +102,47 @@ def get_hwaccel_args() -> list[str]:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             _hwaccel_available = False
     return ["-hwaccel", "videotoolbox"] if _hwaccel_available else []
+
+
+def get_hwenc_codec(sw_codec: str = "libx264") -> str:
+    """Return the best hardware-accelerated encoder for the given software codec.
+
+    On Apple Silicon Macs, maps to VideoToolbox encoders which use the dedicated
+    media engine for dramatically faster encoding (~5-10x vs software):
+      libx264 → h264_videotoolbox
+      libx265 → hevc_videotoolbox
+
+    Returns the original software codec if no HW encoder is available.
+    """
+    global _hwenc_codecs
+    if platform.system() != "Darwin":
+        return sw_codec
+
+    vt_map = {
+        "libx264": "h264_videotoolbox",
+        "libx265": "hevc_videotoolbox",
+    }
+    vt_codec = vt_map.get(sw_codec)
+    if not vt_codec:
+        return sw_codec
+
+    # Probe once and cache all available VT encoders
+    if _hwenc_codecs is None:
+        _hwenc_codecs = {}
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for name in vt_map.values():
+                if name in result.stdout:
+                    _hwenc_codecs[name] = name
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    return _hwenc_codecs.get(vt_codec, sw_codec)
 
 
 def get_video_info(video_path: Path) -> dict:

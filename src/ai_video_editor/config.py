@@ -42,7 +42,7 @@ class OutputFormat:
     height: int = 1080
     fps: float = 29.97
     orientation: str = "landscape"  # "landscape" | "portrait"
-    codec: str = "libx264"  # "libx264" | "libx265"
+    codec: str = "auto"  # "auto" | "libx264" | "libx265"
     fit_mode: str = "pad"  # "pad" (black bars) | "crop" (fill frame)
     label: str = "FHD 1080p"
 

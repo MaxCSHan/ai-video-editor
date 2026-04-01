@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import EditorialProjectPaths, OutputFormat
 from .models import EditorialStoryboard
-from .preprocess import get_hwaccel_args, get_video_duration
+from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
 from .render import render_html_preview
 from .storyboard_format import format_duration
 from .versioning import next_version, versioned_dir, update_latest_symlink
@@ -409,12 +409,26 @@ def _extract_segment(
     if vf:
         cmd.extend(["-vf", vf])
 
-    # Codec selection — force yuv420p + H.264 High profile for universal playback (iPhone etc.)
-    codec = output_format.codec if output_format else "libx264"
-    cmd.extend(["-c:v", codec, "-preset", "fast", "-crf", "23"])
+    # Codec selection — resolve "auto" to HW encoder, force yuv420p for iPhone compat
+    sw_codec = output_format.codec if output_format else "libx264"
+    if sw_codec == "auto":
+        sw_codec = "libx264"
+    codec = get_hwenc_codec(sw_codec)
+    is_vt = codec.endswith("_videotoolbox")
+
+    cmd.extend(["-c:v", codec])
+    if is_vt:
+        # VideoToolbox: use quality-based VBR (65 ≈ CRF 20-23 visual quality)
+        # -allow_sw 1 falls back to software if HW engine is busy
+        cmd.extend(["-q:v", "65", "-allow_sw", "1"])
+        if codec == "hevc_videotoolbox":
+            cmd.extend(["-tag:v", "hvc1"])  # iPhone requires hvc1 tag for HEVC
+    else:
+        # Software encoder: use CRF for quality
+        cmd.extend(["-preset", "fast", "-crf", "23"])
+        if codec == "libx264":
+            cmd.extend(["-profile:v", "high", "-level", "4.2"])
     cmd.extend(["-pix_fmt", "yuv420p"])
-    if codec == "libx264":
-        cmd.extend(["-profile:v", "high", "-level", "4.2"])
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(output_path)])
 
@@ -618,9 +632,16 @@ def run_rough_cut(
     print(f"  Export version: v{v}")
     print(f"  Loaded storyboard: {storyboard.title} ({len(storyboard.segments)} segments)")
     if output_format:
+        sw_codec = output_format.codec if output_format.codec != "auto" else "libx264"
+        resolved_enc = get_hwenc_codec(sw_codec)
+        enc_label = (
+            f"{resolved_enc} (hardware-accelerated)"
+            if resolved_enc.endswith("_videotoolbox")
+            else resolved_enc
+        )
         print(
             f"  Output format: {output_format.label} ({output_format.width}x{output_format.height}"
-            f" @ {output_format.fps}fps, {output_format.codec}, fit={output_format.fit_mode})"
+            f" @ {output_format.fps}fps, {enc_label}, fit={output_format.fit_mode})"
         )
     else:
         print("  Output format: default (no normalization)")
