@@ -180,17 +180,28 @@ def _new_project_flow(cfg):
         print("\n  Skipped. Run 'vx analyze' later.\n")
         return
 
+    from .tracing import ProjectTracer
+
+    tracer = ProjectTracer(ep.root)
+
     print(f"\n  Phase 1: Reviewing clips with {provider}...\n")
     if provider == "gemini":
-        reviews = run_phase1_gemini(ep, manifest, cfg.gemini)
+        reviews = run_phase1_gemini(ep, manifest, cfg.gemini, tracer=tracer)
     else:
         reviews = run_phase1_claude(ep, manifest, cfg.claude)
     print(f"\n  Reviewed {len(reviews)} clips")
 
-    # Briefing
-    from .briefing import run_briefing
+    # Briefing — smart (AI-guided) if Gemini available, else manual
+    if os.environ.get("GEMINI_API_KEY"):
+        from .briefing import run_smart_briefing
 
-    user_context = run_briefing(reviews, style, ep.root)
+        user_context = run_smart_briefing(
+            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
+        )
+    else:
+        from .briefing import run_briefing
+
+        user_context = run_briefing(reviews, style, ep.root)
 
     # Phase 2
     if not questionary.confirm(
@@ -198,6 +209,15 @@ def _new_project_flow(cfg):
     ).ask():
         print("\n  Context saved. Run 'vx analyze' later.\n")
         return
+
+    # Ask about visual mode
+    visual = False
+    if provider == "gemini":
+        visual = questionary.confirm(
+            "Upload proxy videos for visual Phase 2? (better quality, slightly higher cost)",
+            default=False,
+            style=VX_STYLE,
+        ).ask()
 
     print(f"\n  Phase 2: Generating storyboard...\n")
     output = run_phase2(
@@ -209,8 +229,11 @@ def _new_project_flow(cfg):
         claude_cfg=cfg.claude,
         style=style,
         user_context=user_context,
+        tracer=tracer,
+        visual=visual,
     )
 
+    tracer.print_summary("Pipeline Total")
     print(f"\n  Storyboard ready!")
     _project_actions(name, cfg)
 
@@ -438,12 +461,13 @@ def _run_analyze(name, meta, cfg):
         run_phase1_claude,
         run_phase2,
     )
-    from .briefing import run_briefing
+    from .tracing import ProjectTracer
 
     ep = cfg.editorial_project(name)
     provider = meta.get("provider", "gemini")
     style = meta.get("style", "vlog")
     source_dir = Path(meta["source_dir"])
+    tracer = ProjectTracer(ep.root)
 
     clips = discover_source_clips(source_dir)
     print(f"\n  {len(clips)} clips, preprocessing...\n")
@@ -460,11 +484,30 @@ def _run_analyze(name, meta, cfg):
 
     print(f"\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
-        reviews = run_phase1_gemini(ep, manifest, cfg.gemini)
+        reviews = run_phase1_gemini(ep, manifest, cfg.gemini, tracer=tracer)
     else:
         reviews = run_phase1_claude(ep, manifest, cfg.claude)
 
-    user_context = run_briefing(reviews, style, ep.root)
+    # Briefing — smart if Gemini available
+    if os.environ.get("GEMINI_API_KEY"):
+        from .briefing import run_smart_briefing
+
+        user_context = run_smart_briefing(
+            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
+        )
+    else:
+        from .briefing import run_briefing
+
+        user_context = run_briefing(reviews, style, ep.root)
+
+    # Ask about visual mode
+    visual = False
+    if provider == "gemini":
+        visual = questionary.confirm(
+            "Upload proxy videos for visual Phase 2?",
+            default=False,
+            style=VX_STYLE,
+        ).ask()
 
     print(f"\n  Phase 2: Generating storyboard...\n")
     run_phase2(
@@ -476,7 +519,10 @@ def _run_analyze(name, meta, cfg):
         claude_cfg=cfg.claude,
         style=style,
         user_context=user_context,
+        tracer=tracer,
+        visual=visual,
     )
+    tracer.print_summary("Analysis Total")
     print(f"\n  Storyboard ready!")
 
 
@@ -776,6 +822,24 @@ def _show_status(name, meta, cfg):
         print(f"  Storyboards: {len(storyboards)}")
         for s in sorted(storyboards):
             print(f"    {s.name}")
+
+    # LLM usage
+    from .tracing import load_all_traces, summarize_traces
+
+    traces = load_all_traces(ep.root)
+    if traces:
+        ts = summarize_traces(traces)
+        print(
+            f"  LLM Usage: {ts['calls']} calls | "
+            f"{ts['total_tokens']:,} tokens | "
+            f"~${ts['estimated_cost_usd']:.4f}"
+        )
+        for phase, ps in ts.get("by_phase", {}).items():
+            print(
+                f"    {phase}: {ps['calls']} calls, "
+                f"{ps['total_tokens']:,} tokens, "
+                f"~${ps['estimated_cost_usd']:.4f}"
+            )
     print()
 
 
