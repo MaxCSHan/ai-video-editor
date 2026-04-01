@@ -174,6 +174,62 @@ def _build_segment_vf(
     return ",".join(filters) if filters else None
 
 
+def _escape_drawtext(text: str) -> str:
+    """Escape text for ffmpeg drawtext filter.
+
+    ffmpeg drawtext requires escaping of special characters: backslash, colon,
+    single-quote, semicolon, brackets, and equals sign. Newlines are converted
+    to spaces to avoid breaking the filter chain.
+    """
+    text = text.replace("\n", " ").replace("\r", "")
+    # Order matters: backslash first
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\u2019")  # curly apostrophe — avoids shell/ffmpeg quoting hell
+    text = text.replace(":", "\\:")
+    text = text.replace(";", "\\;")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    return text
+
+
+def _resolve_font_path(font_name: str) -> str:
+    """Resolve a logical font name to an actual file path using fc-match.
+
+    Falls back to a known CJK-capable font path to ensure Chinese/Japanese/Korean
+    characters render correctly.
+    """
+    import shutil
+    import subprocess as _sp
+
+    # Try fc-match first (works on Linux, sometimes macOS with fontconfig)
+    if shutil.which("fc-match"):
+        try:
+            result = _sp.run(
+                ["fc-match", "-f", "%{file}", font_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            path = result.stdout.strip()
+            if path and Path(path).exists():
+                return path
+        except Exception:
+            pass
+
+    # Static fallback paths for CJK-capable fonts
+    for candidate in [
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]:
+        if Path(candidate).exists():
+            return candidate
+
+    return font_name  # last resort: pass as-is
+
+
 def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None) -> list[str]:
     """Build ffmpeg drawtext filter strings for a list of MonologueOverlay objects.
 
@@ -182,7 +238,7 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
     """
     import platform
 
-    # Font resolution — prefer modern geometric sans-serif
+    # Font resolution — prefer modern geometric sans-serif with CJK support
     if platform.system() == "Darwin":
         font_map = {
             "sans-serif": "/System/Library/Fonts/Avenir Next.ttc",
@@ -190,8 +246,8 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
         }
     else:
         font_map = {
-            "sans-serif": "sans-serif",
-            "handwritten": "serif",
+            "sans-serif": _resolve_font_path("sans-serif:lang=zh"),
+            "handwritten": _resolve_font_path("serif:lang=zh"),
         }
 
     # Size mapping — sized to match typical silent vlog text (large, readable)
@@ -230,8 +286,7 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
         elif ov.style.case == "sentence":
             text = text.capitalize()
 
-        # Escape for ffmpeg drawtext
-        escaped = text.replace("\\", "\\\\").replace("'", "'\\''").replace(":", "\\:")
+        escaped = _escape_drawtext(text)
 
         end_t = ov.appear_at + ov.duration_sec
         f = (
@@ -264,7 +319,7 @@ def _build_caption_drawtext(
     if platform.system() == "Darwin":
         font_file = "/System/Library/Fonts/Avenir Next.ttc"
     else:
-        font_file = "sans-serif"
+        font_file = _resolve_font_path("sans-serif:lang=zh")
 
     base_h = output_format.height if output_format else 1080
     font_size = max(28, int(base_h * 0.038))
@@ -294,7 +349,7 @@ def _build_caption_drawtext(
             continue
 
         # Lowercase to match monologue style
-        escaped = text.lower().replace("\\", "\\\\").replace("'", "'\\''").replace(":", "\\:")
+        escaped = _escape_drawtext(text.lower())
 
         f = (
             f"drawtext=text='{escaped}'"
@@ -354,10 +409,13 @@ def _extract_segment(
     if vf:
         cmd.extend(["-vf", vf])
 
-    # Codec selection
+    # Codec selection — force yuv420p + H.264 High profile for universal playback (iPhone etc.)
     codec = output_format.codec if output_format else "libx264"
     cmd.extend(["-c:v", codec, "-preset", "fast", "-crf", "23"])
-    cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+    cmd.extend(["-pix_fmt", "yuv420p"])
+    if codec == "libx264":
+        cmd.extend(["-profile:v", "high", "-level", "4.2"])
+    cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(output_path)])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -413,9 +471,7 @@ def assemble_rough_cut(
         caption_segments = None
         if burn_captions:
             if seg.clip_id not in transcript_cache:
-                transcript_cache[seg.clip_id] = _load_clip_transcript(
-                    editorial_paths, seg.clip_id
-                )
+                transcript_cache[seg.clip_id] = _load_clip_transcript(editorial_paths, seg.clip_id)
             caption_segments = transcript_cache[seg.clip_id]
 
         # Use different filename when text overlays present to avoid caching conflicts
@@ -474,14 +530,24 @@ def assemble_rough_cut(
         [
             "ffmpeg",
             "-y",
+            "-fflags",
+            "+genpts",
             "-f",
             "concat",
             "-safe",
             "0",
             "-i",
             str(concat_list),
-            "-c",
+            "-c:v",
             "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-movflags",
             "+faststart",
             str(rough_cut_path),
