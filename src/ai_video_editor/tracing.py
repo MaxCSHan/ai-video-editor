@@ -302,3 +302,22 @@ def estimate_transcription_cost(
         "output_tokens": total_output,
         "estimated_cost_usd": cost,
     }
+
+
+def estimate_monologue_cost(
+    clip_count: int,
+    model: str = "gemini-3-flash-preview",
+) -> dict:
+    """Estimate Phase 3 (Visual Monologue) cost — single text-only LLM call."""
+    # Input: storyboard JSON (~3K tokens) + transcripts (~1K per clip) + prompt (~2K)
+    input_tokens = 5000 + clip_count * 1000
+    output_tokens = 3000  # approximate monologue plan JSON
+
+    cost = estimate_cost(model, input_tokens, output_tokens)
+
+    return {
+        "calls": 1,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": cost,
+    }

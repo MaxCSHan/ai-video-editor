@@ -90,6 +90,7 @@ def build_clip_review_prompt(
     duration_sec: float,
     resolution: str,
     transcript_text: str | None = None,
+    style_supplement: str | None = None,
 ) -> str:
     prompt = CLIP_REVIEW_PROMPT.format(
         clip_id=clip_id,
@@ -107,6 +108,8 @@ def build_clip_review_prompt(
             "The speech_summary should reflect actual dialogue. "
             "Match speech timestamps to key_moments and usable_segments."
         )
+    if style_supplement:
+        prompt += "\n\n" + style_supplement
     return prompt
 
 
@@ -154,6 +157,7 @@ def build_editorial_assembly_prompt(
     total_duration_sec: float,
     transcripts: dict[str, str] | None = None,
     visual: bool = False,
+    style_supplement: str | None = None,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
     clip_ids = [r.get("clip_id", "unknown") for r in clip_reviews]
@@ -190,6 +194,67 @@ def build_editorial_assembly_prompt(
             "- Use dialogue content to drive narrative arc and story concept\n"
             "- Note where speech and visuals complement or contrast each other"
         )
+    if style_supplement:
+        prompt += "\n\n" + style_supplement
+    return prompt
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Visual Monologue (text overlay generation)
+# ---------------------------------------------------------------------------
+
+
+def build_monologue_prompt(
+    storyboard,
+    phase3_prompt_template: str,
+    transcripts: dict[str, str] | None = None,
+    user_context_text: str | None = None,
+) -> str:
+    """Build the Phase 3 prompt from a storyboard and the preset's phase3_prompt template."""
+    # Build segments table
+    rows = ["| # | Clip | In | Out | Dur | Purpose | Description | Audio |"]
+    rows.append("|---|------|-----|-----|-----|---------|-------------|-------|")
+    for seg in storyboard.segments:
+        rows.append(
+            f"| {seg.index} | {seg.clip_id} | {seg.in_sec:.1f}s | {seg.out_sec:.1f}s "
+            f"| {seg.duration_sec:.1f}s | {seg.purpose} | {seg.description} "
+            f"| {seg.audio_note or '-'} |"
+        )
+    segments_table = "\n".join(rows)
+
+    # Build cast summary
+    cast_lines = []
+    for c in storyboard.cast:
+        cast_lines.append(f"- **{c.name}** ({c.role}): {c.description}")
+    cast_text = "\n".join(cast_lines) if cast_lines else "(no cast identified)"
+
+    # Build story arc summary
+    arc_lines = []
+    for arc in storyboard.story_arc:
+        indices = ", ".join(str(i) for i in arc.segment_indices) if arc.segment_indices else "-"
+        arc_lines.append(f"- **{arc.title}** (segments {indices}): {arc.description}")
+    arc_text = "\n".join(arc_lines) if arc_lines else "(no story arc defined)"
+
+    # Build transcripts section
+    if transcripts:
+        sections = []
+        for clip_id, text in transcripts.items():
+            sections.append(f"### {clip_id}\n{text}")
+        transcripts_text = "\n\n".join(sections)
+    else:
+        transcripts_text = "(no transcripts available — assume mostly ambient audio)"
+
+    prompt = phase3_prompt_template.format(
+        title=storyboard.title,
+        duration=format_duration(storyboard.estimated_duration_sec),
+        style=storyboard.style,
+        story_concept=storyboard.story_concept,
+        cast=cast_text,
+        story_arc=arc_text,
+        segments_table=segments_table,
+        transcripts=transcripts_text,
+        user_context=user_context_text or "(no filmmaker context provided)",
+    )
     return prompt
 
 

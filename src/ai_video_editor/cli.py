@@ -127,6 +127,18 @@ def cmd_new(args, cfg: Config):
     provider = args.provider or ws["provider"]
     style = args.style or ws["style"]
 
+    # Resolve style preset
+    preset_key = getattr(args, "preset", None)
+    style_preset = None
+    if preset_key:
+        from .style_presets import get_preset
+        style_preset = get_preset(preset_key)
+        if not style_preset:
+            from .style_presets import list_presets
+            available = ", ".join(p.key for p in list_presets())
+            print(f"{RED}Error:{RESET} Unknown preset: {preset_key}. Available: {available}")
+            sys.exit(1)
+
     project_root = cfg.library_dir / name
     if project_root.exists() and _read_project_meta(project_root):
         print(
@@ -139,6 +151,8 @@ def cmd_new(args, cfg: Config):
     print(f"  Provider: {provider}")
     if project_type == "editorial":
         print(f"  Style:    {style}")
+        if style_preset:
+            print(f"  Preset:   {style_preset.label}")
 
     # Create project structure
     if project_type == "editorial":
@@ -181,6 +195,8 @@ def cmd_new(args, cfg: Config):
             "clip_count": len(clips),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if preset_key:
+            meta["style_preset"] = preset_key
         _write_project_meta(project_root, meta)
 
         _header("Preprocessing")
@@ -600,7 +616,16 @@ def cmd_analyze(args, cfg: Config):
         print()
         return
 
+    # Resolve style preset (CLI flag overrides project default)
+    preset_key = getattr(args, "preset", None) or meta.get("style_preset")
+    style_preset = None
+    if preset_key:
+        from .style_presets import get_preset
+        style_preset = get_preset(preset_key)
+
     _header(f"Analyzing: {name} ({provider})")
+    if style_preset:
+        print(f"  Style preset: {style_preset.label}")
 
     if meta["type"] == "editorial":
         from .editorial_agent import run_editorial_pipeline
@@ -620,6 +645,7 @@ def cmd_analyze(args, cfg: Config):
             force=force,
             interactive=interactive,
             visual=visual,
+            style_preset=style_preset,
         )
     else:
         # Descriptive pipeline
@@ -653,6 +679,66 @@ def cmd_analyze(args, cfg: Config):
             sys.exit(1)
 
     print(f"\n{GREEN}Storyboard ready:{RESET} {BOLD}{output_path}{RESET}")
+
+
+def cmd_monologue(args, cfg: Config):
+    """Generate visual monologue text overlay plan (Phase 3)."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} 'vx monologue' is only for editorial projects.")
+        sys.exit(1)
+
+    # Resolve preset
+    preset_key = meta.get("style_preset")
+    if not preset_key:
+        print(
+            f"{RED}Error:{RESET} No style preset configured for this project.\n"
+            f"  Create with: {BOLD}vx new {name} <source> --preset silent_vlog{RESET}\n"
+            f"  Or add to project.json: {DIM}\"style_preset\": \"silent_vlog\"{RESET}"
+        )
+        sys.exit(1)
+
+    from .style_presets import get_preset
+
+    style_preset = get_preset(preset_key)
+    if not style_preset or not style_preset.has_phase3:
+        print(f"{RED}Error:{RESET} Preset '{preset_key}' does not support Phase 3 (monologue).")
+        sys.exit(1)
+
+    ws = _read_workspace_config()
+    provider = getattr(args, "provider", None) or meta.get("provider") or ws["provider"]
+    persona_hint = getattr(args, "persona", None)
+
+    _header(f"Visual Monologue: {name} ({style_preset.label})")
+
+    from .editorial_agent import run_monologue
+    from .tracing import ProjectTracer
+
+    ep = cfg.editorial_project(name)
+    tracer = ProjectTracer(ep.root)
+
+    output_path = run_monologue(
+        editorial_paths=ep,
+        provider=provider,
+        gemini_cfg=cfg.gemini,
+        claude_cfg=cfg.claude,
+        style_preset=style_preset,
+        tracer=tracer,
+        persona_hint=persona_hint,
+    )
+
+    tracer.print_summary("Monologue")
+    print(f"\n{GREEN}Monologue plan ready:{RESET} {BOLD}{output_path}{RESET}")
 
 
 def cmd_brief(args, cfg: Config):
@@ -745,6 +831,21 @@ def _find_storyboard_json(ep) -> Path | None:
     return None
 
 
+def _find_monologue_json(ep) -> Path | None:
+    """Find the latest monologue plan JSON for an editorial project."""
+    storyboard_dir = ep.storyboard
+    candidates = [
+        storyboard_dir / "monologue_gemini_latest.json",
+        storyboard_dir / "monologue_claude_latest.json",
+    ]
+    if storyboard_dir.exists():
+        candidates.extend(sorted(storyboard_dir.glob("monologue_*_v*.json"), reverse=True))
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 def cmd_preview(args, cfg: Config):
     """Regenerate HTML preview from structured storyboard (no LLM, no ffmpeg)."""
     name = args.project or _infer_project(cfg)
@@ -831,6 +932,21 @@ def cmd_cut(args, cfg: Config):
         )
         sys.exit(1)
 
+    # Load monologue plan if --overlays requested
+    monologue = None
+    if getattr(args, "overlays", False):
+        monologue_path = _find_monologue_json(ep)
+        if not monologue_path:
+            print(
+                f"{RED}Error:{RESET} No monologue plan found. "
+                f"Run {BOLD}vx monologue {name}{RESET} first."
+            )
+            sys.exit(1)
+        from .models import MonologuePlan
+
+        monologue = MonologuePlan.model_validate_json(monologue_path.read_text())
+        print(f"  With text overlays: {monologue_path.name}")
+
     _header(f"Rough Cut: {name}")
     print(f"  Storyboard: {json_path.name}")
     print()
@@ -840,6 +956,7 @@ def cmd_cut(args, cfg: Config):
     result = run_rough_cut(
         storyboard_json_path=json_path,
         editorial_paths=ep,
+        monologue=monologue,
     )
 
     v = result.get("version", "?")
@@ -954,6 +1071,10 @@ def main():
     p_new.add_argument("source", help="Footage directory (editorial) or video file (descriptive)")
     p_new.add_argument("--provider", choices=["gemini", "claude"], help="AI provider")
     p_new.add_argument("--style", help="Video style for editorial (default: vlog)")
+    p_new.add_argument(
+        "--preset",
+        help="Style preset for creative direction (e.g., silent_vlog)",
+    )
 
     # --- projects ---
     sub.add_parser("projects", aliases=["ls"], help="List all projects")
@@ -1001,6 +1122,25 @@ def main():
         action="store_true",
         help="Estimate token usage and cost without making API calls",
     )
+    p_analyze.add_argument(
+        "--preset",
+        help="Style preset for creative direction (overrides project default)",
+    )
+
+    # --- monologue ---
+    p_monologue = sub.add_parser(
+        "monologue", help="Generate visual monologue text overlay plan (Phase 3)"
+    )
+    p_monologue.add_argument("project", nargs="?", help="Project name")
+    p_monologue.add_argument(
+        "--persona",
+        choices=["conversational_confidant", "detached_observer", "stream_of_consciousness"],
+        help="Hint the narrative persona",
+    )
+    p_monologue.add_argument(
+        "--force", action="store_true", help="Re-generate even if cached"
+    )
+    p_monologue.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
 
     # --- brief ---
     p_brief = sub.add_parser(
@@ -1022,6 +1162,11 @@ def main():
         "cut", help="Assemble rough cut video (no LLM — uses structured JSON from analyze)"
     )
     p_cut.add_argument("project", nargs="?", help="Project name")
+    p_cut.add_argument(
+        "--overlays",
+        action="store_true",
+        help="Burn visual monologue text overlays into the video",
+    )
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
@@ -1048,6 +1193,7 @@ def main():
         "transcribe": cmd_transcribe,
         "analyze": cmd_analyze,
         "run": cmd_analyze,
+        "monologue": cmd_monologue,
         "brief": cmd_brief,
         "preview": cmd_preview,
         "cut": cmd_cut,

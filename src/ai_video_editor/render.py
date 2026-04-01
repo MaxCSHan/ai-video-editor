@@ -157,12 +157,71 @@ def _get_clip_duration(clip_id: str, clips_dir: Path) -> float:
         return 0
 
 
+def _render_monologue_panel(monologue) -> str:
+    """Render the Visual Monologue panel as HTML."""
+    persona_labels = {
+        "conversational_confidant": "Conversational Confidant",
+        "detached_observer": "Detached Observer",
+        "stream_of_consciousness": "Stream of Consciousness",
+    }
+    synergy_colors = {"harmony": "#3498db", "dissonance": "#e67e22"}
+
+    persona_label = persona_labels.get(monologue.persona, monologue.persona)
+    mechanics = ", ".join(monologue.tone_mechanics) if monologue.tone_mechanics else "none"
+    arc = " → ".join(monologue.arc_structure) if monologue.arc_structure else "none"
+
+    overlay_cards = []
+    for ov in monologue.overlays:
+        color = synergy_colors.get(ov.synergy, "#95a5a6")
+        end_t = ov.appear_at + ov.duration_sec
+        overlay_cards.append(
+            f'<div style="border-left:3px solid {color};padding:6px 12px;margin:6px 0;'
+            f'background:#1a1a2e;border-radius:4px">'
+            f'<div style="display:flex;justify-content:space-between;font-size:0.85em;'
+            f'color:#aaa">'
+            f"<span>Segment #{ov.segment_index}</span>"
+            f"<span>{ov.appear_at:.1f}s – {end_t:.1f}s ({ov.duration_sec:.1f}s)</span>"
+            f"<span style=\"color:{color}\">{ov.synergy}</span>"
+            f"</div>"
+            f'<div style="font-size:1.1em;margin-top:4px;font-style:italic;color:#e0e0e0">'
+            f'"{ov.text}"</div>'
+            + (f'<div style="font-size:0.8em;color:#888;margin-top:2px">{ov.note}</div>' if ov.note else "")
+            + "</div>"
+        )
+
+    pacing = "".join(f"<li>{n}</li>" for n in monologue.pacing_notes) if monologue.pacing_notes else ""
+    music = "".join(f"<li>{n}</li>" for n in monologue.music_sync_notes) if monologue.music_sync_notes else ""
+
+    return f"""
+<h2>Visual Monologue</h2>
+<div style="background:#16213e;padding:16px;border-radius:8px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+    <div><strong>Persona:</strong> {persona_label}</div>
+    <div><strong>Text time:</strong> {monologue.total_text_time_sec:.1f}s</div>
+    <div><strong>Overlays:</strong> {len(monologue.overlays)}</div>
+  </div>
+  <div style="margin-bottom:8px"><strong>Voice:</strong> <em>{monologue.persona_description}</em></div>
+  <div style="margin-bottom:8px"><strong>Tone:</strong> {mechanics}</div>
+  <div><strong>Arc:</strong> {arc}</div>
+</div>
+<details open>
+  <summary style="cursor:pointer;font-weight:bold;margin-bottom:8px">
+    Text Overlays ({len(monologue.overlays)})
+  </summary>
+  {"".join(overlay_cards)}
+</details>
+{"<h3>Pacing Notes</h3><ul>" + pacing + "</ul>" if pacing else ""}
+{"<h3>Music Sync Notes</h3><ul>" + music + "</ul>" if music else ""}
+"""
+
+
 def render_html_preview(
     sb: EditorialStoryboard,
     clips_dir: Path | None = None,
     output_dir: Path | None = None,
     warnings: list[str] | None = None,
     rough_cut_path: Path | None = None,
+    monologue=None,
 ) -> str:
     total_dur = sb.total_segments_duration
     thumbs_dir = output_dir / "thumbnails" if output_dir else None
@@ -404,6 +463,7 @@ def render_html_preview(
 {"<h2>Pacing Notes</h2><ul>" + pacing + "</ul>" if pacing else ""}
 {"<h2>Music Plan</h2><table><tr><th>Section</th><th>Strategy</th><th>Notes</th></tr>" + music_rows + "</table>" if music_rows else ""}
 {"<h2>Technical Notes</h2><ul>" + tech_notes + "</ul>" if tech_notes else ""}
+{_render_monologue_panel(monologue) if monologue else ""}
 {warn_html}
 
 <!-- Export bar -->

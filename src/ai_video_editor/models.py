@@ -149,3 +149,38 @@ class EditorialStoryboard(BaseModel):
     @property
     def total_segments_duration(self) -> float:
         return sum(s.duration_sec for s in self.segments)
+
+
+# ---------------------------------------------------------------------------
+# Visual Monologue models (text-driven narrative overlays for silent vlog style)
+# ---------------------------------------------------------------------------
+
+
+class TextOverlayStyle(BaseModel):
+    font: str = "sans-serif"  # "sans-serif" | "handwritten"
+    case: str = "lowercase"  # "lowercase" | "sentence"
+    size: str = "medium"  # "small" | "medium" | "large"
+    position: str = "lower_third"  # "lower_third" | "center" | "upper_third"
+    alignment: str = "center"  # "left" | "center" | "right"
+
+
+class MonologueOverlay(BaseModel):
+    index: int
+    segment_index: int  # references Segment.index in storyboard
+    text: str  # the overlay text (e.g. "the city decided to wash itself clean...")
+    appear_at: float  # seconds from segment start
+    duration_sec: float  # how long text stays on screen
+    style: TextOverlayStyle = TextOverlayStyle()
+    synergy: str = "harmony"  # "harmony" | "dissonance"
+    note: str = ""  # editorial note about why this text here
+
+
+class MonologuePlan(BaseModel):
+    persona: str  # "conversational_confidant" | "detached_observer" | "stream_of_consciousness"
+    persona_description: str  # LLM's characterization of the voice
+    tone_mechanics: list[str] = []  # "lowercase_whisper", "ellipses", "micro_pacing"
+    arc_structure: list[str] = []  # ["grounding_hook", "wandering_middle", "resolution"]
+    overlays: list[MonologueOverlay]
+    total_text_time_sec: float  # sum of overlay durations
+    pacing_notes: list[str] = []
+    music_sync_notes: list[str] = []

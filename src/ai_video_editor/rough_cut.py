@@ -174,6 +174,142 @@ def _build_segment_vf(
     return ",".join(filters) if filters else None
 
 
+def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None) -> list[str]:
+    """Build ffmpeg drawtext filter strings for a list of MonologueOverlay objects.
+
+    Styled after Korean silent vlog typography: clean sans-serif, bright white,
+    positioned in the lower portion of the frame with soft shadow for readability.
+    """
+    import platform
+
+    # Font resolution — prefer modern geometric sans-serif
+    if platform.system() == "Darwin":
+        font_map = {
+            "sans-serif": "/System/Library/Fonts/Avenir Next.ttc",
+            "handwritten": "/System/Library/Fonts/Noteworthy.ttc",
+        }
+    else:
+        font_map = {
+            "sans-serif": "sans-serif",
+            "handwritten": "serif",
+        }
+
+    # Size mapping — sized to match typical silent vlog text (large, readable)
+    base_h = output_format.height if output_format else 1080
+    size_map = {
+        "small": max(28, int(base_h * 0.035)),
+        "medium": max(38, int(base_h * 0.046)),
+        "large": max(50, int(base_h * 0.056)),
+    }
+
+    filters = []
+    for ov in overlays:
+        font_file = font_map.get(ov.style.font, font_map["sans-serif"])
+        font_size = size_map.get(ov.style.size, size_map["medium"])
+
+        # Position — lower_third sits at ~88% from top (above playback controls)
+        if ov.style.position == "center":
+            y_expr = "(h-th)/2"
+        elif ov.style.position == "upper_third":
+            y_expr = "h*0.15"
+        else:  # lower_third (default)
+            y_expr = "h*0.88-th"
+
+        # Alignment — default center for silent vlog aesthetic
+        if ov.style.alignment == "center":
+            x_expr = "(w-tw)/2"
+        elif ov.style.alignment == "right":
+            x_expr = "w-tw-40"
+        else:  # left
+            x_expr = "40"
+
+        # Apply case transformation
+        text = ov.text
+        if ov.style.case == "lowercase":
+            text = text.lower()
+        elif ov.style.case == "sentence":
+            text = text.capitalize()
+
+        # Escape for ffmpeg drawtext
+        escaped = text.replace("\\", "\\\\").replace("'", "'\\''").replace(":", "\\:")
+
+        end_t = ov.appear_at + ov.duration_sec
+        f = (
+            f"drawtext=text='{escaped}'"
+            f":fontfile='{font_file}'"
+            f":fontsize={font_size}"
+            f":fontcolor=white"
+            f":shadowcolor=black@0.6:shadowx=3:shadowy=3"
+            f":x={x_expr}:y={y_expr}"
+            f":enable='between(t,{ov.appear_at:.2f},{end_t:.2f})'"
+        )
+        filters.append(f)
+
+    return filters
+
+
+def _build_caption_drawtext(
+    transcript_segments: list,
+    clip_in_sec: float,
+    clip_out_sec: float,
+    output_format: OutputFormat | None = None,
+) -> list[str]:
+    """Build ffmpeg drawtext filters for speech captions from transcript segments.
+
+    Only renders speech segments (no speaker labels). Timestamps are converted
+    from clip-absolute to segment-relative.
+    """
+    import platform
+
+    if platform.system() == "Darwin":
+        font_file = "/System/Library/Fonts/Avenir Next.ttc"
+    else:
+        font_file = "sans-serif"
+
+    base_h = output_format.height if output_format else 1080
+    font_size = max(28, int(base_h * 0.038))
+
+    filters = []
+    for ts in transcript_segments:
+        # Only speech segments
+        if ts.get("type", "speech") != "speech":
+            continue
+
+        text = ts.get("text", "").strip()
+        if not text:
+            continue
+
+        seg_start = ts["start"]
+        seg_end = ts["end"]
+
+        # Clip to the segment's time range
+        if seg_end <= clip_in_sec or seg_start >= clip_out_sec:
+            continue
+
+        # Convert to segment-relative time
+        local_start = max(0.0, seg_start - clip_in_sec)
+        local_end = min(clip_out_sec - clip_in_sec, seg_end - clip_in_sec)
+
+        if local_end - local_start < 0.2:
+            continue
+
+        # Lowercase to match monologue style
+        escaped = text.lower().replace("\\", "\\\\").replace("'", "'\\''").replace(":", "\\:")
+
+        f = (
+            f"drawtext=text='{escaped}'"
+            f":fontfile='{font_file}'"
+            f":fontsize={font_size}"
+            f":fontcolor=white"
+            f":shadowcolor=black@0.6:shadowx=3:shadowy=3"
+            f":x=(w-tw)/2:y=h*0.88-th"
+            f":enable='between(t,{local_start:.2f},{local_end:.2f})'"
+        )
+        filters.append(f)
+
+    return filters
+
+
 def _extract_segment(
     source_path: Path,
     in_sec: float,
@@ -181,13 +317,30 @@ def _extract_segment(
     output_path: Path,
     output_format: OutputFormat | None = None,
     clip_info: dict | None = None,
+    overlays: list | None = None,
+    caption_segments: list | None = None,
 ) -> bool:
-    """Extract a single segment with optional format normalization."""
+    """Extract a single segment with optional format normalization, text overlays, and captions."""
     duration = out_sec - in_sec
     if duration <= 0:
         return False
 
     vf = _build_segment_vf(clip_info, output_format)
+
+    # Collect all drawtext filters (monologue overlays + speech captions)
+    extra_filters = []
+    if overlays:
+        extra_filters.extend(_build_overlay_drawtext(overlays, output_format))
+    if caption_segments:
+        extra_filters.extend(
+            _build_caption_drawtext(caption_segments, in_sec, out_sec, output_format)
+        )
+
+    if extra_filters:
+        if vf:
+            vf = vf + "," + ",".join(extra_filters)
+        else:
+            vf = ",".join(extra_filters)
 
     cmd = ["ffmpeg", "-y"]
     cmd.extend(get_hwaccel_args())
@@ -211,6 +364,15 @@ def _extract_segment(
     return result.returncode == 0
 
 
+def _load_clip_transcript(editorial_paths: EditorialProjectPaths, clip_id: str) -> list | None:
+    """Load transcript segments for a clip, or None if unavailable."""
+    transcript_path = editorial_paths.clip_paths(clip_id).root / "audio" / "transcript.json"
+    if transcript_path.exists():
+        data = json.loads(transcript_path.read_text())
+        return data.get("segments", [])
+    return None
+
+
 def assemble_rough_cut(
     storyboard: EditorialStoryboard,
     editorial_paths: EditorialProjectPaths,
@@ -218,10 +380,22 @@ def assemble_rough_cut(
     source_map: dict[str, Path] | None = None,
     output_format: OutputFormat | None = None,
     clip_format_map: dict[str, dict] | None = None,
+    monologue=None,
+    burn_captions: bool = False,
 ) -> tuple[Path, list[str]]:
     """Assemble a rough cut video from the structured storyboard. Returns (path, warnings)."""
     segments_dir = version_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build overlay lookup: segment_index → list of overlays
+    overlay_map: dict[int, list] = {}
+    if monologue:
+        for ov in monologue.overlays:
+            overlay_map.setdefault(ov.segment_index, []).append(ov)
+
+    # Load transcripts for caption burning
+    transcript_cache: dict[str, list | None] = {}
+    has_text = monologue is not None or burn_captions
 
     segment_files = []
     warnings = []
@@ -235,10 +409,31 @@ def assemble_rough_cut(
         if seg.in_sec >= seg.out_sec:
             continue
 
-        seg_path = segments_dir / f"seg_{seg.index:03d}_{seg.clip_id}.mp4"
+        # Load transcript for this clip's captions (cached per clip)
+        caption_segments = None
+        if burn_captions:
+            if seg.clip_id not in transcript_cache:
+                transcript_cache[seg.clip_id] = _load_clip_transcript(
+                    editorial_paths, seg.clip_id
+                )
+            caption_segments = transcript_cache[seg.clip_id]
+
+        # Use different filename when text overlays present to avoid caching conflicts
+        seg_overlays = overlay_map.get(seg.index)
+        suffix = "_txt" if has_text else ""
+        seg_path = segments_dir / f"seg_{seg.index:03d}_{seg.clip_id}{suffix}.mp4"
+
+        overlay_count = len(seg_overlays) if seg_overlays else 0
+        labels = []
+        if overlay_count:
+            labels.append(f"+{overlay_count} text")
+        if caption_segments:
+            labels.append("+captions")
+        label_str = f" ({', '.join(labels)})" if labels else ""
         print(
             f"  [{seg.index}/{len(storyboard.segments)}] {seg.clip_id} "
-            f"{seg.in_sec:.1f}s-{seg.out_sec:.1f}s ({seg.duration_sec:.1f}s) — {seg.purpose}"
+            f"{seg.in_sec:.1f}s-{seg.out_sec:.1f}s ({seg.duration_sec:.1f}s) "
+            f"— {seg.purpose}{label_str}"
         )
 
         if seg_path.exists() and seg_path.stat().st_size > 0:
@@ -253,6 +448,8 @@ def assemble_rough_cut(
             seg_path,
             output_format=output_format,
             clip_info=clip_info,
+            overlays=seg_overlays,
+            caption_segments=caption_segments,
         )
         if ok and seg_path.exists():
             actual_dur = get_video_duration(seg_path)
@@ -328,6 +525,7 @@ def _build_clip_format_map(editorial_paths: EditorialProjectPaths) -> dict[str, 
 def run_rough_cut(
     storyboard_json_path: Path,
     editorial_paths: EditorialProjectPaths,
+    monologue=None,
 ) -> dict:
     """Load structured storyboard → validate → ffmpeg assembly → HTML preview.
 
@@ -371,7 +569,8 @@ def run_rough_cut(
         print("    All segments valid")
 
     # Assemble
-    print("\n  Extracting segments...")
+    overlay_label = " (with text overlays + captions)" if monologue else ""
+    print(f"\n  Extracting segments{overlay_label}...")
     rough_cut_path, assembly_warnings = assemble_rough_cut(
         storyboard,
         editorial_paths,
@@ -379,6 +578,8 @@ def run_rough_cut(
         source_map,
         output_format=output_format,
         clip_format_map=clip_format_map,
+        monologue=monologue,
+        burn_captions=monologue is not None,
     )
     all_warnings = validation_warnings + assembly_warnings
 
