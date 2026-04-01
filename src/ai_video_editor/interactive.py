@@ -593,13 +593,29 @@ def _manage_clips(name, meta, cfg):
                 shutil.rmtree(clip_dir)
                 print(f"    - {cid}")
 
+    # Read existing manifest to preserve full clip metadata
+    existing_clips_by_id = {}
+    if ep.master_manifest.exists():
+        old_manifest = json.loads(ep.master_manifest.read_text())
+        for c in old_manifest.get("clips", []):
+            existing_clips_by_id[c["clip_id"]] = c
+
+    new_clip_metadata = []
     if to_add:
         print(f"\n  Adding {len(to_add)} clip(s), preprocessing...\n")
-        preprocess_all_clips(to_add, ep, cfg.preprocess)
+        new_clip_metadata = preprocess_all_clips(to_add, ep, cfg.preprocess)
+    new_clips_by_id = {c["clip_id"]: c for c in new_clip_metadata}
 
-    # Rebuild manifest with current clips
+    # Rebuild manifest with current clips in source order
     remaining_clips = [c for c in all_source_clips if c.stem in selected_ids]
-    build_master_manifest([{"clip_id": c.stem} for c in remaining_clips], ep, name)
+    merged_metadata = []
+    for c in remaining_clips:
+        cid = c.stem
+        if cid in new_clips_by_id:
+            merged_metadata.append(new_clips_by_id[cid])
+        elif cid in existing_clips_by_id:
+            merged_metadata.append(existing_clips_by_id[cid])
+    build_master_manifest(merged_metadata, ep, name)
 
     # Update project metadata
     meta["clip_count"] = len(selected_ids)
