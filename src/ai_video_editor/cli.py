@@ -156,6 +156,22 @@ def cmd_new(args, cfg: Config):
             print(f"\n{RED}Error:{RESET} No video files found in {source}")
             sys.exit(1)
 
+        print(f"\n  Found {BOLD}{len(clips)} clips{RESET}")
+
+        # Let user deselect clips they don't want to import
+        import questionary
+
+        selected = questionary.checkbox(
+            "Select clips to include:",
+            choices=[questionary.Choice(c.name, value=c, checked=True) for c in clips],
+        ).ask()
+        if selected is None:
+            sys.exit(0)
+        if not selected:
+            print(f"\n{RED}Error:{RESET} No clips selected.")
+            sys.exit(1)
+        clips = selected
+
         meta = {
             "name": name,
             "type": "editorial",
@@ -166,10 +182,6 @@ def cmd_new(args, cfg: Config):
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         _write_project_meta(project_root, meta)
-
-        print(f"\n  Found {BOLD}{len(clips)} clips{RESET}")
-        for c in clips:
-            print(f"    {DIM}{c.name}{RESET}")
 
         _header("Preprocessing")
         clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)

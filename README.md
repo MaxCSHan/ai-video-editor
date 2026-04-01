@@ -25,12 +25,21 @@ VX automates the editor's thinking, not just the cutting. Here's what that means
 ```
 Raw Clips                       You shot 17 clips on your trip.
     │                           4K, handheld, no plan, mixed quality.
+    │                           Sony H.264, iPhone HEVC, any mix.
     │
     ▼
 ┌─────────┐                     ffmpeg downscales each clip to a tiny proxy
 │ Ingest  │                     (360p, 1fps, ~5MB). Extracts frames, detects
 └────┬────┘                     scene changes, pulls audio. Runs 4 clips in
      │                          parallel. Cached — never re-processed.
+     │                          Hardware-accelerated HEVC decode (VideoToolbox).
+     ▼
+┌──────────┐                    Detects source formats (resolution, codec,
+│ Format   │                    aspect ratio, orientation, fps). Filters
+│ Analyzer │                    Live Photo .mov files. Recommends output
+└────┬─────┘                    format; user picks resolution, codec (H.264/
+     │                          H.265), and fit mode (pad/crop) when sources
+     │                          are mixed.
      ▼
 ┌──────────┐                    You answer a few questions: who's in it,
 │ Briefing │  (optional)        what was the occasion, what tone you want.
@@ -60,8 +69,9 @@ Raw Clips                       You shot 17 clips on your trip.
        ▼
 ┌─────────┐                     Loads the JSON. Validates timestamps against
 │   Cut   │                     actual clip durations (clamps out-of-bounds).
-│  (ffmpeg)│                     Extracts each segment, concatenates into
-└────┬────┘                     rough_cut.mp4. No LLM call — pure execution.
+│  (ffmpeg)│                     Normalizes each segment to the target format
+└────┬────┘                     (scaling, padding, rotation, fps). Concatenates
+     │                          into rough_cut.mp4. No LLM call — pure execution.
      │
      └──→ rough_cut.mp4          Watch it. If it's not right, adjust the
           preview.html           preview, export new JSON, re-cut.
@@ -154,12 +164,13 @@ src/ai_video_editor/
   interactive.py        # Interactive TUI (questionary/prompt_toolkit)
   briefing.py           # Editorial briefing questionnaire
   models.py             # Pydantic models (EditorialStoryboard, Segment, etc.)
-  config.py             # Settings, paths, provider configs
-  preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached)
+  config.py             # Settings, paths, provider configs, OutputFormat
+  preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached, hwaccel)
+  format_analyzer.py    # Source format detection, Live Photo filter, output recommendation
   editorial_prompts.py  # Phase 1 + 2 prompt engineering
   editorial_agent.py    # Multi-clip orchestrator
   render.py             # Markdown + interactive HTML from Pydantic models
-  rough_cut.py          # Validation + ffmpeg assembly (no LLM)
+  rough_cut.py          # Validation + format-normalized ffmpeg assembly (no LLM)
   versioning.py         # Run versioning with symlinks
 ```
 

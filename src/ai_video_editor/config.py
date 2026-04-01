@@ -35,6 +35,34 @@ class PreprocessConfig:
 
 
 @dataclass
+class OutputFormat:
+    """Target output format for rough cut assembly."""
+
+    width: int = 1920
+    height: int = 1080
+    fps: float = 29.97
+    orientation: str = "landscape"  # "landscape" | "portrait"
+    codec: str = "libx264"  # "libx264" | "libx265"
+    fit_mode: str = "pad"  # "pad" (black bars) | "crop" (fill frame)
+    label: str = "FHD 1080p"
+
+    def to_dict(self) -> dict:
+        return {
+            "width": self.width,
+            "height": self.height,
+            "fps": self.fps,
+            "orientation": self.orientation,
+            "codec": self.codec,
+            "fit_mode": self.fit_mode,
+            "label": self.label,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "OutputFormat":
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
 class ClaudeConfig:
     model: str = "claude-sonnet-4-20250514"
     max_images_per_batch: int = 20

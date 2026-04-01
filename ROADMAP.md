@@ -10,12 +10,26 @@
 
 ### Preprocessing
 - [x] Parallel ffmpeg preprocessing (4 workers) — proxy, frames, scenes, audio
-- [x] Proxy downscaling: 4K → 360x240 @1fps for fast AI upload (~5-8MB per clip)
+- [x] Proxy downscaling: 4K → 360p @1fps for fast AI upload (~5-8MB per clip)
+- [x] Aspect-ratio-preserving proxy scaling (`scale=360:-2` — no distortion for 4:3 iPhone footage)
 - [x] Frame extraction at configurable intervals (default 5s)
 - [x] Scene-change detection via ffmpeg scene filter
 - [x] Audio extraction (16kHz mono WAV)
 - [x] Per-clip caching — skip already-processed clips on re-run
 - [x] macOS resource fork filtering (`._` files)
+- [x] Hardware-accelerated HEVC decode via VideoToolbox on macOS (all ffmpeg calls)
+- [x] Rotation detection and correction (ffprobe side_data + tags.rotate)
+
+### Format-Aware Pipeline
+- [x] Enhanced metadata extraction: rotation, orientation, aspect ratio, resolution class, FPS, HDR detection
+- [x] Source format analysis: groups clips by resolution/aspect/codec, detects mixed sources
+- [x] iPhone Live Photo detection and optional filtering (short duration + 4:3 heuristic)
+- [x] Output format recommendation with interactive TUI selection (resolution, codec, fit mode)
+- [x] User-selectable fit mode: pad (black bars, preserve full frame) or crop (fill frame)
+- [x] User-selectable output codec: H.264 or H.265
+- [x] Normalized segment extraction: adaptive ffmpeg filter chain per segment (rotation → scale → pad/crop → fps)
+- [x] Cross-orientation handling: portrait clips centered in landscape canvas with pillarboxing
+- [x] Stream-copy concat (segments pre-normalized to uniform format)
 
 ### AI Analysis
 - [x] Phase 1: Per-clip LLM review — quality, people, key moments, usable/discard segments, audio
@@ -69,6 +83,8 @@
 - [x] Per-clip `storyboard/` and `exports/` dirs no longer created — `ProjectPaths.ensure_dirs()` trimmed to per-clip concerns only
 - [x] Consolidated HTML preview into `exports/vN/preview.html` — removed duplicate from `storyboard/`
 - [x] Cut writes into the analyze version's export dir (derived from storyboard JSON filename) instead of maintaining a separate version counter
+- [x] `manifest.json` enriched with format metadata: rotation, orientation, aspect ratio, resolution class, FPS (float), HDR flag
+- [x] `OutputFormat` persisted in `project.json` — rough cut loads automatically, backward-compatible default when absent
 
 ---
 
@@ -121,6 +137,7 @@
 - [ ] Import user adjustments from NLE back into VX
 
 ### Smart Clip Selection
+- [x] Auto-detect iPhone Live Photo .mov files (short duration + 4:3 heuristic) with optional filtering
 - [ ] Auto-detect and filter accidental recordings (lens cap, pocket footage, < 2s clips)
 - [ ] Quality scoring: sharpness, stability, exposure, composition
 - [ ] Duplicate/similar clip detection (same scene from multiple takes)

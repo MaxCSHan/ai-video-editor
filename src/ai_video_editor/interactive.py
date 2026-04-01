@@ -141,7 +141,21 @@ def _new_project_flow(cfg):
         print(f"  No video files found in {source_path}\n")
         return
 
-    print(f"  Found {len(clips)} clips")
+    print(f"  Found {len(clips)} clips\n")
+
+    # Let user deselect clips they don't want
+    selected = questionary.checkbox(
+        "Select clips to include:",
+        choices=[questionary.Choice(c.name, value=c, checked=True) for c in clips],
+        style=VX_STYLE,
+    ).ask()
+    if selected is None:
+        return
+    if not selected:
+        print("  No clips selected.\n")
+        return
+    clips = selected
+
     meta["clip_count"] = len(clips)
     (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
 
@@ -150,6 +164,13 @@ def _new_project_flow(cfg):
     clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, ep, name)
     print(f"\n  Total footage: {manifest['total_duration_fmt']}")
+
+    # Format analysis + selection
+    clip_metadata, output_format = _run_format_selection(clip_metadata, meta, ep)
+
+    # Rebuild manifest if clips were filtered (Live Photos excluded)
+    if len(clip_metadata) != manifest["clip_count"]:
+        manifest = build_master_manifest(clip_metadata, ep, name)
 
     # Transcription
     _run_transcription(ep, clip_metadata, cfg)
@@ -238,6 +259,7 @@ def _project_actions(name, cfg):
         if has_storyboard:
             choices.append("Regenerate preview")
             choices.append("Assemble rough cut")
+        choices.append("Manage clips")
         choices.append("Transcribe audio")
         choices.append("Run analysis (Phase 1 + 2)")
         choices.append("Edit briefing (AI-guided)")
@@ -329,8 +351,81 @@ def _project_actions(name, cfg):
             if ctx_path.exists():
                 ctx_path.unlink()
             run_briefing(reviews, style, ep.root)
+        elif action == "Manage clips":
+            _manage_clips(name, meta, cfg)
         elif action == "Show status":
             _show_status(name, meta, cfg)
+
+
+def _manage_clips(name, meta, cfg):
+    """Add or remove clips from an existing project."""
+    import shutil
+
+    from .editorial_agent import discover_source_clips, preprocess_all_clips, build_master_manifest
+
+    ep = cfg.editorial_project(name)
+    source_dir = Path(meta.get("source_dir", ""))
+    if not source_dir.is_dir():
+        print(f"\n  Source directory not found: {source_dir}\n")
+        return
+
+    # All available clips from source directory
+    all_source_clips = discover_source_clips(source_dir)
+    if not all_source_clips:
+        print(f"\n  No video files found in {source_dir}\n")
+        return
+
+    # Currently included clip IDs
+    current_clip_ids = set(ep.discover_clips())
+
+    # Build checkbox: checked if already in project, unchecked if not
+    choices = []
+    for clip_file in all_source_clips:
+        clip_id = clip_file.stem
+        is_included = clip_id in current_clip_ids
+        choices.append(questionary.Choice(clip_file.name, value=clip_file, checked=is_included))
+
+    selected = questionary.checkbox(
+        f"Select clips to include ({len(current_clip_ids)} currently included):",
+        choices=choices,
+        style=VX_STYLE,
+    ).ask()
+    if selected is None:
+        return
+
+    selected_ids = {c.stem for c in selected}
+
+    # Determine adds and removes
+    to_add = [c for c in selected if c.stem not in current_clip_ids]
+    to_remove = current_clip_ids - selected_ids
+
+    if not to_add and not to_remove:
+        print("\n  No changes.\n")
+        return
+
+    if to_remove:
+        print(f"\n  Removing {len(to_remove)} clip(s):")
+        for cid in sorted(to_remove):
+            clip_dir = ep.clips_dir / cid
+            if clip_dir.exists():
+                shutil.rmtree(clip_dir)
+                print(f"    - {cid}")
+
+    if to_add:
+        print(f"\n  Adding {len(to_add)} clip(s), preprocessing...\n")
+        preprocess_all_clips(to_add, ep, cfg.preprocess)
+
+    # Rebuild manifest with current clips
+    remaining_clips = [c for c in all_source_clips if c.stem in selected_ids]
+    build_master_manifest([{"clip_id": c.stem} for c in remaining_clips], ep, name)
+
+    # Update project metadata
+    meta["clip_count"] = len(selected_ids)
+    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+
+    print(f"\n  Project now has {len(selected_ids)} clips.")
+    if to_remove:
+        print("  Note: re-run analysis to update storyboard.\n")
 
 
 def _run_analyze(name, meta, cfg):
@@ -354,6 +449,11 @@ def _run_analyze(name, meta, cfg):
     print(f"\n  {len(clips)} clips, preprocessing...\n")
     clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, ep, name)
+
+    # Format analysis + selection
+    clip_metadata, output_format = _run_format_selection(clip_metadata, meta, ep)
+    if len(clip_metadata) != manifest["clip_count"]:
+        manifest = build_master_manifest(clip_metadata, ep, name)
 
     # Transcription
     _run_transcription(ep, clip_metadata, cfg)
@@ -395,6 +495,160 @@ def _load_reviews(ep):
                 reviews.append(json.loads(found[0].read_text()))
                 break
     return reviews
+
+
+def _run_format_selection(clip_metadata, meta, ep):
+    """Analyze source formats, filter Live Photos, let user pick output format.
+
+    Updates meta and writes project.json. Returns (filtered_clip_metadata, OutputFormat).
+    """
+    from .config import OutputFormat
+    from .format_analyzer import (
+        analyze_source_formats,
+        recommend_output_format,
+        build_format_choices,
+        format_summary_text,
+    )
+
+    analysis = analyze_source_formats(clip_metadata)
+    print(f"\n{format_summary_text(analysis, clip_metadata)}\n")
+
+    # Live Photo filtering
+    live_ids = analysis["live_photo_ids"]
+    if live_ids:
+        display = ", ".join(f"{cid}" for cid in live_ids[:6])
+        if len(live_ids) > 6:
+            display += "..."
+        print(f"  Possible Live Photo clips ({len(live_ids)}): {display}\n")
+
+        action = questionary.select(
+            "How to handle Live Photo clips?",
+            choices=[
+                "Include all",
+                "Exclude Live Photos",
+                "Choose individually",
+            ],
+            style=VX_STYLE,
+        ).ask()
+
+        if action == "Exclude Live Photos":
+            clip_metadata = [c for c in clip_metadata if c["clip_id"] not in live_ids]
+            print(f"  Excluded {len(live_ids)} Live Photos, {len(clip_metadata)} clips remain\n")
+            # Re-analyze without live photos
+            analysis = analyze_source_formats(clip_metadata)
+        elif action == "Choose individually":
+            keep = questionary.checkbox(
+                "Select Live Photo clips to keep:",
+                choices=[
+                    questionary.Choice(
+                        f"{cid} ({next((c['duration_sec'] for c in clip_metadata if c['clip_id'] == cid), 0):.1f}s)",
+                        value=cid,
+                        checked=False,
+                    )
+                    for cid in live_ids
+                ],
+                style=VX_STYLE,
+            ).ask()
+            if keep is None:
+                keep = []
+            exclude = set(live_ids) - set(keep)
+            if exclude:
+                clip_metadata = [c for c in clip_metadata if c["clip_id"] not in exclude]
+                print(f"  Excluded {len(exclude)} Live Photos, {len(clip_metadata)} clips remain\n")
+                analysis = analyze_source_formats(clip_metadata)
+
+    # Format recommendation
+    recommended, rationale = recommend_output_format(analysis)
+    print(f"  {rationale}\n")
+
+    if analysis["has_mixed_resolutions"] or analysis["has_mixed_aspects"]:
+        # Mixed sources — let user choose
+        choices = build_format_choices(analysis)
+        choice_labels = [c["label"] for c in choices]
+        selected = questionary.select(
+            "Output format:",
+            choices=choice_labels,
+            style=VX_STYLE,
+        ).ask()
+        if selected:
+            chosen = next(c for c in choices if c["label"] == selected)
+            output_format = OutputFormat(
+                width=chosen["width"],
+                height=chosen["height"],
+                fps=chosen["fps"],
+                orientation=chosen["orientation"],
+                label=selected.replace(" (recommended)", ""),
+            )
+        else:
+            output_format = recommended
+    else:
+        # Uniform — confirm recommendation
+        if not questionary.confirm(
+            f"Use {recommended.label} @ {recommended.fps}fps?",
+            default=True,
+            style=VX_STYLE,
+        ).ask():
+            choices = build_format_choices(analysis)
+            choice_labels = [c["label"] for c in choices]
+            selected = questionary.select(
+                "Output format:",
+                choices=choice_labels,
+                style=VX_STYLE,
+            ).ask()
+            if selected:
+                chosen = next(c for c in choices if c["label"] == selected)
+                output_format = OutputFormat(
+                    width=chosen["width"],
+                    height=chosen["height"],
+                    fps=chosen["fps"],
+                    orientation=chosen["orientation"],
+                    label=selected.replace(" (recommended)", ""),
+                )
+            else:
+                output_format = recommended
+        else:
+            output_format = recommended
+
+    # Fit mode
+    if analysis["has_mixed_aspects"]:
+        fit = questionary.select(
+            "How to handle different aspect ratios?",
+            choices=[
+                questionary.Choice(
+                    "Pad (black bars, preserve full frame)",
+                    value="pad",
+                ),
+                questionary.Choice(
+                    "Crop to fill (no bars, may lose edges)",
+                    value="crop",
+                ),
+            ],
+            style=VX_STYLE,
+        ).ask()
+        if fit:
+            output_format.fit_mode = fit
+
+    # Codec
+    codec = questionary.select(
+        "Output codec:",
+        choices=[
+            questionary.Choice("H.264 (fast, universal compatibility)", value="libx264"),
+            questionary.Choice("H.265 (smaller files, slower encode)", value="libx265"),
+        ],
+        style=VX_STYLE,
+    ).ask()
+    if codec:
+        output_format.codec = codec
+
+    # Persist
+    meta["output_format"] = output_format.to_dict()
+    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    print(
+        f"\n  Output format: {output_format.label}, {output_format.width}x{output_format.height}"
+        f" @ {output_format.fps}fps, {output_format.codec}, fit={output_format.fit_mode}\n"
+    )
+
+    return clip_metadata, output_format
 
 
 def _run_transcription(ep, clip_metadata, cfg):

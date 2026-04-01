@@ -84,9 +84,10 @@ def _preprocess_single_clip(
 
     source = ingest_source(clip_file, clip_paths)
     video_info = get_video_info(source)
-    proxy_path = create_proxy(source, clip_paths, cfg)
-    extract_frames(source, clip_paths, cfg)
-    detect_scenes(source, clip_paths, cfg)
+    rotation = video_info.get("rotation", 0)
+    proxy_path = create_proxy(source, clip_paths, cfg, rotation=rotation)
+    extract_frames(source, clip_paths, cfg, rotation=rotation)
+    detect_scenes(source, clip_paths, cfg, rotation=rotation)
     extract_audio(source, clip_paths, cfg)
 
     if not all_cached:
@@ -103,6 +104,15 @@ def _preprocess_single_clip(
         "codec": video_info["codec"],
         "fps": video_info["fps"],
         "proxy_path": str(proxy_path),
+        # Format-aware fields
+        "rotation": video_info["rotation"],
+        "display_width": video_info["display_width"],
+        "display_height": video_info["display_height"],
+        "orientation": video_info["orientation"],
+        "aspect_ratio": video_info["aspect_ratio"],
+        "resolution_class": video_info["resolution_class"],
+        "fps_float": video_info["fps_float"],
+        "is_hdr": video_info["is_hdr"],
     }
 
 
