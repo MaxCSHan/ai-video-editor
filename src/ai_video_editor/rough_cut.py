@@ -1,7 +1,9 @@
 """Rough cut executor — load structured EDL, validate, assemble with ffmpeg."""
 
 import json
+import logging
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import EditorialProjectPaths, OutputFormat
@@ -10,6 +12,8 @@ from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
 from .render import render_html_preview
 from .storyboard_format import format_duration
 from .versioning import next_version, versioned_dir, update_latest_symlink
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +101,317 @@ def validate_edl(
             warnings.append(f"#{seg.index} {seg.clip_id}: very short ({seg.duration_sec:.2f}s)")
 
     return warnings
+
+
+# ---------------------------------------------------------------------------
+# Layer 1–3: Post-encode validation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SegmentProbe:
+    """ffprobe result for a single encoded segment."""
+
+    path: Path
+    video_codec: str = ""
+    audio_codec: str = ""
+    width: int = 0
+    height: int = 0
+    pix_fmt: str = ""
+    fps: float = 0.0
+    duration: float = 0.0
+    audio_sample_rate: int = 0
+    audio_channels: int = 0
+    has_video: bool = False
+    has_audio: bool = False
+    file_size: int = 0
+
+
+def _probe_segment(path: Path) -> SegmentProbe:
+    """Layer 1: Probe an encoded segment and extract all stream parameters.
+
+    Uses ffprobe to read both video and audio stream metadata. This is the
+    foundation for per-segment validation and cross-segment compatibility checks.
+    """
+    probe = SegmentProbe(path=path)
+    if not path.exists():
+        return probe
+    probe.file_size = path.stat().st_size
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return probe
+        data = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        return probe
+
+    probe.duration = float(data.get("format", {}).get("duration", 0))
+
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") == "video" and not probe.has_video:
+            probe.has_video = True
+            probe.video_codec = stream.get("codec_name", "")
+            probe.width = int(stream.get("width", 0))
+            probe.height = int(stream.get("height", 0))
+            probe.pix_fmt = stream.get("pix_fmt", "")
+            fps_str = stream.get("r_frame_rate", "0/1")
+            try:
+                num, den = fps_str.split("/")
+                probe.fps = round(float(num) / float(den), 3) if float(den) else 0.0
+            except (ValueError, ZeroDivisionError):
+                probe.fps = 0.0
+
+        elif stream.get("codec_type") == "audio" and not probe.has_audio:
+            probe.has_audio = True
+            probe.audio_codec = stream.get("codec_name", "")
+            probe.audio_sample_rate = int(stream.get("sample_rate", 0))
+            probe.audio_channels = int(stream.get("channels", 0))
+
+    return probe
+
+
+def _validate_segment(
+    probe: SegmentProbe,
+    expected_duration: float,
+    output_format: OutputFormat | None,
+    label: str,
+) -> list[str]:
+    """Layer 1: Validate a single segment's probe result against expectations.
+
+    Returns a list of error strings. Empty list = segment is healthy.
+    """
+    errors = []
+
+    if probe.file_size == 0:
+        errors.append(f"{label}: output file is empty (0 bytes)")
+        return errors  # no point checking further
+
+    if not probe.has_video:
+        errors.append(f"{label}: no video stream found")
+    if not probe.has_audio:
+        errors.append(f"{label}: no audio stream found")
+
+    if probe.has_video and probe.pix_fmt and probe.pix_fmt != "yuv420p":
+        errors.append(f"{label}: unexpected pixel format '{probe.pix_fmt}' (expected yuv420p)")
+
+    if output_format and probe.has_video:
+        if probe.width != output_format.width or probe.height != output_format.height:
+            errors.append(
+                f"{label}: resolution {probe.width}x{probe.height} "
+                f"!= expected {output_format.width}x{output_format.height}"
+            )
+
+    if expected_duration > 0 and probe.duration > 0:
+        drift = abs(probe.duration - expected_duration)
+        if drift > 1.0:
+            errors.append(
+                f"{label}: duration {probe.duration:.1f}s vs expected {expected_duration:.1f}s "
+                f"(drift {drift:.1f}s)"
+            )
+
+    return errors
+
+
+def _check_segment_compatibility(
+    probes: list[SegmentProbe],
+) -> tuple[list[str], list[int]]:
+    """Layer 2: Cross-segment compatibility matrix check.
+
+    Compares all segments against each other to find parameter mismatches that
+    would cause concat -c:v copy to produce a corrupt container.
+
+    Returns (warnings, indices_of_incompatible_segments).
+    Incompatible segments need re-encoding before concat.
+    """
+    if len(probes) < 2:
+        return [], []
+
+    warnings = []
+    incompatible_indices = []
+
+    # Determine the "majority" parameters — the most common values across segments.
+    # Segments that disagree with the majority are flagged for re-encode.
+    def _majority(values: list) -> object:
+        if not values:
+            return None
+        from collections import Counter
+
+        counts = Counter(values)
+        return counts.most_common(1)[0][0]
+
+    video_probes = [p for p in probes if p.has_video]
+    if not video_probes:
+        return ["No segments have a video stream"], []
+
+    ref_codec = _majority([p.video_codec for p in video_probes])
+    ref_res = _majority([(p.width, p.height) for p in video_probes])
+    ref_pix = _majority([p.pix_fmt for p in video_probes])
+    ref_fps = _majority([round(p.fps, 1) for p in video_probes])
+    ref_asr = _majority([p.audio_sample_rate for p in video_probes if p.has_audio])
+    ref_ach = _majority([p.audio_channels for p in video_probes if p.has_audio])
+
+    for i, p in enumerate(probes):
+        mismatches = []
+
+        if p.video_codec != ref_codec:
+            mismatches.append(f"video codec {p.video_codec} != {ref_codec}")
+        if (p.width, p.height) != ref_res:
+            mismatches.append(f"resolution {p.width}x{p.height} != {ref_res[0]}x{ref_res[1]}")
+        if p.pix_fmt != ref_pix:
+            mismatches.append(f"pix_fmt {p.pix_fmt} != {ref_pix}")
+        if p.has_video and ref_fps and abs(round(p.fps, 1) - ref_fps) > 0.5:
+            mismatches.append(f"fps {p.fps:.1f} != {ref_fps}")
+        if p.has_audio and ref_asr and p.audio_sample_rate != ref_asr:
+            mismatches.append(f"audio sample rate {p.audio_sample_rate} != {ref_asr}")
+        if p.has_audio and ref_ach and p.audio_channels != ref_ach:
+            mismatches.append(f"audio channels {p.audio_channels} != {ref_ach}")
+
+        if mismatches:
+            seg_name = p.path.stem
+            warnings.append(f"Segment {seg_name}: {', '.join(mismatches)}")
+            incompatible_indices.append(i)
+
+    return warnings, incompatible_indices
+
+
+def _reencode_segment(path: Path, output_format: OutputFormat | None) -> bool:
+    """Re-encode a segment in-place to match the expected output parameters.
+
+    Used when Layer 2 detects a segment that is individually valid but
+    incompatible with the majority of other segments.
+    """
+    tmp = path.with_suffix(".reenc.mp4")
+    target_w = output_format.width if output_format else 1920
+    target_h = output_format.height if output_format else 1080
+    target_fps = output_format.fps if output_format else 29.97
+
+    sw_codec = output_format.codec if output_format else "libx264"
+    if sw_codec == "auto":
+        sw_codec = "libx264"
+    codec = get_hwenc_codec(sw_codec)
+    is_vt = codec.endswith("_videotoolbox")
+
+    cmd = ["ffmpeg", "-y"]
+    cmd.extend(get_hwaccel_args())
+    cmd.extend(["-i", str(path)])
+    cmd.extend(
+        [
+            "-vf",
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,fps={target_fps}",
+        ]
+    )
+    cmd.extend(["-c:v", codec])
+    if is_vt:
+        cmd.extend(["-q:v", "65", "-allow_sw", "1"])
+        if codec == "hevc_videotoolbox":
+            cmd.extend(["-tag:v", "hvc1"])
+    else:
+        cmd.extend(["-preset", "fast", "-crf", "23"])
+        if codec == "libx264":
+            cmd.extend(["-profile:v", "high", "-level", "4.2"])
+    cmd.extend(["-pix_fmt", "yuv420p"])
+    cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
+    cmd.extend(["-movflags", "+faststart", str(tmp)])
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        tmp.replace(path)
+        return True
+    if tmp.exists():
+        tmp.unlink()
+    return False
+
+
+def _verify_rough_cut(
+    rough_cut_path: Path,
+    expected_duration: float,
+    segment_count: int,
+) -> list[str]:
+    """Layer 3: Post-concat integrity verification.
+
+    Checks that the final rough cut is a valid, playable MP4:
+    - Has both video and audio streams
+    - Duration matches sum of segments (±2s tolerance for concat rounding)
+    - File size is reasonable (not truncated)
+    - moov atom is present (faststart worked) via a fast seek test
+    """
+    errors = []
+
+    if not rough_cut_path.exists():
+        return ["Rough cut file does not exist"]
+
+    size = rough_cut_path.stat().st_size
+    if size == 0:
+        return ["Rough cut file is empty (0 bytes)"]
+
+    # Minimum sanity: at least 10KB per segment
+    min_expected = segment_count * 10 * 1024
+    if size < min_expected:
+        errors.append(
+            f"Rough cut suspiciously small: {size / 1024:.0f} KB "
+            f"(expected at least {min_expected / 1024:.0f} KB for {segment_count} segments)"
+        )
+
+    # Probe the final output
+    probe = _probe_segment(rough_cut_path)
+    if not probe.has_video:
+        errors.append("Rough cut has no video stream")
+    if not probe.has_audio:
+        errors.append("Rough cut has no audio stream")
+
+    if expected_duration > 0 and probe.duration > 0:
+        drift = abs(probe.duration - expected_duration)
+        if drift > 2.0:
+            errors.append(
+                f"Rough cut duration {probe.duration:.1f}s vs expected {expected_duration:.1f}s "
+                f"(drift {drift:.1f}s)"
+            )
+
+    # Seek test: try reading a frame from 1s in — validates moov atom + index
+    if probe.duration > 1.0:
+        try:
+            seek_result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-read_intervals",
+                    "%1",
+                    "-select_streams",
+                    "v:0",
+                    "-show_frames",
+                    "-entries",
+                    "frame=pkt_pts_time",
+                    "-of",
+                    "csv=p=0",
+                    str(rough_cut_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if seek_result.returncode != 0 or not seek_result.stdout.strip():
+                errors.append("Rough cut failed seek test — moov atom may be corrupt")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            errors.append("Rough cut seek test timed out")
+
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +748,19 @@ def _extract_segment(
     cmd.extend(["-movflags", "+faststart", str(output_path)])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log.warning(
+            "ffmpeg segment extraction failed for %s: %s", output_path.name, result.stderr[:500]
+        )
+    elif result.stderr:
+        # Log warnings even on success — ffmpeg often warns about issues that
+        # produce a technically valid but subtly broken file
+        stderr_lower = result.stderr.lower()
+        if any(
+            kw in stderr_lower
+            for kw in ["discarding", "discarded", "non monoton", "error", "invalid"]
+        ):
+            log.warning("ffmpeg warnings for %s: %s", output_path.name, result.stderr[:500])
     return result.returncode == 0
 
 
@@ -472,6 +800,8 @@ def assemble_rough_cut(
     segment_files = []
     warnings = []
 
+    expected_durations: dict[int, float] = {}  # index → expected duration for Layer 1
+
     for seg in storyboard.segments:
         source = _resolve_clip_source(seg.clip_id, editorial_paths, source_map)
         if not source:
@@ -508,6 +838,7 @@ def assemble_rough_cut(
 
         if seg_path.exists() and seg_path.stat().st_size > 0:
             segment_files.append(seg_path)
+            expected_durations[len(segment_files) - 1] = seg.duration_sec
             continue
 
         clip_info = clip_format_map.get(seg.clip_id) if clip_format_map else None
@@ -522,24 +853,65 @@ def assemble_rough_cut(
             caption_segments=caption_segments,
         )
         if ok and seg_path.exists():
-            actual_dur = get_video_duration(seg_path)
-            if abs(actual_dur - seg.duration_sec) > 1.0:
-                warnings.append(
-                    f"#{seg.index} {seg.clip_id}: expected {seg.duration_sec:.1f}s, got {actual_dur:.1f}s"
-                )
             segment_files.append(seg_path)
+            expected_durations[len(segment_files) - 1] = seg.duration_sec
         else:
             warnings.append(f"#{seg.index}: ffmpeg extraction failed")
 
     if not segment_files:
         raise RuntimeError("No segments extracted — cannot assemble rough cut")
 
+    # -----------------------------------------------------------------------
+    # Layer 1: Per-segment validation
+    # -----------------------------------------------------------------------
+    print(f"\n  Validating {len(segment_files)} segments...")
+    probes: list[SegmentProbe] = []
+    for i, seg_path in enumerate(segment_files):
+        probe = _probe_segment(seg_path)
+        probes.append(probe)
+        seg_errors = _validate_segment(
+            probe,
+            expected_duration=expected_durations.get(i, 0),
+            output_format=output_format,
+            label=seg_path.stem,
+        )
+        for e in seg_errors:
+            warnings.append(f"VALIDATION: {e}")
+
+    valid_count = sum(1 for p in probes if p.has_video and p.has_audio)
+    print(f"    {valid_count}/{len(probes)} segments have both video + audio streams")
+
+    # -----------------------------------------------------------------------
+    # Layer 2: Pre-concat compatibility matrix
+    # -----------------------------------------------------------------------
+    compat_warnings, incompat_indices = _check_segment_compatibility(probes)
+    if compat_warnings:
+        print(f"    {len(incompat_indices)} segment(s) have parameter mismatches:")
+        for w in compat_warnings:
+            print(f"      {w}")
+            warnings.append(f"COMPAT: {w}")
+
+        # Re-encode incompatible segments to match the majority
+        for idx in incompat_indices:
+            seg_path = segment_files[idx]
+            print(f"    Re-encoding {seg_path.stem} for compatibility...")
+            if _reencode_segment(seg_path, output_format):
+                probes[idx] = _probe_segment(seg_path)
+                print(
+                    f"      OK — now {probes[idx].video_codec} {probes[idx].width}x{probes[idx].height}"
+                )
+            else:
+                warnings.append(f"COMPAT: re-encode failed for {seg_path.stem}")
+    else:
+        print("    All segments are compatible for concatenation")
+
     # Concatenate
     rough_cut_path = version_dir / "rough_cut.mp4"
     concat_list = segments_dir / "concat_list.txt"
     concat_list.write_text("\n".join(f"file '{seg.resolve()}'" for seg in segment_files) + "\n")
 
-    print(f"\n  Concatenating {len(segment_files)} segments...")
+    total_expected_dur = sum(p.duration for p in probes)
+    print(f"\n  Concatenating {len(segment_files)} segments (~{total_expected_dur:.0f}s total)...")
     result = subprocess.run(
         [
             "ffmpeg",
@@ -572,6 +944,18 @@ def assemble_rough_cut(
 
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg concat failed: {result.stderr[:500]}")
+
+    # -----------------------------------------------------------------------
+    # Layer 3: Post-concat integrity verification
+    # -----------------------------------------------------------------------
+    print("  Verifying rough cut integrity...")
+    integrity_errors = _verify_rough_cut(rough_cut_path, total_expected_dur, len(segment_files))
+    if integrity_errors:
+        for e in integrity_errors:
+            print(f"    WARNING: {e}")
+            warnings.append(f"INTEGRITY: {e}")
+    else:
+        print("    Rough cut passed all integrity checks")
 
     size_mb = rough_cut_path.stat().st_size / 1024 / 1024
     print(f"  Rough cut: {rough_cut_path} ({size_mb:.1f} MB)")
