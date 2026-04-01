@@ -355,7 +355,7 @@ def run_smart_briefing(
 
     # Show scan results
     print(f"\n  {'─' * 60}")
-    print(f"  AI Quick Scan Results")
+    print("  AI Quick Scan Results")
     print(f"  {'─' * 60}")
     print(f"\n  {scan['overall_summary']}\n")
 

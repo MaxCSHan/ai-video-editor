@@ -1,6 +1,5 @@
 """Shared storyboard markdown template and prompt text for both analysis patterns."""
 
-
 STORYBOARD_PROMPT = """\
 Analyze this video content and produce a detailed storyboard in the exact markdown format below.
 

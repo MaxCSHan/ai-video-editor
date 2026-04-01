@@ -3,13 +3,12 @@
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import questionary
 from questionary import Style
 
-from .config import DEFAULT_CONFIG, LIBRARY_DIR
+from .config import DEFAULT_CONFIG
 
 VX_STYLE = Style(
     [
@@ -277,8 +276,8 @@ def _new_project_flow(cfg):
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
 
-    print(f"\n  Phase 2: Generating storyboard...\n")
-    output = run_phase2(
+    print("\n  Phase 2: Generating storyboard...\n")
+    run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,
         project_name=name,
@@ -439,7 +438,7 @@ def _project_actions(name, cfg):
 
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
-                print(f"\n  Assembling rough cut...\n")
+                print("\n  Assembling rough cut...\n")
                 result = run_rough_cut(json_files[0], ep)
                 print(f"\n  Done! v{result['version']}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
@@ -680,7 +679,7 @@ def _run_analyze(name, meta, cfg):
             style=VX_STYLE,
         ).ask()
 
-    print(f"\n  Phase 1: Reviewing clips...\n")
+    print("\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
         reviews, failed = run_phase1_gemini(
             ep,
@@ -723,7 +722,7 @@ def _run_analyze(name, meta, cfg):
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
 
-    print(f"\n  Phase 2: Generating storyboard...\n")
+    print("\n  Phase 2: Generating storyboard...\n")
     run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,
@@ -1000,15 +999,10 @@ def _run_transcription(ep, clip_metadata, cfg):
 def _run_transcription_interactive(name, cfg):
     """Run transcription from project actions menu with provider choice."""
     from .editorial_agent import (
-        _resolve_transcribe_provider,
-        discover_source_clips,
-        preprocess_all_clips,
         transcribe_all_clips,
     )
 
     ep = cfg.editorial_project(name)
-    meta = json.loads((ep.root / "project.json").read_text())
-
     # Let user pick provider
     available = []
     try:

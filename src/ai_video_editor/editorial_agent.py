@@ -23,7 +23,6 @@ from .editorial_prompts import (
 )
 from .versioning import (
     next_version,
-    current_version,
     versioned_path,
     versioned_dir,
     update_latest_symlink,

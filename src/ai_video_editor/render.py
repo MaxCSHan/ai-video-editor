@@ -181,16 +181,26 @@ def _render_monologue_panel(monologue) -> str:
             f'color:#aaa">'
             f"<span>Segment #{ov.segment_index}</span>"
             f"<span>{ov.appear_at:.1f}s – {end_t:.1f}s ({ov.duration_sec:.1f}s)</span>"
-            f"<span style=\"color:{color}\">{ov.synergy}</span>"
+            f'<span style="color:{color}">{ov.synergy}</span>'
             f"</div>"
             f'<div style="font-size:1.1em;margin-top:4px;font-style:italic;color:#e0e0e0">'
             f'"{ov.text}"</div>'
-            + (f'<div style="font-size:0.8em;color:#888;margin-top:2px">{ov.note}</div>' if ov.note else "")
+            + (
+                f'<div style="font-size:0.8em;color:#888;margin-top:2px">{ov.note}</div>'
+                if ov.note
+                else ""
+            )
             + "</div>"
         )
 
-    pacing = "".join(f"<li>{n}</li>" for n in monologue.pacing_notes) if monologue.pacing_notes else ""
-    music = "".join(f"<li>{n}</li>" for n in monologue.music_sync_notes) if monologue.music_sync_notes else ""
+    pacing = (
+        "".join(f"<li>{n}</li>" for n in monologue.pacing_notes) if monologue.pacing_notes else ""
+    )
+    music = (
+        "".join(f"<li>{n}</li>" for n in monologue.music_sync_notes)
+        if monologue.music_sync_notes
+        else ""
+    )
 
     return f"""
 <h2>Visual Monologue</h2>

@@ -6,7 +6,6 @@ the most recent version.
 """
 
 import json
-import os
 from pathlib import Path
 
 
@@ -71,6 +70,7 @@ def update_latest_symlink(target: Path, link_name: str | None = None):
             stem = target.stem
             # Remove _vN suffix to get base stem
             import re
+
             base_stem = re.sub(r"_v\d+$", "", stem)
             link = target.parent / f"{base_stem}_latest{target.suffix}"
 
@@ -93,6 +93,7 @@ def list_versions(directory: Path, pattern: str) -> list[tuple[int, Path]]:
     Returns sorted list of (version_number, path) tuples.
     """
     import re
+
     results = []
     if not directory.exists():
         return results

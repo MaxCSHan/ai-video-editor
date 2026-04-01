@@ -30,7 +30,6 @@ from .config import (
     VIDEO_EXTENSIONS,
     Config,
     DEFAULT_CONFIG,
-    LIBRARY_DIR,
 )
 from .storyboard_format import format_duration
 
@@ -132,9 +131,11 @@ def cmd_new(args, cfg: Config):
     style_preset = None
     if preset_key:
         from .style_presets import get_preset
+
         style_preset = get_preset(preset_key)
         if not style_preset:
             from .style_presets import list_presets
+
             available = ", ".join(p.key for p in list_presets())
             print(f"{RED}Error:{RESET} Unknown preset: {preset_key}. Available: {available}")
             sys.exit(1)
@@ -205,7 +206,7 @@ def cmd_new(args, cfg: Config):
         print(f"\n  Total footage: {BOLD}{manifest['total_duration_fmt']}{RESET}")
 
     else:  # descriptive
-        from .preprocess import ingest_source, get_video_info, run_full_preprocess
+        from .preprocess import run_full_preprocess
 
         pp = cfg.project(name)
         pp.ensure_dirs()
@@ -621,6 +622,7 @@ def cmd_analyze(args, cfg: Config):
     style_preset = None
     if preset_key:
         from .style_presets import get_preset
+
         style_preset = get_preset(preset_key)
 
     _header(f"Analyzing: {name} ({provider})")
@@ -659,8 +661,6 @@ def cmd_analyze(args, cfg: Config):
         from .preprocess import create_proxy, extract_frames, detect_scenes, get_video_info
 
         video_info = get_video_info(source)
-        cache = pp.cache_status()
-
         if provider == "gemini":
             from .gemini_analyze import run_gemini_analysis
 
@@ -704,7 +704,7 @@ def cmd_monologue(args, cfg: Config):
         print(
             f"{RED}Error:{RESET} No style preset configured for this project.\n"
             f"  Create with: {BOLD}vx new {name} <source> --preset silent_vlog{RESET}\n"
-            f"  Or add to project.json: {DIM}\"style_preset\": \"silent_vlog\"{RESET}"
+            f'  Or add to project.json: {DIM}"style_preset": "silent_vlog"{RESET}'
         )
         sys.exit(1)
 
@@ -1137,10 +1137,10 @@ def main():
         choices=["conversational_confidant", "detached_observer", "stream_of_consciousness"],
         help="Hint the narrative persona",
     )
+    p_monologue.add_argument("--force", action="store_true", help="Re-generate even if cached")
     p_monologue.add_argument(
-        "--force", action="store_true", help="Re-generate even if cached"
+        "--provider", choices=["gemini", "claude"], help="Override AI provider"
     )
-    p_monologue.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
 
     # --- brief ---
     p_brief = sub.add_parser(

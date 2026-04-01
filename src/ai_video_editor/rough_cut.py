@@ -10,7 +10,6 @@ from .config import EditorialProjectPaths, OutputFormat
 from .models import EditorialStoryboard
 from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
 from .render import render_html_preview
-from .storyboard_format import format_duration
 from .versioning import next_version, versioned_dir, update_latest_symlink
 
 log = logging.getLogger(__name__)

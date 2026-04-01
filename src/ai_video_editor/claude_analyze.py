@@ -54,20 +54,22 @@ def analyze_frame_batch(
     time_start = batch_frames[0]["timestamp_fmt"]
     time_end = batch_frames[-1]["timestamp_fmt"]
 
-    content.append({
-        "type": "text",
-        "text": (
-            f"These are {len(batch_frames)} frames from a {format_duration(video_info['duration_sec'])} video, "
-            f"covering {time_start} to {time_end} (batch {batch_index + 1}/{total_batches}).\n\n"
-            "For this segment, describe each distinct shot/scene you observe:\n"
-            "- Timestamp range\n"
-            "- Shot type (wide/medium/close-up/etc.)\n"
-            "- Visual description (setting, subjects, action)\n"
-            "- Camera movement\n"
-            "- Notable audio cues (if apparent from visual context)\n\n"
-            "Group consecutive similar frames into single shots. Be specific about what changes between shots."
-        ),
-    })
+    content.append(
+        {
+            "type": "text",
+            "text": (
+                f"These are {len(batch_frames)} frames from a {format_duration(video_info['duration_sec'])} video, "
+                f"covering {time_start} to {time_end} (batch {batch_index + 1}/{total_batches}).\n\n"
+                "For this segment, describe each distinct shot/scene you observe:\n"
+                "- Timestamp range\n"
+                "- Shot type (wide/medium/close-up/etc.)\n"
+                "- Visual description (setting, subjects, action)\n"
+                "- Camera movement\n"
+                "- Notable audio cues (if apparent from visual context)\n\n"
+                "Group consecutive similar frames into single shots. Be specific about what changes between shots."
+            ),
+        }
+    )
 
     response = client.messages.create(
         model=cfg.model,
@@ -141,15 +143,11 @@ def run_claude_analysis(
     batch_analyses = []
     for i, batch in enumerate(batches):
         print(f"  Batch {i + 1}/{len(batches)} ({len(batch)} frames)...")
-        analysis = analyze_frame_batch(
-            client, frames_dir, batch, video_info, i, len(batches), cfg
-        )
+        analysis = analyze_frame_batch(client, frames_dir, batch, video_info, i, len(batches), cfg)
         batch_analyses.append(analysis)
 
     print("  Synthesizing final storyboard...")
-    storyboard_md = synthesize_storyboard(
-        client, batch_analyses, video_info, scenes, cfg
-    )
+    storyboard_md = synthesize_storyboard(client, batch_analyses, video_info, scenes, cfg)
 
     storyboard_dir.mkdir(parents=True, exist_ok=True)
     output_path = storyboard_dir / "storyboard_claude.md"

@@ -55,10 +55,12 @@ def analyze_video(
     response = client.models.generate_content(
         model=cfg.model,
         contents=[
-            types.Content(parts=[
-                types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
-                types.Part.from_text(text=prompt),
-            ])
+            types.Content(
+                parts=[
+                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                    types.Part.from_text(text=prompt),
+                ]
+            )
         ],
         config=types.GenerateContentConfig(
             temperature=cfg.temperature,
