@@ -128,11 +128,13 @@ def transcribe_clip_gemini(
     cfg: TranscribeConfig,
     speaker_context: str | None = None,
     tracer=None,
+    editorial_paths=None,
 ) -> dict | None:
     """Transcribe a clip via Gemini structured output from its proxy video.
 
     Uses the same File API upload pattern as Phase 1 clip review.
     Results are cached to clip_paths.audio / "transcript.json".
+    If editorial_paths is provided, reuses/populates the shared Gemini File API cache.
     """
     transcript_path = clip_paths.audio / "transcript.json"
     if transcript_path.exists():
@@ -149,15 +151,27 @@ def transcribe_clip_gemini(
 
     client = genai.Client(api_key=api_key)
 
-    # Upload proxy video (retains audio at AAC 64k + visual context)
-    video_file = client.files.upload(file=str(proxy_path))
+    # Check file cache before uploading (may already be cached by briefing)
+    clip_id = proxy_path.stem.replace("_proxy", "")
+    cached_uri = None
+    if editorial_paths:
+        from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
 
-    while video_file.state.name == "PROCESSING":
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
+        file_cache = load_file_api_cache(editorial_paths)
+        cached_uri = get_cached_uri(file_cache, clip_id)
 
-    if video_file.state.name == "FAILED":
-        return None
+    if cached_uri:
+        file_uri = cached_uri
+    else:
+        video_file = client.files.upload(file=str(proxy_path))
+        while video_file.state.name == "PROCESSING":
+            time.sleep(3)
+            video_file = client.files.get(name=video_file.name)
+        if video_file.state.name == "FAILED":
+            return None
+        file_uri = video_file.uri
+        if editorial_paths:
+            cache_file_uri(editorial_paths, clip_id, file_uri)
 
     prompt = _build_gemini_prompt(speaker_context)
 
@@ -169,7 +183,7 @@ def transcribe_clip_gemini(
         contents=[
             types.Content(
                 parts=[
-                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                    types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
                     types.Part.from_text(text=prompt),
                 ]
             )

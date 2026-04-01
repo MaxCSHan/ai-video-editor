@@ -37,6 +37,11 @@ from .preprocess import (
     ingest_source,
 )
 from .storyboard_format import format_duration
+from .file_cache import (
+    load_file_api_cache,
+    cache_file_uri,
+    get_cached_uri,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +232,12 @@ def _transcribe_single_clip(
 
         print(f"  {label}: transcribing (gemini)...")
         transcript = transcribe_clip_gemini(
-            proxy_files[0], clip_paths, cfg, speaker_context=speaker_context, tracer=tracer
+            proxy_files[0],
+            clip_paths,
+            cfg,
+            speaker_context=speaker_context,
+            tracer=tracer,
+            editorial_paths=editorial_paths,
         )
     else:
         from .transcribe import transcribe_clip
@@ -289,45 +299,6 @@ def transcribe_all_clips(
                 print(f"  ERROR transcribing {clip_id}: {e}")
 
     return results
-
-
-# ---------------------------------------------------------------------------
-# Gemini File API URI cache (for reuse between Phase 1 and Phase 2)
-# ---------------------------------------------------------------------------
-
-FILE_API_CACHE_MAX_AGE_SEC = 90 * 60  # 90 minutes (Gemini keeps files for 2 hours)
-
-
-def _load_file_api_cache(editorial_paths: EditorialProjectPaths) -> dict:
-    """Load cached Gemini File API URIs."""
-    cache_path = editorial_paths.root / "file_api_cache.json"
-    if cache_path.exists():
-        return json.loads(cache_path.read_text())
-    return {}
-
-
-def _save_file_api_cache(editorial_paths: EditorialProjectPaths, cache: dict):
-    """Save Gemini File API URI cache."""
-    cache_path = editorial_paths.root / "file_api_cache.json"
-    cache_path.write_text(json.dumps(cache, indent=2))
-
-
-def _cache_file_uri(editorial_paths: EditorialProjectPaths, clip_id: str, uri: str):
-    """Cache a single file URI after upload."""
-    cache = _load_file_api_cache(editorial_paths)
-    cache[clip_id] = {"uri": uri, "cached_at": time.time()}
-    _save_file_api_cache(editorial_paths, cache)
-
-
-def _get_cached_uri(cache: dict, clip_id: str) -> str | None:
-    """Get a cached URI if still fresh (< 90 min old)."""
-    entry = cache.get(clip_id)
-    if not entry:
-        return None
-    age = time.time() - entry.get("cached_at", 0)
-    if age > FILE_API_CACHE_MAX_AGE_SEC:
-        return None
-    return entry.get("uri")
 
 
 def _load_transcript_for_prompt(clip_paths) -> str | None:
@@ -397,20 +368,28 @@ def _review_single_clip_gemini(
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-    print(f"  {label}: uploading proxy...")
-    proxy_path = Path(clip_info["proxy_path"])
-    video_file = client.files.upload(file=str(proxy_path))
+    # Check file cache before uploading (may already be cached by briefing or transcription)
+    file_cache = load_file_api_cache(editorial_paths)
+    cached_uri = get_cached_uri(file_cache, clip_id)
 
-    while video_file.state.name == "PROCESSING":
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
+    if cached_uri:
+        file_uri = cached_uri
+        print(f"  {label}: using cached proxy URI")
+    else:
+        print(f"  {label}: uploading proxy...")
+        proxy_path = Path(clip_info["proxy_path"])
+        video_file = client.files.upload(file=str(proxy_path))
 
-    if video_file.state.name == "FAILED":
-        print(f"  {label}: WARNING — Gemini processing failed, skipping")
-        return None
+        while video_file.state.name == "PROCESSING":
+            time.sleep(3)
+            video_file = client.files.get(name=video_file.name)
 
-    # Cache the File API URI for potential reuse in Phase 2
-    _cache_file_uri(editorial_paths, clip_id, video_file.uri)
+        if video_file.state.name == "FAILED":
+            print(f"  {label}: WARNING — Gemini processing failed, skipping")
+            return None
+
+        file_uri = video_file.uri
+        cache_file_uri(editorial_paths, clip_id, file_uri)
 
     # Load transcript if available
     transcript_text = _load_transcript_for_prompt(clip_paths)
@@ -433,7 +412,7 @@ def _review_single_clip_gemini(
         contents=[
             types.Content(
                 parts=[
-                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                    types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
                     types.Part.from_text(text=prompt),
                 ]
             )
@@ -644,7 +623,7 @@ def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> 
 
     Returns list of types.Part objects referencing the uploaded videos.
     """
-    cache = _load_file_api_cache(editorial_paths)
+    cache = load_file_api_cache(editorial_paths)
     parts = []
     seen_clips = set()
 
@@ -655,7 +634,7 @@ def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> 
         seen_clips.add(clip_id)
 
         # Try cached URI first
-        cached_uri = _get_cached_uri(cache, clip_id)
+        cached_uri = get_cached_uri(cache, clip_id)
         if cached_uri:
             parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
             continue
@@ -677,7 +656,7 @@ def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> 
             print(f"    WARNING: upload failed for {clip_id}, skipping")
             continue
 
-        _cache_file_uri(editorial_paths, clip_id, video_file.uri)
+        cache_file_uri(editorial_paths, clip_id, video_file.uri)
         parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
 
     print(f"    {len(parts)} proxy videos attached to Phase 2")
@@ -946,9 +925,7 @@ def run_monologue(
     return json_path
 
 
-def _find_latest_storyboard(
-    editorial_paths: EditorialProjectPaths, provider: str
-) -> Path | None:
+def _find_latest_storyboard(editorial_paths: EditorialProjectPaths, provider: str) -> Path | None:
     """Find the latest storyboard JSON for the given provider."""
     latest = editorial_paths.storyboard / f"editorial_{provider}_latest.json"
     if latest.exists():
@@ -1033,8 +1010,10 @@ def _retry_failed_phase1(
             break
         try:
             import questionary
+
             retry = questionary.confirm(
-                "Retry failed clips?", default=True,
+                "Retry failed clips?",
+                default=True,
             ).ask()
         except (ImportError, EOFError):
             break
@@ -1044,13 +1023,20 @@ def _retry_failed_phase1(
         print(f"\n  Retrying {len(failed)} clip(s)...\n")
         if provider == "gemini":
             reviews, failed = run_phase1_gemini(
-                editorial_paths, manifest, cfg.gemini, tracer=tracer,
-                style_supplement=style_supplement, only_clip_ids=failed,
+                editorial_paths,
+                manifest,
+                cfg.gemini,
+                tracer=tracer,
+                style_supplement=style_supplement,
+                only_clip_ids=failed,
             )
         else:
             reviews, failed = run_phase1_claude(
-                editorial_paths, manifest, cfg.claude,
-                style_supplement=style_supplement, only_clip_ids=failed,
+                editorial_paths,
+                manifest,
+                cfg.claude,
+                style_supplement=style_supplement,
+                only_clip_ids=failed,
             )
     return reviews, failed
 
@@ -1104,6 +1090,22 @@ def run_editorial_pipeline(
     total_dur = format_duration(manifest["total_duration_sec"])
     print(f"  Total raw footage: {total_dur}")
 
+    use_smart_briefing = interactive and bool(os.environ.get("GEMINI_API_KEY"))
+
+    # Smart briefing BEFORE transcription (Gemini path) — uploads proxies and
+    # populates the shared File API cache, plus gathers user context (speaker names,
+    # highlights) that improves transcription and Phase 1 quality.
+    user_context = None
+    if use_smart_briefing:
+        from .briefing import run_smart_briefing
+
+        user_context = run_smart_briefing(
+            editorial_paths,
+            style,
+            gemini_model=cfg.transcribe.gemini_model,
+            tracer=tracer,
+        )
+
     # Transcription (optional — mlx-whisper local or Gemini cloud)
     t_provider = _resolve_transcribe_provider(cfg.transcribe)
     if t_provider:
@@ -1132,38 +1134,42 @@ def run_editorial_pipeline(
     print(f"[3/{total_phases}] Phase 1: Reviewing clips with {provider}...")
     if provider == "gemini":
         reviews, failed = run_phase1_gemini(
-            editorial_paths, manifest, cfg.gemini, force=force, tracer=tracer,
+            editorial_paths,
+            manifest,
+            cfg.gemini,
+            force=force,
+            tracer=tracer,
             style_supplement=p1_supplement,
         )
     elif provider == "claude":
         reviews, failed = run_phase1_claude(
-            editorial_paths, manifest, cfg.claude, force=force,
+            editorial_paths,
+            manifest,
+            cfg.claude,
+            force=force,
             style_supplement=p1_supplement,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
     reviews, failed = _retry_failed_phase1(
-        failed, reviews, editorial_paths, manifest, provider, cfg,
-        tracer=tracer, style_supplement=p1_supplement, interactive=interactive,
+        failed,
+        reviews,
+        editorial_paths,
+        manifest,
+        provider,
+        cfg,
+        tracer=tracer,
+        style_supplement=p1_supplement,
+        interactive=interactive,
     )
     print(f"  Reviewed {len(reviews)} clips")
 
-    # Briefing — optional interactive user context (smart briefing if Gemini available)
-    user_context = None
-    if interactive:
-        if os.environ.get("GEMINI_API_KEY"):
-            from .briefing import run_smart_briefing
+    # Manual briefing AFTER Phase 1 (non-Gemini path) — needs Phase 1 reviews
+    # to generate smart questions about detected people and highlights.
+    if interactive and not use_smart_briefing:
+        from .briefing import run_briefing
 
-            user_context = run_smart_briefing(
-                editorial_paths,
-                style,
-                gemini_model=cfg.transcribe.gemini_model,
-                tracer=tracer,
-            )
-        else:
-            from .briefing import run_briefing
-
-            user_context = run_briefing(reviews, style, editorial_paths.root)
+        user_context = run_briefing(reviews, style, editorial_paths.root)
 
     # Phase 2 — editorial assembly
     print(f"[4/{total_phases}] Phase 2: Generating editorial storyboard...")

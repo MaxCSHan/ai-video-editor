@@ -198,14 +198,6 @@ def _new_project_flow(cfg):
     if len(clip_metadata) != manifest["clip_count"]:
         manifest = build_master_manifest(clip_metadata, ep, name)
 
-    # Transcription
-    _run_transcription(ep, clip_metadata, cfg)
-
-    # Phase 1
-    if not questionary.confirm("Run Phase 1 clip reviews?", default=True, style=VX_STYLE).ask():
-        print("\n  Skipped. Run 'vx analyze' later.\n")
-        return
-
     from .tracing import ProjectTracer
 
     tracer = ProjectTracer(ep.root)
@@ -213,6 +205,27 @@ def _new_project_flow(cfg):
     # Resolve style supplements from preset
     p1_supplement = style_preset.phase1_supplement if style_preset else None
     p2_supplement = style_preset.phase2_supplement if style_preset else None
+
+    use_smart_briefing = bool(os.environ.get("GEMINI_API_KEY"))
+
+    # Smart briefing BEFORE transcription (Gemini path) — uploads proxies and
+    # populates the shared File API cache, plus gathers user context (speaker names,
+    # highlights) that improves transcription and Phase 1 quality.
+    user_context = None
+    if use_smart_briefing:
+        from .briefing import run_smart_briefing
+
+        user_context = run_smart_briefing(
+            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
+        )
+
+    # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
+    _run_transcription(ep, clip_metadata, cfg)
+
+    # Phase 1
+    if not questionary.confirm("Run Phase 1 clip reviews?", default=True, style=VX_STYLE).ask():
+        print("\n  Skipped. Run 'vx analyze' later.\n")
+        return
 
     print(f"\n  Phase 1: Reviewing clips with {provider}...\n")
     if provider == "gemini":
@@ -242,14 +255,9 @@ def _new_project_flow(cfg):
     )
     print(f"\n  Reviewed {len(reviews)} clips")
 
-    # Briefing — smart (AI-guided) if Gemini available, else manual
-    if os.environ.get("GEMINI_API_KEY"):
-        from .briefing import run_smart_briefing
-
-        user_context = run_smart_briefing(
-            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
-        )
-    else:
+    # Manual briefing AFTER Phase 1 (non-Gemini path) — needs Phase 1 reviews
+    # to generate smart questions about detected people and highlights.
+    if not use_smart_briefing:
         from .briefing import run_briefing
 
         user_context = run_briefing(reviews, style, ep.root)

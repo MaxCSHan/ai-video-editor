@@ -248,9 +248,12 @@ def run_quick_scan(
     if scan_path.exists():
         return json.loads(scan_path.read_text())
 
+    from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
+
     client = genai.Client(api_key=api_key)
 
-    # Upload all proxies
+    # Upload all proxies (reuse cached URIs, cache new uploads for downstream stages)
+    file_cache = load_file_api_cache(editorial_paths)
     print(f"  Uploading {len(clip_ids)} proxy videos for quick scan...")
     video_parts = []
     for cid in clip_ids:
@@ -259,12 +262,18 @@ def run_quick_scan(
         if not proxy_files:
             continue
 
+        cached_uri = get_cached_uri(file_cache, cid)
+        if cached_uri:
+            video_parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
+            continue
+
         video_file = client.files.upload(file=str(proxy_files[0]))
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = client.files.get(name=video_file.name)
         if video_file.state.name == "FAILED":
             continue
+        cache_file_uri(editorial_paths, cid, video_file.uri)
         video_parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
 
     if not video_parts:
