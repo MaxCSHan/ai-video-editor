@@ -507,6 +507,29 @@ def _escape_drawtext(text: str) -> str:
     return text
 
 
+def _contains_cjk(text: str) -> bool:
+    """Return True if text contains any CJK ideograph, kana, or hangul character."""
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x4E00 <= cp <= 0x9FFF  # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF  # CJK Extension A
+            or 0x20000 <= cp <= 0x2A6DF  # CJK Extension B
+            or 0xF900 <= cp <= 0xFAFF  # CJK Compatibility Ideographs
+            or 0x3000 <= cp <= 0x303F  # CJK Symbols and Punctuation
+            or 0x3040 <= cp <= 0x309F  # Hiragana
+            or 0x30A0 <= cp <= 0x30FF  # Katakana
+            or 0xAC00 <= cp <= 0xD7AF  # Hangul Syllables
+        ):
+            return True
+    return False
+
+
+def _intervals_overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
+    """Return True if two time intervals overlap."""
+    return a_start < b_end and b_start < a_end
+
+
 def _resolve_font_path(font_name: str) -> str:
     """Resolve a logical font name to an actual file path using fc-match.
 
@@ -545,6 +568,29 @@ def _resolve_font_path(font_name: str) -> str:
     return font_name  # last resort: pass as-is
 
 
+def _resolve_macos_latin_font(style: str = "sans-serif") -> str:
+    """Find a Latin-optimized font on macOS.
+
+    Avenir Next is a clean geometric sans-serif ideal for English text.
+    Falls back to CJK font if nothing found (CJK fonts render Latin fine).
+    """
+    if style in ("serif", "handwritten"):
+        candidates = [
+            "/System/Library/Fonts/Supplemental/Didot.ttc",
+            "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        ]
+    else:
+        candidates = [
+            "/System/Library/Fonts/Avenir Next.ttc",
+            "/System/Library/Fonts/Supplemental/Avenir Next.ttc",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return _resolve_macos_cjk_font(style)
+
+
 def _resolve_macos_cjk_font(style: str = "sans-serif") -> str:
     """Find a CJK-capable font on macOS.
 
@@ -581,16 +627,24 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
     """
     import platform
 
-    # Font resolution — must use CJK-capable fonts for Chinese/Japanese/Korean text
+    # Font resolution — CJK-capable fonts for Chinese/Japanese/Korean, Latin fonts otherwise
     if platform.system() == "Darwin":
-        font_map = {
+        cjk_font_map = {
             "sans-serif": _resolve_macos_cjk_font(),
             "handwritten": _resolve_macos_cjk_font(style="serif"),
         }
+        latin_font_map = {
+            "sans-serif": _resolve_macos_latin_font(),
+            "handwritten": _resolve_macos_latin_font(style="handwritten"),
+        }
     else:
-        font_map = {
+        cjk_font_map = {
             "sans-serif": _resolve_font_path("sans-serif:lang=zh"),
             "handwritten": _resolve_font_path("serif:lang=zh"),
+        }
+        latin_font_map = {
+            "sans-serif": _resolve_font_path("sans-serif"),
+            "handwritten": _resolve_font_path("serif"),
         }
 
     # Size mapping — sized to match typical silent vlog text (large, readable)
@@ -603,7 +657,8 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
 
     filters = []
     for ov in overlays:
-        font_file = font_map.get(ov.style.font, font_map["sans-serif"])
+        fmap = cjk_font_map if _contains_cjk(ov.text) else latin_font_map
+        font_file = fmap.get(ov.style.font, fmap["sans-serif"])
         font_size = size_map.get(ov.style.size, size_map["medium"])
 
         # Position — lower_third sits at ~88% from top (above playback controls)
@@ -651,21 +706,29 @@ def _build_caption_drawtext(
     clip_in_sec: float,
     clip_out_sec: float,
     output_format: OutputFormat | None = None,
+    monologue_intervals: list[tuple[float, float]] | None = None,
 ) -> list[str]:
     """Build ffmpeg drawtext filters for speech captions from transcript segments.
 
     Only renders speech segments (no speaker labels). Timestamps are converted
     from clip-absolute to segment-relative.
+
+    When a caption overlaps temporally with a monologue overlay, it is rendered
+    in a subordinate style (smaller, top-positioned, slightly transparent) so the
+    monologue takes visual priority while the caption remains readable.
     """
     import platform
 
     if platform.system() == "Darwin":
-        font_file = _resolve_macos_cjk_font()
+        cjk_font = _resolve_macos_cjk_font()
+        latin_font = _resolve_macos_latin_font()
     else:
-        font_file = _resolve_font_path("sans-serif:lang=zh")
+        cjk_font = _resolve_font_path("sans-serif:lang=zh")
+        latin_font = _resolve_font_path("sans-serif")
 
     base_h = output_format.height if output_format else 1080
-    font_size = max(28, int(base_h * 0.038))
+    normal_font_size = max(28, int(base_h * 0.038))
+    subordinate_font_size = max(22, int(base_h * 0.030))
 
     filters = []
     for ts in transcript_segments:
@@ -691,18 +754,42 @@ def _build_caption_drawtext(
         if local_end - local_start < 0.2:
             continue
 
+        # Check for temporal collision with monologue overlays
+        is_colliding = False
+        if monologue_intervals:
+            for m_start, m_end in monologue_intervals:
+                if _intervals_overlap(local_start, local_end, m_start, m_end):
+                    is_colliding = True
+                    break
+
+        # Select font based on text content
+        font_file = cjk_font if _contains_cjk(text) else latin_font
+
         # Lowercase to match monologue style
         escaped = _escape_drawtext(text.lower())
 
-        f = (
-            f"drawtext=text='{escaped}'"
-            f":fontfile='{font_file}'"
-            f":fontsize={font_size}"
-            f":fontcolor=white"
-            f":shadowcolor=black@0.6:shadowx=3:shadowy=3"
-            f":x=(w-tw)/2:y=h*0.88-th"
-            f":enable='between(t,{local_start:.2f},{local_end:.2f})'"
-        )
+        if is_colliding:
+            # Subordinate style: smaller, top-positioned, slightly transparent
+            f = (
+                f"drawtext=text='{escaped}'"
+                f":fontfile='{font_file}'"
+                f":fontsize={subordinate_font_size}"
+                f":fontcolor=white@0.85"
+                f":shadowcolor=black@0.5:shadowx=2:shadowy=2"
+                f":x=(w-tw)/2:y=h*0.08"
+                f":enable='between(t,{local_start:.2f},{local_end:.2f})'"
+            )
+        else:
+            # Normal style: standard lower-third caption
+            f = (
+                f"drawtext=text='{escaped}'"
+                f":fontfile='{font_file}'"
+                f":fontsize={normal_font_size}"
+                f":fontcolor=white"
+                f":shadowcolor=black@0.6:shadowx=3:shadowy=3"
+                f":x=(w-tw)/2:y=h*0.88-th"
+                f":enable='between(t,{local_start:.2f},{local_end:.2f})'"
+            )
         filters.append(f)
 
     return filters
@@ -727,11 +814,20 @@ def _extract_segment(
 
     # Collect all drawtext filters (monologue overlays + speech captions)
     extra_filters = []
+    monologue_intervals: list[tuple[float, float]] = []
     if overlays:
         extra_filters.extend(_build_overlay_drawtext(overlays, output_format))
+        for ov in overlays:
+            monologue_intervals.append((ov.appear_at, ov.appear_at + ov.duration_sec))
     if caption_segments:
         extra_filters.extend(
-            _build_caption_drawtext(caption_segments, in_sec, out_sec, output_format)
+            _build_caption_drawtext(
+                caption_segments,
+                in_sec,
+                out_sec,
+                output_format=output_format,
+                monologue_intervals=monologue_intervals or None,
+            )
         )
 
     if extra_filters:
