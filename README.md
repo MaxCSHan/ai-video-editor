@@ -41,31 +41,39 @@ Raw Clips                       You shot 17 clips on your trip.
      │                          H.265), and fit mode (pad/crop) when sources
      │                          are mixed.
      ▼
-┌──────────────┐                AI transcribes each clip's audio via
-│ Transcription│                Gemini (speaker ID, sound events) or
-└──────┬───────┘                mlx-whisper (local). Cached per clip.
-       │                        VTT + preview HTML for verification.
-       ▼
+┌──────────┐                    Optional creative direction. User picks a
+│  Style   │                    style preset (e.g., Silent Vlog) that adds
+│  Preset  │                    AI guidance to Phase 1/2 prompts and may
+└────┬─────┘                    enable Phase 3 (visual monologue).
+     │
+     ▼
 ┌──────────┐                    AI quick-scans all footage, then asks
 │ Briefing │  (AI-guided)       targeted questions based on what it saw:
 └────┬─────┘                    "Who is the person in the green shirt?"
-     │                          Saved as context for the AI editor.
-     │
+     │                          Saved as context for all downstream stages.
+     │                          Uploads proxies to Gemini File API (cached
+     │                          for reuse by transcription and Phase 1).
      ▼
+┌──────────────┐                AI transcribes each clip's audio via
+│ Transcription│                Gemini (speaker ID, sound events) or
+└──────┬───────┘                mlx-whisper (local). Uses speaker names
+       │                        from briefing for better ID. Cached per
+       │                        clip. VTT + preview HTML for verification.
+       ▼
 ┌─────────────┐                 The AI watches each clip's proxy video and
 │  Phase 1    │                 produces a structured review: what's in it,
 │ Clip Review │                 who appears, quality assessment, which parts
 └──────┬──────┘                 are usable vs throwaway, key moments.
+       │                        Uses briefing context (people names, intent).
        │                        One LLM call per clip. Cached per clip.
        ▼
 ┌─────────────┐                 The AI acts as creative editor. It sees ALL
 │  Phase 2    │                 clip reviews + transcripts + your briefing
-│  Editorial  │                 context. With --visual, it also sees all
-│  Assembly   │                 proxy videos. Produces a complete edit plan:
-└──────┬──────┘                 story arc, cast, EDL with precise in/out
-       │                        timestamps (in seconds), pacing, music cues.
-       │                        One LLM call. Structured output (Pydantic
-       │                        model enforced by the API).
+│  Editorial  │                 context. For ≤10 clips, can also see proxy
+│  Assembly   │                 videos (--visual). Produces a complete edit
+└──────┬──────┘                 plan: story arc, cast, EDL with precise
+       │                        in/out timestamps (seconds), pacing, music.
+       │                        One LLM call. Structured output (Pydantic).
        │
        ├──→ editorial.json       The structured data. Source of truth.
        ├──→ editorial.md         Human-readable rendered view.
@@ -73,6 +81,12 @@ Raw Clips                       You shot 17 clips on your trip.
                                  video, drag to adjust cut points,
                                  export refined JSON.
        │
+       ▼
+┌─────────────┐                 Optional (if style preset has Phase 3).
+│  Phase 3    │                 Generates text overlay/monologue plan from
+│  Monologue  │                 the storyboard + transcripts. Produces
+└──────┬──────┘                 timed text cards for silent-style vlogs.
+       │                        One LLM call. Preset-dependent.
        ▼
 ┌─────────┐                     Loads the JSON. Validates timestamps against
 │   Cut   │                     actual clip durations (clamps out-of-bounds).

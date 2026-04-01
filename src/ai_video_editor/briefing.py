@@ -403,18 +403,19 @@ def run_smart_briefing(
     if activity:
         answers["activity"] = activity
 
-    # AI-suggested questions
+    # AI-suggested questions — store full Q&A pairs so downstream prompts see the question
     if scan.get("suggested_questions"):
         print("\n  The AI has additional questions:")
+        qa_pairs = []
         for q in scan["suggested_questions"]:
             answer = questionary.text(
                 q,
                 style=VX_STYLE,
             ).ask()
             if answer:
-                # Store under a descriptive key
-                key = q[:40].lower().replace(" ", "_").replace("?", "").strip("_")
-                answers[f"context_{key}"] = answer
+                qa_pairs.append({"question": q, "answer": answer})
+        if qa_pairs:
+            answers["context_qa"] = qa_pairs
 
     # Tone
     tone = questionary.select(
@@ -463,7 +464,7 @@ def run_smart_briefing(
 
 
 def format_context_for_prompt(user_context: dict) -> str:
-    """Format user context into a text block for the Phase 2 prompt."""
+    """Format user context into a text block for LLM prompts (Phase 1, 2, 3)."""
     if not user_context:
         return ""
 
@@ -477,11 +478,20 @@ def format_context_for_prompt(user_context: dict) -> str:
         "duration": "Duration preference",
     }
     for key, value in user_context.items():
-        label = label_map.get(key, key)
-        lines.append(f"- **{label}**: {value}")
+        if key == "context_qa":
+            # New format: list of {"question": ..., "answer": ...} pairs
+            for qa in value:
+                lines.append(f"- **Q: {qa['question']}** → {qa['answer']}")
+        elif key.startswith("context_"):
+            # Legacy format: truncated key = answer. Include as-is for backward compat.
+            lines.append(f"- **Additional context**: {value}")
+        else:
+            label = label_map.get(key, key)
+            lines.append(f"- **{label}**: {value}")
 
     lines.append("")
     lines.append(
-        "Use this context to make better editorial decisions. Prioritize the filmmaker's stated preferences."
+        "Use this context to make better editorial decisions. "
+        "Prioritize the filmmaker's stated preferences."
     )
     return "\n".join(lines)
