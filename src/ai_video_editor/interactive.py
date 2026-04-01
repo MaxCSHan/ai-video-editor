@@ -235,6 +235,7 @@ def _new_project_flow(cfg):
             cfg.gemini,
             tracer=tracer,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     else:
         reviews, failed = run_phase1_claude(
@@ -242,6 +243,7 @@ def _new_project_flow(cfg):
             manifest,
             cfg.claude,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     reviews, failed = _retry_failed_phase1(
         failed,
@@ -252,6 +254,7 @@ def _new_project_flow(cfg):
         cfg,
         tracer=tracer,
         style_supplement=p1_supplement,
+        user_context=user_context,
     )
     print(f"\n  Reviewed {len(reviews)} clips")
 
@@ -272,11 +275,7 @@ def _new_project_flow(cfg):
     # Ask about visual mode
     visual = False
     if provider == "gemini":
-        visual = questionary.confirm(
-            "Upload proxy videos for visual Phase 2? (better quality, slightly higher cost)",
-            default=False,
-            style=VX_STYLE,
-        ).ask()
+        visual = _ask_visual_phase2(ep, reviews)
 
     print(f"\n  Phase 2: Generating storyboard...\n")
     output = run_phase2(
@@ -654,8 +653,32 @@ def _run_analyze(name, meta, cfg):
     if len(clip_metadata) != manifest["clip_count"]:
         manifest = build_master_manifest(clip_metadata, ep, name)
 
-    # Transcription
+    use_smart_briefing = bool(os.environ.get("GEMINI_API_KEY"))
+
+    # Smart briefing BEFORE transcription (Gemini path)
+    user_context = None
+    if use_smart_briefing:
+        from .briefing import run_smart_briefing
+
+        user_context = run_smart_briefing(
+            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
+        )
+
+    # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
     _run_transcription(ep, clip_metadata, cfg)
+
+    # Check if cached Phase 1 reviews exist — offer to force re-run
+    force_phase1 = False
+    review_suffix = f"review_{provider}_latest.json"
+    has_cached = any(
+        (ep.clip_paths(c["clip_id"]).review / review_suffix).exists() for c in manifest["clips"]
+    )
+    if has_cached:
+        force_phase1 = questionary.confirm(
+            "Cached Phase 1 reviews found. Re-run from scratch?",
+            default=False,
+            style=VX_STYLE,
+        ).ask()
 
     print(f"\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
@@ -663,15 +686,19 @@ def _run_analyze(name, meta, cfg):
             ep,
             manifest,
             cfg.gemini,
+            force=force_phase1,
             tracer=tracer,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     else:
         reviews, failed = run_phase1_claude(
             ep,
             manifest,
             cfg.claude,
+            force=force_phase1,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     reviews, failed = _retry_failed_phase1(
         failed,
@@ -682,16 +709,11 @@ def _run_analyze(name, meta, cfg):
         cfg,
         tracer=tracer,
         style_supplement=p1_supplement,
+        user_context=user_context,
     )
 
-    # Briefing — smart if Gemini available
-    if os.environ.get("GEMINI_API_KEY"):
-        from .briefing import run_smart_briefing
-
-        user_context = run_smart_briefing(
-            ep, style, gemini_model=cfg.transcribe.gemini_model, tracer=tracer
-        )
-    else:
+    # Manual briefing AFTER Phase 1 (non-Gemini path)
+    if not use_smart_briefing:
         from .briefing import run_briefing
 
         user_context = run_briefing(reviews, style, ep.root)
@@ -699,11 +721,7 @@ def _run_analyze(name, meta, cfg):
     # Ask about visual mode
     visual = False
     if provider == "gemini":
-        visual = questionary.confirm(
-            "Upload proxy videos for visual Phase 2?",
-            default=False,
-            style=VX_STYLE,
-        ).ask()
+        visual = _ask_visual_phase2(ep, reviews)
 
     print(f"\n  Phase 2: Generating storyboard...\n")
     run_phase2(
@@ -916,6 +934,43 @@ def _run_format_selection(clip_metadata, meta, ep):
     )
 
     return clip_metadata, output_format
+
+
+def _ask_visual_phase2(ep, reviews):
+    """Show cache status and ask about visual Phase 2. Returns bool.
+
+    Visual mode is only available when clip count <= 10 (Gemini limit: 10 videos
+    per prompt). For larger projects, attaching a subset would bias the edit toward
+    those clips, so we skip visual mode entirely and rely on text reviews.
+    """
+    from .file_cache import load_file_api_cache, get_cached_uri
+    from .editorial_agent import MAX_VISUAL_VIDEOS
+
+    unique_ids = list(dict.fromkeys(r.get("clip_id", "") for r in reviews))
+    total = len(unique_ids)
+
+    if total > MAX_VISUAL_VIDEOS:
+        print(
+            f"\n  Skipping visual Phase 2: {total} clips exceeds Gemini limit "
+            f"of {MAX_VISUAL_VIDEOS} videos per request."
+        )
+        print("  Phase 2 will use text reviews + transcripts (no video attachment).")
+        return False
+
+    cache = load_file_api_cache(ep)
+    cached_count = sum(1 for cid in unique_ids if get_cached_uri(cache, cid))
+
+    print(f"\n  Visual Phase 2: {total} clips")
+    if cached_count == total:
+        print(f"  All {cached_count} proxy URIs cached (no upload needed)")
+    elif cached_count > 0:
+        print(f"  {cached_count} cached, {total - cached_count} need upload")
+
+    return questionary.confirm(
+        "Include proxy videos in Phase 2? (AI sees footage, better edits)",
+        default=False,
+        style=VX_STYLE,
+    ).ask()
 
 
 def _run_transcription(ep, clip_metadata, cfg):

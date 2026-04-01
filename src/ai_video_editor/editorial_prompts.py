@@ -91,6 +91,7 @@ def build_clip_review_prompt(
     resolution: str,
     transcript_text: str | None = None,
     style_supplement: str | None = None,
+    user_context: dict | None = None,
 ) -> str:
     prompt = CLIP_REVIEW_PROMPT.format(
         clip_id=clip_id,
@@ -107,6 +108,15 @@ def build_clip_review_prompt(
             "Use this transcript to fill in the audio section accurately. "
             "The speech_summary should reflect actual dialogue. "
             "Match speech timestamps to key_moments and usable_segments."
+        )
+    if user_context:
+        from .briefing import format_context_for_prompt
+
+        prompt += (
+            "\n\n"
+            + format_context_for_prompt(user_context)
+            + "\nUse people names in labels and descriptions when you can identify them. "
+            "Flag moments the filmmaker marked as highlights."
         )
     if style_supplement:
         prompt += "\n\n" + style_supplement
@@ -156,7 +166,7 @@ def build_editorial_assembly_prompt(
     clip_count: int,
     total_duration_sec: float,
     transcripts: dict[str, str] | None = None,
-    visual: bool = False,
+    visual_clip_ids: list[str] | None = None,
     style_supplement: str | None = None,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
@@ -171,15 +181,17 @@ def build_editorial_assembly_prompt(
         example_clip_id=example_clip_id,
         style=style,
     )
-    if visual:
+    if visual_clip_ids:
+        id_list = ", ".join(visual_clip_ids)
         prompt += (
-            "\n\nIMPORTANT: The actual proxy videos for all clips are attached. "
+            f"\n\nProxy videos are attached for these {len(visual_clip_ids)} clips: {id_list}. "
             "Use them to make visual judgments:\n"
             "- Assess energy, pacing, and composition directly from the footage\n"
             "- Verify which moments have the strongest visual impact\n"
             "- Match people across clips by their actual appearance\n"
             "- Judge transitions based on visual continuity between clips\n"
             "- Identify the best b-roll and establishing shots visually\n"
+            "For clips without video attached, rely on the text reviews and transcripts."
         )
     if transcripts:
         sections = []

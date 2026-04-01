@@ -349,6 +349,7 @@ def _review_single_clip_gemini(
     total: int,
     tracer=None,
     style_supplement: str | None = None,
+    user_context: dict | None = None,
 ) -> dict | None:
     """Review a single clip via Gemini. Returns review dict or None on failure."""
     from google import genai
@@ -401,6 +402,7 @@ def _review_single_clip_gemini(
         resolution=clip_info["resolution"],
         transcript_text=transcript_text,
         style_supplement=style_supplement,
+        user_context=user_context,
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
@@ -443,6 +445,7 @@ def run_phase1_gemini(
     tracer=None,
     style_supplement: str | None = None,
     only_clip_ids: list[str] | None = None,
+    user_context: dict | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Phase 1 via Gemini: review clips in parallel.
 
@@ -467,6 +470,7 @@ def run_phase1_gemini(
                 total,
                 tracer,
                 style_supplement,
+                user_context,
             )
             futures[fut] = clip_info["clip_id"]
 
@@ -509,6 +513,7 @@ def run_phase1_claude(
     force: bool = False,
     style_supplement: str | None = None,
     only_clip_ids: list[str] | None = None,
+    user_context: dict | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Phase 1 via Claude: send each clip's frames, get structured JSON review.
 
@@ -588,6 +593,7 @@ def run_phase1_claude(
                 resolution=clip_info["resolution"],
                 transcript_text=transcript_text,
                 style_supplement=style_supplement,
+                user_context=user_context,
             )
             content.append({"type": "text", "text": prompt})
 
@@ -618,13 +624,20 @@ def run_phase1_claude(
 # ---------------------------------------------------------------------------
 
 
-def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> list:
+MAX_VISUAL_VIDEOS = 10  # Gemini hard limit: max 10 videos per prompt
+
+
+def _upload_proxies_for_phase2(
+    client, clip_reviews, editorial_paths, types, max_videos=MAX_VISUAL_VIDEOS
+) -> tuple[list, list[str]]:
     """Upload or reuse cached proxy videos for visual Phase 2.
 
-    Returns list of types.Part objects referencing the uploaded videos.
+    Returns (parts, attached_clip_ids). Caps at max_videos (Gemini limit: 10).
+    Remaining clips still have text reviews in the prompt — only video is omitted.
     """
     cache = load_file_api_cache(editorial_paths)
     parts = []
+    attached_ids = []
     seen_clips = set()
 
     for review in clip_reviews:
@@ -633,10 +646,14 @@ def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> 
             continue
         seen_clips.add(clip_id)
 
+        if len(parts) >= max_videos:
+            continue  # count remaining clips but don't attach
+
         # Try cached URI first
         cached_uri = get_cached_uri(cache, clip_id)
         if cached_uri:
             parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
+            attached_ids.append(clip_id)
             continue
 
         # Upload proxy
@@ -658,9 +675,17 @@ def _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types) -> 
 
         cache_file_uri(editorial_paths, clip_id, video_file.uri)
         parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
+        attached_ids.append(clip_id)
 
-    print(f"    {len(parts)} proxy videos attached to Phase 2")
-    return parts
+    total_unique = len(seen_clips)
+    if total_unique > max_videos:
+        print(
+            f"    {len(parts)} of {total_unique} proxy videos attached "
+            f"(Gemini limit: {max_videos} per request)"
+        )
+    else:
+        print(f"    {len(parts)} proxy videos attached to Phase 2")
+    return parts, attached_ids
 
 
 def run_phase2(
@@ -691,6 +716,26 @@ def run_phase2(
     # Load transcripts for all clips
     transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
+    # Resolve visual clip IDs (upload/cache proxies) before building prompt.
+    # Visual mode only available for ≤10 clips (Gemini limit: 10 videos per prompt).
+    # For larger projects, attaching a subset would bias the edit toward those clips.
+    visual_clip_ids = None
+    video_parts = []
+    unique_clip_count = len({r.get("clip_id", "") for r in clip_reviews})
+    if visual and provider == "gemini" and unique_clip_count <= MAX_VISUAL_VIDEOS:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        video_parts, visual_clip_ids = _upload_proxies_for_phase2(
+            client, clip_reviews, editorial_paths, types
+        )
+    elif visual and unique_clip_count > MAX_VISUAL_VIDEOS:
+        print(
+            f"  Skipping visual mode: {unique_clip_count} clips exceeds "
+            f"Gemini limit of {MAX_VISUAL_VIDEOS} videos per request."
+        )
+
     prompt = build_editorial_assembly_prompt(
         project_name=project_name,
         clip_reviews=clip_reviews,
@@ -698,7 +743,7 @@ def run_phase2(
         clip_count=len(clip_reviews),
         total_duration_sec=total_duration,
         transcripts=transcripts,
-        visual=visual,
+        visual_clip_ids=visual_clip_ids,
         style_supplement=style_supplement,
     )
 
@@ -711,18 +756,18 @@ def run_phase2(
     print(f"  Generating editorial storyboard ({provider}, {mode_label})...")
 
     if provider == "gemini":
-        from google import genai
-        from google.genai import types
+        if not visual_clip_ids:
+            # Only import if not already done above for visual mode
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
         from .tracing import traced_gemini_generate
 
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
         # Build contents: text-only or multipart with proxy videos
-        num_videos = 0
-        if visual:
-            video_parts = _upload_proxies_for_phase2(client, clip_reviews, editorial_paths, types)
-            num_videos = len(video_parts)
+        num_videos = len(video_parts)
+        if visual_clip_ids:
             contents = [types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])]
         else:
             contents = prompt
@@ -1002,6 +1047,7 @@ def _retry_failed_phase1(
     tracer=None,
     style_supplement: str | None = None,
     interactive: bool = True,
+    user_context: dict | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Prompt user to retry failed Phase 1 clips. Returns updated (reviews, failed)."""
     while failed:
@@ -1029,6 +1075,7 @@ def _retry_failed_phase1(
                 tracer=tracer,
                 style_supplement=style_supplement,
                 only_clip_ids=failed,
+                user_context=user_context,
             )
         else:
             reviews, failed = run_phase1_claude(
@@ -1037,6 +1084,7 @@ def _retry_failed_phase1(
                 cfg.claude,
                 style_supplement=style_supplement,
                 only_clip_ids=failed,
+                user_context=user_context,
             )
     return reviews, failed
 
@@ -1140,6 +1188,7 @@ def run_editorial_pipeline(
             force=force,
             tracer=tracer,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     elif provider == "claude":
         reviews, failed = run_phase1_claude(
@@ -1148,6 +1197,7 @@ def run_editorial_pipeline(
             cfg.claude,
             force=force,
             style_supplement=p1_supplement,
+            user_context=user_context,
         )
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -1161,6 +1211,7 @@ def run_editorial_pipeline(
         tracer=tracer,
         style_supplement=p1_supplement,
         interactive=interactive,
+        user_context=user_context,
     )
     print(f"  Reviewed {len(reviews)} clips")
 
