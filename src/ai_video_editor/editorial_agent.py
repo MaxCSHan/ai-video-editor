@@ -377,6 +377,7 @@ def _review_single_clip_gemini(
     index: int,
     total: int,
     tracer=None,
+    style_supplement: str | None = None,
 ) -> dict | None:
     """Review a single clip via Gemini. Returns review dict or None on failure."""
     from google import genai
@@ -420,6 +421,7 @@ def _review_single_clip_gemini(
         duration_sec=clip_info["duration_sec"],
         resolution=clip_info["resolution"],
         transcript_text=transcript_text,
+        style_supplement=style_supplement,
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
@@ -460,38 +462,65 @@ def run_phase1_gemini(
     cfg: GeminiConfig,
     force: bool = False,
     tracer=None,
-) -> list[dict]:
-    """Phase 1 via Gemini: review clips in parallel."""
+    style_supplement: str | None = None,
+    only_clip_ids: list[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Phase 1 via Gemini: review clips in parallel.
+
+    Returns (reviews, failed_clip_ids). Reviews are in original clip order.
+    If only_clip_ids is set, only those clips are processed (others loaded from cache).
+    """
     clips = manifest["clips"]
     total = len(clips)
 
     futures = {}
     with ThreadPoolExecutor(max_workers=MAX_LLM_WORKERS) as pool:
         for i, clip_info in enumerate(clips):
+            if only_clip_ids and clip_info["clip_id"] not in only_clip_ids:
+                continue
             fut = pool.submit(
                 _review_single_clip_gemini,
                 clip_info,
                 editorial_paths,
                 cfg,
-                force,
+                force if not only_clip_ids else True,  # force retry for targeted clips
                 i + 1,
                 total,
                 tracer,
+                style_supplement,
             )
             futures[fut] = clip_info["clip_id"]
 
         results_by_id = {}
+        failed_ids = []
         for fut in as_completed(futures):
             clip_id = futures[fut]
             try:
                 result = fut.result()
                 if result:
                     results_by_id[clip_id] = result
+                else:
+                    failed_ids.append(clip_id)
             except Exception as e:
                 print(f"  ERROR reviewing {clip_id}: {e}")
+                failed_ids.append(clip_id)
+
+    # When retrying specific clips, load cached results for the rest
+    if only_clip_ids:
+        for clip_info in clips:
+            cid = clip_info["clip_id"]
+            if cid in results_by_id or cid in failed_ids:
+                continue
+            cp = editorial_paths.clip_paths(cid)
+            for name in ["review_gemini_latest.json", "review_gemini.json"]:
+                cached = cp.review / name
+                if cached.exists():
+                    results_by_id[cid] = json.loads(cached.read_text())
+                    break
 
     # Return in original clip order
-    return [results_by_id[c["clip_id"]] for c in clips if c["clip_id"] in results_by_id]
+    reviews = [results_by_id[c["clip_id"]] for c in clips if c["clip_id"] in results_by_id]
+    return reviews, failed_ids
 
 
 def run_phase1_claude(
@@ -499,8 +528,14 @@ def run_phase1_claude(
     manifest: dict,
     cfg: ClaudeConfig,
     force: bool = False,
-) -> list[dict]:
-    """Phase 1 via Claude: send each clip's frames, get structured JSON review."""
+    style_supplement: str | None = None,
+    only_clip_ids: list[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Phase 1 via Claude: send each clip's frames, get structured JSON review.
+
+    Returns (reviews, failed_clip_ids). Reviews are in original clip order.
+    If only_clip_ids is set, only those clips are processed (others loaded from cache).
+    """
     import base64
     import anthropic
 
@@ -510,71 +545,93 @@ def run_phase1_claude(
     client = anthropic.Anthropic(api_key=api_key)
 
     reviews = []
+    failed_ids = []
     for i, clip_info in enumerate(manifest["clips"]):
         clip_id = clip_info["clip_id"]
         clip_paths = editorial_paths.clip_paths(clip_id)
 
-        # Check cache
-        latest_review = clip_paths.review / "review_claude_latest.json"
-        legacy_review = clip_paths.review / "review_claude.json"
-        if not force and (latest_review.exists() or legacy_review.exists()):
-            cached = latest_review if latest_review.exists() else legacy_review
-            print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
-            reviews.append(json.loads(cached.read_text()))
+        # Skip clips not in retry set
+        if only_clip_ids and clip_id not in only_clip_ids:
+            # Load from cache
+            for name in ["review_claude_latest.json", "review_claude.json"]:
+                cached = clip_paths.review / name
+                if cached.exists():
+                    reviews.append(json.loads(cached.read_text()))
+                    break
             continue
 
-        print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: loading frames...")
-        frames_manifest_path = clip_paths.frames / "manifest.json"
-        if not frames_manifest_path.exists():
-            print(f"    WARNING: No frames for {clip_id}, skipping")
-            continue
-        frames_manifest = json.loads(frames_manifest_path.read_text())
+        # Check cache (skip when retrying specific clips)
+        if not only_clip_ids:
+            latest_review = clip_paths.review / "review_claude_latest.json"
+            legacy_review = clip_paths.review / "review_claude.json"
+            if not force and (latest_review.exists() or legacy_review.exists()):
+                cached = latest_review if latest_review.exists() else legacy_review
+                print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
+                reviews.append(json.loads(cached.read_text()))
+                continue
 
-        # Build image content — send all frames (or first batch if too many)
-        all_frames = frames_manifest["frames"]
-        frames_to_send = all_frames[: cfg.max_images_per_batch]
+        try:
+            print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: loading frames...")
+            frames_manifest_path = clip_paths.frames / "manifest.json"
+            if not frames_manifest_path.exists():
+                print(f"    WARNING: No frames for {clip_id}, skipping")
+                failed_ids.append(clip_id)
+                continue
+            frames_manifest = json.loads(frames_manifest_path.read_text())
 
-        content = []
-        for frame in frames_to_send:
-            img_path = clip_paths.frames / frame["file"]
-            img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode("utf-8")
-            content.append({"type": "text", "text": f"[{frame['timestamp_fmt']}]"})
-            content.append(
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-                }
+            # Build image content — send all frames (or first batch if too many)
+            all_frames = frames_manifest["frames"]
+            frames_to_send = all_frames[: cfg.max_images_per_batch]
+
+            content = []
+            for frame in frames_to_send:
+                img_path = clip_paths.frames / frame["file"]
+                img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode("utf-8")
+                content.append({"type": "text", "text": f"[{frame['timestamp_fmt']}]"})
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": img_b64,
+                        },
+                    }
+                )
+
+            # Load transcript if available
+            transcript_text = _load_transcript_for_prompt(clip_paths)
+
+            prompt = build_clip_review_prompt(
+                clip_id=clip_id,
+                filename=clip_info["filename"],
+                duration_sec=clip_info["duration_sec"],
+                resolution=clip_info["resolution"],
+                transcript_text=transcript_text,
+                style_supplement=style_supplement,
+            )
+            content.append({"type": "text", "text": prompt})
+
+            print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
+            response = client.messages.create(
+                model=cfg.model,
+                max_tokens=cfg.max_tokens,
+                temperature=cfg.temperature,
+                messages=[{"role": "user", "content": content}],
             )
 
-        # Load transcript if available
-        transcript_text = _load_transcript_for_prompt(clip_paths)
+            review = parse_clip_review(response.content[0].text)
 
-        prompt = build_clip_review_prompt(
-            clip_id=clip_id,
-            filename=clip_info["filename"],
-            duration_sec=clip_info["duration_sec"],
-            resolution=clip_info["resolution"],
-            transcript_text=transcript_text,
-        )
-        content.append({"type": "text", "text": prompt})
+            v = next_version(clip_paths.root, "review_claude")
+            vpath = versioned_path(clip_paths.review / "review_claude.json", v)
+            vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+            update_latest_symlink(vpath)
+            reviews.append(review)
+        except Exception as e:
+            print(f"  ERROR reviewing {clip_id}: {e}")
+            failed_ids.append(clip_id)
 
-        print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
-        response = client.messages.create(
-            model=cfg.model,
-            max_tokens=cfg.max_tokens,
-            temperature=cfg.temperature,
-            messages=[{"role": "user", "content": content}],
-        )
-
-        review = parse_clip_review(response.content[0].text)
-
-        v = next_version(clip_paths.root, "review_claude")
-        vpath = versioned_path(clip_paths.review / "review_claude.json", v)
-        vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
-        update_latest_symlink(vpath)
-        reviews.append(review)
-
-    return reviews
+    return reviews, failed_ids
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +695,7 @@ def run_phase2(
     user_context: dict | None = None,
     tracer=None,
     visual: bool = False,
+    style_supplement: str | None = None,
 ) -> Path:
     """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview."""
     from .models import EditorialStoryboard
@@ -662,6 +720,7 @@ def run_phase2(
         total_duration_sec=total_duration,
         transcripts=transcripts,
         visual=visual,
+        style_supplement=style_supplement,
     )
 
     # Inject user context if provided
@@ -765,6 +824,158 @@ def run_phase2(
     return json_path
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — Visual Monologue (text overlay generation)
+# ---------------------------------------------------------------------------
+
+
+def run_monologue(
+    editorial_paths: EditorialProjectPaths,
+    provider: str,
+    gemini_cfg: GeminiConfig | None = None,
+    claude_cfg: ClaudeConfig | None = None,
+    style_preset=None,
+    user_context: dict | None = None,
+    tracer=None,
+    persona_hint: str | None = None,
+) -> Path:
+    """Phase 3: generate Visual Monologue text overlay plan from the editorial storyboard."""
+    from .models import EditorialStoryboard, MonologuePlan
+    from .editorial_prompts import build_monologue_prompt
+    from .briefing import format_context_for_prompt
+
+    if not style_preset or not style_preset.has_phase3:
+        raise ValueError("Phase 3 requires a style preset with has_phase3=True")
+
+    # Load the latest storyboard
+    storyboard_json = _find_latest_storyboard(editorial_paths, provider)
+    if not storyboard_json:
+        raise FileNotFoundError(
+            f"No storyboard found in {editorial_paths.storyboard}. Run Phase 2 first."
+        )
+    storyboard = EditorialStoryboard.model_validate_json(storyboard_json.read_text())
+
+    # Load transcripts
+    transcripts = _load_all_transcripts_for_monologue(editorial_paths, storyboard)
+
+    # Build user context text
+    user_context_text = None
+    if user_context:
+        user_context_text = format_context_for_prompt(user_context)
+    else:
+        context_path = editorial_paths.root / "user_context.json"
+        if context_path.exists():
+            ctx = json.loads(context_path.read_text())
+            user_context_text = format_context_for_prompt(ctx)
+
+    prompt = build_monologue_prompt(
+        storyboard=storyboard,
+        phase3_prompt_template=style_preset.phase3_prompt,
+        transcripts=transcripts,
+        user_context_text=user_context_text,
+    )
+
+    # Optionally inject persona hint
+    if persona_hint:
+        prompt += (
+            f"\n\nIMPORTANT: The filmmaker prefers the **{persona_hint}** persona. "
+            "Use this persona for the monologue."
+        )
+
+    print(f"  Generating visual monologue ({provider})...")
+
+    if provider == "gemini":
+        from google import genai
+        from google.genai import types
+        from .tracing import traced_gemini_generate
+
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+        response = traced_gemini_generate(
+            client,
+            model=gemini_cfg.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=gemini_cfg.temperature,
+                response_mime_type="application/json",
+                response_schema=MonologuePlan,
+            ),
+            phase="monologue",
+            tracer=tracer,
+            prompt_chars=len(prompt),
+        )
+        monologue = MonologuePlan.model_validate_json(response.text)
+
+    elif provider == "claude":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        response = client.messages.create(
+            model=claude_cfg.model,
+            max_tokens=claude_cfg.max_tokens * 2,
+            temperature=claude_cfg.temperature,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                    + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
+                }
+            ],
+        )
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        monologue = MonologuePlan.model_validate_json(text)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+    # Version and save
+    editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
+    v = next_version(editorial_paths.root, "monologue")
+    base = f"monologue_{provider}"
+
+    json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
+    json_path.write_text(monologue.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    overlay_count = len(monologue.overlays)
+    text_time = monologue.total_text_time_sec
+    print(f"  v{v} monologue: {overlay_count} overlays, {text_time:.1f}s text time")
+    print(f"    Persona: {monologue.persona}")
+    print(f"    JSON: {json_path}")
+    return json_path
+
+
+def _find_latest_storyboard(
+    editorial_paths: EditorialProjectPaths, provider: str
+) -> Path | None:
+    """Find the latest storyboard JSON for the given provider."""
+    latest = editorial_paths.storyboard / f"editorial_{provider}_latest.json"
+    if latest.exists():
+        return latest
+    # Fallback: try any provider
+    for p in ("gemini", "claude"):
+        f = editorial_paths.storyboard / f"editorial_{p}_latest.json"
+        if f.exists():
+            return f
+    return None
+
+
+def _load_all_transcripts_for_monologue(
+    editorial_paths: EditorialProjectPaths,
+    storyboard,
+) -> dict[str, str] | None:
+    """Load transcripts for clips used in the storyboard."""
+    clip_ids = {seg.clip_id for seg in storyboard.segments}
+    transcripts = {}
+    for clip_id in clip_ids:
+        clip_paths = editorial_paths.clip_paths(clip_id)
+        text = _load_transcript_for_prompt(clip_paths)
+        if text:
+            transcripts[clip_id] = text
+    return transcripts if transcripts else None
+
+
 def _resolve_clip_id_refs(storyboard, known_ids: set[str]):
     """Fix abbreviated clip IDs in the storyboard by matching against known IDs.
 
@@ -800,6 +1011,51 @@ def _resolve_clip_id_refs(storyboard, known_ids: set[str]):
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 retry helper
+# ---------------------------------------------------------------------------
+
+
+def _retry_failed_phase1(
+    failed: list[str],
+    reviews: list[dict],
+    editorial_paths,
+    manifest: dict,
+    provider: str,
+    cfg,
+    tracer=None,
+    style_supplement: str | None = None,
+    interactive: bool = True,
+) -> tuple[list[dict], list[str]]:
+    """Prompt user to retry failed Phase 1 clips. Returns updated (reviews, failed)."""
+    while failed:
+        print(f"\n  {len(failed)} clip(s) failed: {', '.join(failed)}")
+        if not interactive:
+            break
+        try:
+            import questionary
+            retry = questionary.confirm(
+                "Retry failed clips?", default=True,
+            ).ask()
+        except (ImportError, EOFError):
+            break
+        if not retry:
+            break
+
+        print(f"\n  Retrying {len(failed)} clip(s)...\n")
+        if provider == "gemini":
+            reviews, failed = run_phase1_gemini(
+                editorial_paths, manifest, cfg.gemini, tracer=tracer,
+                style_supplement=style_supplement, only_clip_ids=failed,
+            )
+        else:
+            reviews, failed = run_phase1_claude(
+                editorial_paths, manifest, cfg.claude,
+                style_supplement=style_supplement, only_clip_ids=failed,
+            )
+    return reviews, failed
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
@@ -813,8 +1069,9 @@ def run_editorial_pipeline(
     force: bool = False,
     interactive: bool = True,
     visual: bool = False,
+    style_preset=None,
 ) -> Path:
-    """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2."""
+    """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2 → optional Phase 3."""
     from .tracing import ProjectTracer
 
     cfg = cfg or DEFAULT_CONFIG
@@ -823,8 +1080,15 @@ def run_editorial_pipeline(
 
     tracer = ProjectTracer(editorial_paths.root)
 
+    # Resolve style supplements from preset
+    p1_supplement = style_preset.phase1_supplement if style_preset else None
+    p2_supplement = style_preset.phase2_supplement if style_preset else None
+    has_phase3 = style_preset.has_phase3 if style_preset else False
+
+    total_phases = 5 if has_phase3 else 4
+
     # Discover clips
-    print(f"[1/4] Discovering clips in {source_dir}...")
+    print(f"[1/{total_phases}] Discovering clips in {source_dir}...")
     clip_files = discover_source_clips(source_dir)
     if not clip_files:
         raise RuntimeError(f"No video files found in {source_dir}")
@@ -834,7 +1098,7 @@ def run_editorial_pipeline(
     print(f"  Found {len(clip_files)} clips: {total_label}")
 
     # Preprocess all clips
-    print(f"[2/4] Preprocessing {len(clip_files)} clips...")
+    print(f"[2/{total_phases}] Preprocessing {len(clip_files)} clips...")
     clip_metadata = preprocess_all_clips(clip_files, editorial_paths, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, editorial_paths, project_name)
     total_dur = format_duration(manifest["total_duration_sec"])
@@ -864,16 +1128,24 @@ def run_editorial_pipeline(
     else:
         print("  Skipping transcription (no provider: install mlx-whisper or set GEMINI_API_KEY)")
 
-    # Phase 1 — per-clip reviews
-    print(f"[3/4] Phase 1: Reviewing clips with {provider}...")
+    # Phase 1 — per-clip reviews (with retry loop)
+    print(f"[3/{total_phases}] Phase 1: Reviewing clips with {provider}...")
     if provider == "gemini":
-        reviews = run_phase1_gemini(
-            editorial_paths, manifest, cfg.gemini, force=force, tracer=tracer
+        reviews, failed = run_phase1_gemini(
+            editorial_paths, manifest, cfg.gemini, force=force, tracer=tracer,
+            style_supplement=p1_supplement,
         )
     elif provider == "claude":
-        reviews = run_phase1_claude(editorial_paths, manifest, cfg.claude, force=force)
+        reviews, failed = run_phase1_claude(
+            editorial_paths, manifest, cfg.claude, force=force,
+            style_supplement=p1_supplement,
+        )
     else:
         raise ValueError(f"Unknown provider: {provider}")
+    reviews, failed = _retry_failed_phase1(
+        failed, reviews, editorial_paths, manifest, provider, cfg,
+        tracer=tracer, style_supplement=p1_supplement, interactive=interactive,
+    )
     print(f"  Reviewed {len(reviews)} clips")
 
     # Briefing — optional interactive user context (smart briefing if Gemini available)
@@ -894,8 +1166,7 @@ def run_editorial_pipeline(
             user_context = run_briefing(reviews, style, editorial_paths.root)
 
     # Phase 2 — editorial assembly
-    step = "4/4" if not interactive else "4/4"
-    print(f"[{step}] Phase 2: Generating editorial storyboard...")
+    print(f"[4/{total_phases}] Phase 2: Generating editorial storyboard...")
     output_path = run_phase2(
         clip_reviews=reviews,
         editorial_paths=editorial_paths,
@@ -907,7 +1178,21 @@ def run_editorial_pipeline(
         user_context=user_context,
         tracer=tracer,
         visual=visual,
+        style_supplement=p2_supplement,
     )
+
+    # Phase 3 — visual monologue (if style preset has it)
+    if has_phase3:
+        print(f"[5/{total_phases}] Phase 3: Generating visual monologue...")
+        run_monologue(
+            editorial_paths=editorial_paths,
+            provider=provider,
+            gemini_cfg=cfg.gemini,
+            claude_cfg=cfg.claude,
+            style_preset=style_preset,
+            user_context=user_context,
+            tracer=tracer,
+        )
 
     tracer.print_summary("Pipeline Total")
     return output_path

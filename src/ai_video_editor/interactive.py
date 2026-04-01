@@ -94,6 +94,26 @@ def _new_project_flow(cfg):
     if not style:
         return
 
+    # Style preset selection (optional creative direction)
+    from .style_presets import list_presets, get_preset
+
+    presets = list_presets()
+    preset_choices = [questionary.Choice("None (standard editing)", value=None)]
+    for p in presets:
+        preset_choices.append(questionary.Choice(f"{p.label} — {p.description}", value=p.key))
+
+    preset_key = questionary.select(
+        "Style preset (optional — adds AI creative direction):",
+        choices=preset_choices,
+        style=VX_STYLE,
+    ).ask()
+
+    style_preset = get_preset(preset_key) if preset_key else None
+    if style_preset:
+        print(f"\n  Preset: {style_preset.label}")
+        if style_preset.has_phase3:
+            print("  This preset will generate a Visual Monologue (text overlay narrative)")
+
     # Read workspace config for provider
     ws_path = Path(".vx.json")
     ws = json.loads(ws_path.read_text()) if ws_path.exists() else {}
@@ -108,7 +128,10 @@ def _new_project_flow(cfg):
 
     print(f"\n  Creating project: {name}")
     print(f"  Source: {source_path}")
-    print(f"  Style: {style}, Provider: {provider}\n")
+    print(f"  Style: {style}, Provider: {provider}")
+    if style_preset:
+        print(f"  Preset: {style_preset.label}")
+    print()
 
     from .editorial_agent import (
         discover_source_clips,
@@ -117,6 +140,7 @@ def _new_project_flow(cfg):
         run_phase1_gemini,
         run_phase1_claude,
         run_phase2,
+        _retry_failed_phase1,
     )
 
     ep = cfg.editorial_project(name)
@@ -133,6 +157,8 @@ def _new_project_flow(cfg):
         "source_dir": str(source_path),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if preset_key:
+        meta["style_preset"] = preset_key
     (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
 
     # Discover
@@ -184,11 +210,23 @@ def _new_project_flow(cfg):
 
     tracer = ProjectTracer(ep.root)
 
+    # Resolve style supplements from preset
+    p1_supplement = style_preset.phase1_supplement if style_preset else None
+    p2_supplement = style_preset.phase2_supplement if style_preset else None
+
     print(f"\n  Phase 1: Reviewing clips with {provider}...\n")
     if provider == "gemini":
-        reviews = run_phase1_gemini(ep, manifest, cfg.gemini, tracer=tracer)
+        reviews, failed = run_phase1_gemini(
+            ep, manifest, cfg.gemini, tracer=tracer, style_supplement=p1_supplement,
+        )
     else:
-        reviews = run_phase1_claude(ep, manifest, cfg.claude)
+        reviews, failed = run_phase1_claude(
+            ep, manifest, cfg.claude, style_supplement=p1_supplement,
+        )
+    reviews, failed = _retry_failed_phase1(
+        failed, reviews, ep, manifest, provider, cfg,
+        tracer=tracer, style_supplement=p1_supplement,
+    )
     print(f"\n  Reviewed {len(reviews)} clips")
 
     # Briefing — smart (AI-guided) if Gemini available, else manual
@@ -231,10 +269,29 @@ def _new_project_flow(cfg):
         user_context=user_context,
         tracer=tracer,
         visual=visual,
+        style_supplement=p2_supplement,
     )
 
+    # Phase 3 — Visual Monologue (if preset supports it)
+    if style_preset and style_preset.has_phase3:
+        if questionary.confirm(
+            "Generate visual monologue (text overlay plan)?", default=True, style=VX_STYLE
+        ).ask():
+            from .editorial_agent import run_monologue
+
+            print("\n  Phase 3: Generating visual monologue...\n")
+            run_monologue(
+                editorial_paths=ep,
+                provider=provider,
+                gemini_cfg=cfg.gemini,
+                claude_cfg=cfg.claude,
+                style_preset=style_preset,
+                user_context=user_context,
+                tracer=tracer,
+            )
+
     tracer.print_summary("Pipeline Total")
-    print(f"\n  Storyboard ready!")
+    print("\n  Storyboard ready!")
     _project_actions(name, cfg)
 
 
@@ -276,17 +333,33 @@ def _project_actions(name, cfg):
         has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
         has_rough_cut = any(ep.exports.glob("*/rough_cut.mp4")) if ep.exports.exists() else False
 
+        has_monologue = (
+            any(ep.storyboard.glob("monologue_*_latest.json")) if ep.storyboard.exists() else False
+        )
+        has_preset_phase3 = False
+        preset_key = meta.get("style_preset")
+        if preset_key:
+            from .style_presets import get_preset as _get_preset
+
+            _sp = _get_preset(preset_key)
+            has_preset_phase3 = _sp.has_phase3 if _sp else False
+
         choices = []
         if has_preview:
             choices.append("Open preview in browser")
         if has_storyboard:
             choices.append("Regenerate preview")
             choices.append("Assemble rough cut")
+            if has_monologue:
+                choices.append("Assemble rough cut with text overlays")
+        if has_storyboard and has_preset_phase3:
+            choices.append("Generate visual monologue")
         choices.append("Manage clips")
         choices.append("Transcribe audio")
         choices.append("Run analysis (Phase 1 + 2)")
         choices.append("Edit briefing (AI-guided)")
         choices.append("Edit briefing (manual)")
+        choices.append("Set style preset")
         choices.append("Show status")
         if has_rough_cut:
             choices.append("Open rough cut video")
@@ -351,6 +424,38 @@ def _project_actions(name, cfg):
                 print(f"\n  Done! v{result['version']}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(result["preview"])])
+        elif action == "Assemble rough cut with text overlays":
+            from .rough_cut import run_rough_cut
+            from .models import MonologuePlan
+
+            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
+            mono_files = sorted(ep.storyboard.glob("monologue_*_latest.json"))
+            if json_files and mono_files:
+                monologue = MonologuePlan.model_validate_json(mono_files[0].read_text())
+                print(f"\n  Assembling rough cut with {len(monologue.overlays)} text overlays...\n")
+                result = run_rough_cut(json_files[0], ep, monologue=monologue)
+                print(f"\n  Done! v{result['version']}")
+                if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
+                    subprocess.run(["open", str(result["preview"])])
+        elif action == "Generate visual monologue":
+            from .editorial_agent import run_monologue
+            from .style_presets import get_preset as _get_preset2
+            from .tracing import ProjectTracer
+
+            _sp2 = _get_preset2(meta.get("style_preset", ""))
+            if _sp2:
+                provider = meta.get("provider", "gemini")
+                tracer = ProjectTracer(ep.root)
+                print(f"\n  Generating visual monologue ({_sp2.label})...\n")
+                run_monologue(
+                    editorial_paths=ep,
+                    provider=provider,
+                    gemini_cfg=cfg.gemini,
+                    claude_cfg=cfg.claude,
+                    style_preset=_sp2,
+                    tracer=tracer,
+                )
+                tracer.print_summary("Monologue")
         elif action == "Transcribe audio":
             _run_transcription_interactive(name, cfg)
         elif action == "Run analysis (Phase 1 + 2)":
@@ -374,6 +479,37 @@ def _project_actions(name, cfg):
             if ctx_path.exists():
                 ctx_path.unlink()
             run_briefing(reviews, style, ep.root)
+        elif action == "Set style preset":
+            from .style_presets import list_presets as _list_presets, get_preset as _get_preset3
+
+            current_preset = meta.get("style_preset")
+            all_presets = _list_presets()
+            preset_choices = [questionary.Choice(
+                "None (standard editing)" + (" (current)" if not current_preset else ""),
+                value=None,
+            )]
+            for p in all_presets:
+                label = f"{p.label} — {p.description}"
+                if p.key == current_preset:
+                    label += " (current)"
+                preset_choices.append(questionary.Choice(label, value=p.key))
+
+            new_key = questionary.select(
+                "Style preset:", choices=preset_choices, style=VX_STYLE,
+            ).ask()
+
+            if new_key != current_preset:
+                if new_key:
+                    meta["style_preset"] = new_key
+                    sp = _get_preset3(new_key)
+                    print(f"\n  Set preset: {sp.label}")
+                    if sp.has_phase3:
+                        print("  This preset supports Visual Monologue (Phase 3)")
+                    print("  Re-run analysis to apply preset creative direction to all phases.")
+                else:
+                    meta.pop("style_preset", None)
+                    print("\n  Removed style preset.")
+                (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
         elif action == "Manage clips":
             _manage_clips(name, meta, cfg)
         elif action == "Show status":
@@ -460,6 +596,7 @@ def _run_analyze(name, meta, cfg):
         run_phase1_gemini,
         run_phase1_claude,
         run_phase2,
+        _retry_failed_phase1,
     )
     from .tracing import ProjectTracer
 
@@ -468,6 +605,19 @@ def _run_analyze(name, meta, cfg):
     style = meta.get("style", "vlog")
     source_dir = Path(meta["source_dir"])
     tracer = ProjectTracer(ep.root)
+
+    # Resolve style preset
+    style_preset = None
+    preset_key = meta.get("style_preset")
+    if preset_key:
+        from .style_presets import get_preset as _gp
+
+        style_preset = _gp(preset_key)
+    p1_supplement = style_preset.phase1_supplement if style_preset else None
+    p2_supplement = style_preset.phase2_supplement if style_preset else None
+
+    if style_preset:
+        print(f"\n  Style preset: {style_preset.label}")
 
     clips = discover_source_clips(source_dir)
     print(f"\n  {len(clips)} clips, preprocessing...\n")
@@ -484,9 +634,17 @@ def _run_analyze(name, meta, cfg):
 
     print(f"\n  Phase 1: Reviewing clips...\n")
     if provider == "gemini":
-        reviews = run_phase1_gemini(ep, manifest, cfg.gemini, tracer=tracer)
+        reviews, failed = run_phase1_gemini(
+            ep, manifest, cfg.gemini, tracer=tracer, style_supplement=p1_supplement,
+        )
     else:
-        reviews = run_phase1_claude(ep, manifest, cfg.claude)
+        reviews, failed = run_phase1_claude(
+            ep, manifest, cfg.claude, style_supplement=p1_supplement,
+        )
+    reviews, failed = _retry_failed_phase1(
+        failed, reviews, ep, manifest, provider, cfg,
+        tracer=tracer, style_supplement=p1_supplement,
+    )
 
     # Briefing — smart if Gemini available
     if os.environ.get("GEMINI_API_KEY"):
@@ -521,9 +679,29 @@ def _run_analyze(name, meta, cfg):
         user_context=user_context,
         tracer=tracer,
         visual=visual,
+        style_supplement=p2_supplement,
     )
+
+    # Phase 3 — Visual Monologue (if preset supports it)
+    if style_preset and style_preset.has_phase3:
+        if questionary.confirm(
+            "Generate visual monologue (text overlay plan)?", default=True, style=VX_STYLE
+        ).ask():
+            from .editorial_agent import run_monologue
+
+            print("\n  Phase 3: Generating visual monologue...\n")
+            run_monologue(
+                editorial_paths=ep,
+                provider=provider,
+                gemini_cfg=cfg.gemini,
+                claude_cfg=cfg.claude,
+                style_preset=style_preset,
+                user_context=user_context,
+                tracer=tracer,
+            )
+
     tracer.print_summary("Analysis Total")
-    print(f"\n  Storyboard ready!")
+    print("\n  Storyboard ready!")
 
 
 def _load_reviews(ep):
