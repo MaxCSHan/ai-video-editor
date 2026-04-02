@@ -200,7 +200,21 @@ def transcribe_clip_gemini(
         prompt_chars=len(prompt),
     )
 
-    gemini_result = GeminiTranscript.model_validate_json(response.text)
+    # The SDK auto-populates response.parsed when response_schema is a Pydantic model.
+    # If Gemini returns malformed JSON (e.g., trailing data), parsed will be None — fall back
+    # to extracting the first JSON object manually.
+    gemini_result = getattr(response, "parsed", None)
+    if gemini_result is None:
+        raw_text = (response.text or "").strip()
+        clip_tag = proxy_path.stem.replace("_proxy", "")
+        print(f"  WARN [{clip_tag}] Gemini returned malformed JSON, attempting recovery...")
+        print(f"  Raw response ({len(raw_text)} chars):\n{raw_text[:500]}")
+        decoder = json.JSONDecoder()
+        parsed, end_idx = decoder.raw_decode(raw_text)
+        trailing = raw_text[end_idx:].strip()
+        if trailing:
+            print(f"  Discarded trailing data ({len(trailing)} chars): {trailing[:200]}")
+        gemini_result = GeminiTranscript.model_validate(parsed)
 
     # Transform lean Gemini response into canonical transcript.json format
     result = _gemini_to_canonical(gemini_result, cfg.gemini_model)

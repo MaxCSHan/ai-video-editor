@@ -905,7 +905,13 @@ def run_monologue(
             "Use this persona for the monologue."
         )
 
-    print(f"  Generating visual monologue ({provider})...")
+    # Log what we're sending
+    seg_count = len(storyboard.segments)
+    transcript_count = len(transcripts) if transcripts else 0
+    prompt_kb = len(prompt) / 1024
+    print(f"  Storyboard: {seg_count} segments, {transcript_count} transcripts, prompt ~{prompt_kb:.0f}KB")
+
+    from .tracing import LLMSpinner
 
     if provider == "gemini":
         from google import genai
@@ -914,37 +920,39 @@ def run_monologue(
 
         client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-        response = traced_gemini_generate(
-            client,
-            model=gemini_cfg.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=gemini_cfg.temperature,
-                response_mime_type="application/json",
-                response_schema=MonologuePlan,
-            ),
-            phase="monologue",
-            tracer=tracer,
-            prompt_chars=len(prompt),
-        )
+        with LLMSpinner("Generating visual monologue", provider="gemini"):
+            response = traced_gemini_generate(
+                client,
+                model=gemini_cfg.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.temperature,
+                    response_mime_type="application/json",
+                    response_schema=MonologuePlan,
+                ),
+                phase="monologue",
+                tracer=tracer,
+                prompt_chars=len(prompt),
+            )
         monologue = MonologuePlan.model_validate_json(response.text)
 
     elif provider == "claude":
         import anthropic
 
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        response = client.messages.create(
-            model=claude_cfg.model,
-            max_tokens=claude_cfg.max_tokens * 2,
-            temperature=claude_cfg.temperature,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                    + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
-                }
-            ],
-        )
+        with LLMSpinner("Generating visual monologue", provider="claude"):
+            response = client.messages.create(
+                model=claude_cfg.model,
+                max_tokens=claude_cfg.max_tokens * 2,
+                temperature=claude_cfg.temperature,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                        + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
+                    }
+                ],
+            )
         text = response.content[0].text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -1103,6 +1111,7 @@ def run_editorial_pipeline(
     interactive: bool = True,
     visual: bool = False,
     style_preset=None,
+    included_clips: list[str] | None = None,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2 → optional Phase 3."""
     from .tracing import ProjectTracer
@@ -1122,7 +1131,12 @@ def run_editorial_pipeline(
 
     # Discover clips
     print(f"[1/{total_phases}] Discovering clips in {source_dir}...")
-    clip_files = discover_source_clips(source_dir)
+    all_clip_files = discover_source_clips(source_dir)
+    if included_clips:
+        included_set = set(included_clips)
+        clip_files = [c for c in all_clip_files if c.stem in included_set]
+    else:
+        clip_files = all_clip_files
     if not clip_files:
         raise RuntimeError(f"No video files found in {source_dir}")
     total_label = ", ".join(f.name for f in clip_files[:5])

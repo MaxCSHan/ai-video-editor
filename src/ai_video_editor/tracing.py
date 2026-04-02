@@ -5,6 +5,8 @@ Provides cost estimation for dry-run planning and post-run analysis.
 """
 
 import json
+import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -168,6 +170,61 @@ def _group_by_phase(traces: list[dict]) -> dict:
         phases[phase]["total_tokens"] += t.get("total_tokens", 0)
         phases[phase]["estimated_cost_usd"] += t.get("estimated_cost_usd", 0)
     return phases
+
+
+# ---------------------------------------------------------------------------
+# Spinner — elapsed-time feedback for long-running LLM calls
+# ---------------------------------------------------------------------------
+
+
+class LLMSpinner:
+    """Context manager that prints an updating elapsed-time line during LLM calls.
+
+    Usage::
+
+        with LLMSpinner("Generating visual monologue", provider="gemini"):
+            response = client.models.generate_content(...)
+    """
+
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, label: str, *, provider: str = "", detail: str = ""):
+        self.label = label
+        parts = [p for p in (provider, detail) if p]
+        self.suffix = f" ({', '.join(parts)})" if parts else ""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._start_time = 0.0
+
+    def __enter__(self):
+        self._start_time = time.time()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        elapsed = time.time() - self._start_time
+        # Clear the spinner line and print final status
+        sys.stdout.write("\r\033[K")
+        if exc_type is None:
+            sys.stdout.write(f"  {self.label}{self.suffix} — done ({elapsed:.1f}s)\n")
+        else:
+            sys.stdout.write(f"  {self.label}{self.suffix} — failed ({elapsed:.1f}s)\n")
+        sys.stdout.flush()
+        return False
+
+    def _spin(self):
+        idx = 0
+        while not self._stop.is_set():
+            elapsed = time.time() - self._start_time
+            frame = self.FRAMES[idx % len(self.FRAMES)]
+            sys.stdout.write(f"\r\033[K  {frame} {self.label}{self.suffix}... {elapsed:.0f}s")
+            sys.stdout.flush()
+            idx += 1
+            self._stop.wait(0.15)
 
 
 # ---------------------------------------------------------------------------

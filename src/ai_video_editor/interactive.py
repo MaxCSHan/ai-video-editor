@@ -182,6 +182,7 @@ def _new_project_flow(cfg):
     clips = selected
 
     meta["clip_count"] = len(clips)
+    meta["included_clips"] = [c.stem for c in clips]
     (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
 
     # Preprocess
@@ -298,7 +299,7 @@ def _new_project_flow(cfg):
         ).ask():
             from .editorial_agent import run_monologue
 
-            print("\n  Phase 3: Generating visual monologue...\n")
+            print("\n  Phase 3: Visual Monologue")
             run_monologue(
                 editorial_paths=ep,
                 provider=provider,
@@ -465,7 +466,7 @@ def _project_actions(name, cfg):
             if _sp2:
                 provider = meta.get("provider", "gemini")
                 tracer = ProjectTracer(ep.root)
-                print(f"\n  Generating visual monologue ({_sp2.label})...\n")
+                print(f"\n  Phase 3: Visual Monologue ({_sp2.label})")
                 run_monologue(
                     editorial_paths=ep,
                     provider=provider,
@@ -619,6 +620,7 @@ def _manage_clips(name, meta, cfg):
 
     # Update project metadata
     meta["clip_count"] = len(selected_ids)
+    meta["included_clips"] = sorted(selected_ids)
     (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
 
     print(f"\n  Project now has {len(selected_ids)} clips.")
@@ -658,7 +660,14 @@ def _run_analyze(name, meta, cfg):
     if style_preset:
         print(f"\n  Style preset: {style_preset.label}")
 
-    clips = discover_source_clips(source_dir)
+    all_clips = discover_source_clips(source_dir)
+    # Only process clips included in the project (respects manage-clips changes)
+    included = meta.get("included_clips")
+    if included:
+        included_set = set(included)
+        clips = [c for c in all_clips if c.stem in included_set]
+    else:
+        clips = all_clips
     print(f"\n  {len(clips)} clips, preprocessing...\n")
     clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, ep, name)
@@ -760,7 +769,7 @@ def _run_analyze(name, meta, cfg):
         ).ask():
             from .editorial_agent import run_monologue
 
-            print("\n  Phase 3: Generating visual monologue...\n")
+            print("\n  Phase 3: Visual Monologue")
             run_monologue(
                 editorial_paths=ep,
                 provider=provider,

@@ -423,7 +423,9 @@ def cmd_preprocess(args, cfg: Config):
 
         ep = cfg.editorial_project(name)
         source_dir = Path(meta["source_dir"])
-        clips = discover_source_clips(source_dir)
+        all_clips = discover_source_clips(source_dir)
+        included = meta.get("included_clips")
+        clips = [c for c in all_clips if c.stem in set(included)] if included else all_clips
         clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
         manifest = build_master_manifest(clip_metadata, ep, name)
         print(f"\n  {GREEN}Done.{RESET} {len(clips)} clips, {manifest['total_duration_fmt']} total")
@@ -648,6 +650,7 @@ def cmd_analyze(args, cfg: Config):
             interactive=interactive,
             visual=visual,
             style_preset=style_preset,
+            included_clips=meta.get("included_clips"),
         )
     else:
         # Descriptive pipeline
