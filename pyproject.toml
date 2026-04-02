@@ -23,6 +23,10 @@ scene = [
 whisper = [
     "mlx-whisper",
 ]
+tracing = [
+    "arize-phoenix",
+    "openinference-instrumentation-google-genai",
+]
 
 [project.scripts]
 vx = "ai_video_editor.cli:main"

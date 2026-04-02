@@ -224,6 +224,204 @@ src/ai_video_editor/
 | Render | Structured JSON | Markdown + HTML preview (with transcript overlay) | No — templates |
 | Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
 
+## LLM Usage, Cost, and Tracing
+
+### How LLM calls work
+
+Every Gemini API call goes through `traced_gemini_generate()` in `tracing.py`. This wrapper:
+1. Records input/output token counts from Gemini's `usage_metadata`
+2. Estimates cost based on the model's per-token pricing
+3. Times the call (including retries)
+4. Appends a JSON line to `library/<project>/traces.jsonl`
+5. Retries automatically on transient errors (429, 500, 503) with exponential backoff (max 3 retries)
+
+After each LLM call, a **response quality validator** checks the output:
+- **Phase 1**: validates timestamp ranges, segment boundaries, clip ID correctness
+- **Phase 2**: validates all segment clip IDs exist, timestamps within clip durations, non-empty storyboard
+- If critical issues are found (e.g., all timestamps invalid), the call is retried once with validation feedback injected into the prompt
+
+### Cost tracking
+
+Every pipeline run prints a cost summary:
+
+```
+  [Phase 1] 12 calls | 48,320 tokens | ~$0.0242 | 34.2s
+  [Phase 2] 1 calls | 15,800 tokens | ~$0.0079 | 8.1s
+  [Pipeline Total] 13 calls | 64,120 tokens | ~$0.0321 | 42.3s
+```
+
+To estimate costs before running:
+
+```bash
+vx analyze my-trip --dry-run          # Estimate token usage and cost
+vx analyze my-trip --dry-run --visual # Compare text-only vs visual mode cost
+```
+
+To set a spending limit:
+
+```bash
+vx analyze my-trip --max-cost 0.50    # Abort if cumulative cost exceeds $0.50
+```
+
+Historical cost is available via:
+
+```bash
+vx status my-trip                     # Shows cumulative LLM usage with per-phase breakdown
+```
+
+The trace file `traces.jsonl` contains one JSON object per LLM call with fields: `phase`, `model`, `clip_id`, `input_tokens`, `output_tokens`, `estimated_cost_usd`, `duration_sec`, `success`, `retries`, `validation_warnings`.
+
+### Setting up the tracing system (developer)
+
+VX includes an optional integration with [Arize Phoenix](https://github.com/Arize-AI/phoenix) for visual trace inspection and debugging. **End users do not need this** — it's a developer tool for diagnosing LLM quality issues.
+
+#### Step 1: Install tracing dependencies
+
+```bash
+uv pip install -e ".[tracing]"
+```
+
+This installs `arize-phoenix` and the OpenInference auto-instrumentor for Google GenAI. It does not affect normal `vx` usage.
+
+#### Step 2: Run the pipeline with tracing enabled
+
+```bash
+VX_TRACING=1 vx analyze my-trip
+```
+
+You'll see:
+
+```
+  [Tracing] Phoenix enabled — http://localhost:6006
+```
+
+Phoenix starts in the background. Every Gemini API call is automatically captured with full prompt, response, token counts, and timing.
+
+#### Step 3: Open the Phoenix UI
+
+Open http://localhost:6006 in your browser. You'll see a timeline of all LLM calls with:
+- Full input prompt (what was sent to the model)
+- Full output response (what the model returned)
+- Token counts and latency
+- Hierarchical span view (which phase each call belongs to)
+
+#### Step 4: Investigate a specific call
+
+1. **Find the call**: Filter by span name (e.g., `generate_content`) or look at the timeline
+2. **Read the prompt**: Click a span to see the full input — the prompt text, attached video URIs, and config (temperature, response_schema)
+3. **Read the response**: See the full LLM output — the raw JSON before parsing
+4. **Check tokens**: Compare actual token usage with the estimate from `--dry-run`
+5. **Check for retries**: If a call was retried (transient error), you'll see multiple spans for the same phase/clip
+
+### Reviewing a bad storyboard
+
+When the AI produces a storyboard with bad timestamps or missing clips, here's how to trace the problem:
+
+1. **Check the validation warnings** in the console output:
+   ```
+   WARN: Seg 3: out_sec (45.2) > clip duration (30.0)
+   WARN: Seg 7: unknown clip_id 'C0099'
+   ```
+
+2. **Look at the trace file** to see what the model actually returned:
+   ```bash
+   # Last Phase 2 call
+   tail -1 library/my-trip/traces.jsonl | python -m json.tool
+   ```
+
+3. **With Phoenix enabled**, open http://localhost:6006 and find the Phase 2 span. Read the full prompt to see if the clip reviews and transcripts were correctly injected. Read the response to see where the model diverged.
+
+4. **Compare versions**: Each analysis run is versioned (`editorial_gemini_v1.json`, `v2`, etc.). Diff them to see what changed:
+   ```bash
+   diff library/my-trip/storyboard/editorial_gemini_v1.json \
+        library/my-trip/storyboard/editorial_gemini_v2.json
+   ```
+
+5. **Re-run with adjustments**:
+   ```bash
+   vx analyze my-trip --force           # Re-run Phase 1 reviews from scratch
+   vx brief my-trip --scan              # Re-do the AI briefing
+   vx analyze my-trip --visual          # Try visual mode for better editorial judgment
+   ```
+
+### Programmatic trace access (for code agents)
+
+When using a code agent (Claude Code, Cursor, etc.) to debug LLM quality issues, traces can be queried programmatically without the web UI.
+
+#### Reading traces.jsonl directly
+
+```bash
+# Show all Phase 2 calls with cost
+python3 -c "
+import json
+traces = [json.loads(l) for l in open('library/my-trip/traces.jsonl')]
+for t in traces:
+    if t['phase'] == 'phase2':
+        print(f\"Model: {t['model']}, Tokens: {t['total_tokens']}, Cost: \${t['estimated_cost_usd']:.4f}\")
+        print(f\"Retries: {t['retries']}, Warnings: {t.get('validation_warnings', [])}\")
+"
+
+# Find all failed or retried calls
+python3 -c "
+import json
+traces = [json.loads(l) for l in open('library/my-trip/traces.jsonl')]
+for t in traces:
+    if not t['success'] or t.get('retries', 0) > 0:
+        print(f\"{t['phase']}/{t.get('clip_id', '-')}: success={t['success']}, retries={t.get('retries', 0)}, error={t.get('error', '-')}\")
+"
+
+# Cost breakdown by phase
+python3 -c "
+import json
+from collections import defaultdict
+phases = defaultdict(float)
+traces = [json.loads(l) for l in open('library/my-trip/traces.jsonl')]
+for t in traces:
+    phases[t['phase']] += t['estimated_cost_usd']
+for phase, cost in sorted(phases.items()):
+    print(f'{phase}: \${cost:.4f}')
+"
+```
+
+#### Using Phoenix Python SDK (with tracing extras installed)
+
+```python
+import phoenix as px
+
+# Connect to local Phoenix (must have been started with VX_TRACING=1)
+client = px.Client()
+
+# Get all LLM spans as a DataFrame
+spans = client.get_spans(project_name="vx-pipeline")
+
+# Filter to Phase 2 calls
+phase2 = spans[spans["name"].str.contains("generate_content")]
+
+# Read the exact prompt that was sent
+print(phase2.iloc[-1]["attributes.llm.input_messages"])
+
+# Read the raw LLM response
+print(phase2.iloc[-1]["attributes.llm.output_messages"])
+
+# Token usage across all calls
+llm_spans = spans[spans["span_kind"] == "LLM"]
+print(f"Total tokens: {llm_spans['attributes.llm.token_count.total'].sum()}")
+
+# Export all traces for offline analysis
+spans.to_json("debug_traces.jsonl", orient="records", lines=True)
+```
+
+#### Key files for debugging
+
+| File | What it contains |
+|------|------------------|
+| `library/<project>/traces.jsonl` | Every LLM call: tokens, cost, timing, validation warnings |
+| `library/<project>/storyboard/editorial_gemini_v*.json` | Phase 2 structured output (the storyboard) |
+| `library/<project>/clips/<clip>/review/review_gemini_v*.json` | Phase 1 per-clip reviews |
+| `library/<project>/clips/<clip>/audio/transcript.json` | Transcription output |
+| `library/<project>/user_context.json` | Briefing context passed to all LLM calls |
+| `library/<project>/quick_scan.json` | AI quick scan results (briefing input) |
+
 ## Rough Cut: Decode → Encode → Concat Pipeline
 
 The rough cut stage (`rough_cut.py`) is a pure ffmpeg pipeline — no LLM calls. It takes the `EditorialStoryboard` JSON and produces a playable `rough_cut.mp4`. The pipeline has three phases, each with specific design decisions learned through real-world testing with mixed 4K footage.

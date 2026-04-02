@@ -5,6 +5,7 @@ Provides cost estimation for dry-run planning and post-run analysis.
 """
 
 import json
+import random
 import sys
 import threading
 import time
@@ -15,14 +16,50 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Retry configuration
+# ---------------------------------------------------------------------------
+
+MAX_LLM_RETRIES = 3
+BASE_RETRY_DELAY_SEC = 2.0
+
+
+def _is_retryable_gemini(exc: Exception) -> bool:
+    """Check if a Gemini API error is transient and worth retrying."""
+    name = type(exc).__name__
+    if name in (
+        "TooManyRequests",
+        "ResourceExhausted",
+        "ServiceUnavailable",
+        "InternalServerError",
+        "DeadlineExceeded",
+    ):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    return code in (429, 500, 502, 503)
+
+
+# ---------------------------------------------------------------------------
 # Cost table (per 1M tokens, USD)
 # ---------------------------------------------------------------------------
 
+
+class CostLimitExceeded(Exception):
+    """Raised when cumulative LLM cost exceeds the configured limit."""
+
+    pass
+
+
 COST_PER_1M_TOKENS = {
-    # Gemini
-    "gemini-2.5-flash": {"input": 0.15, "output": 0.60},
+    # Gemini 3.x (2026-04 pricing)
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
+    "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.50},
+    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    # Gemini 2.5
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
     "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-    "gemini-3-flash-preview": {"input": 0.15, "output": 0.60},
     # Claude
     "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
@@ -64,6 +101,9 @@ class LLMCallTrace:
     # Quality
     success: bool = True
     error: str | None = None
+    retries: int = 0
+    validation_warnings: list[str] = field(default_factory=list)
+    validation_retried: bool = False
 
 
 _warned_models: set[str] = set()
@@ -96,16 +136,25 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 class ProjectTracer:
     """Collects traces for a project run and writes to traces.jsonl."""
 
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, max_cost_usd: float | None = None):
         self.project_root = project_root
         self.traces: list[LLMCallTrace] = []
         self.traces_path = project_root / "traces.jsonl"
+        self.max_cost_usd = max_cost_usd
 
     def record(self, trace: LLMCallTrace):
-        """Record a trace in memory and append to disk."""
+        """Record a trace in memory and append to disk. Raises CostLimitExceeded if over budget."""
         self.traces.append(trace)
         with open(self.traces_path, "a") as f:
             f.write(json.dumps(asdict(trace)) + "\n")
+
+        if self.max_cost_usd is not None:
+            cumulative = sum(t.estimated_cost_usd for t in self.traces)
+            if cumulative >= self.max_cost_usd:
+                raise CostLimitExceeded(
+                    f"LLM cost ${cumulative:.4f} exceeds limit ${self.max_cost_usd:.2f}. "
+                    f"Use --max-cost to increase or --dry-run to estimate first."
+                )
 
     def summary(self) -> dict:
         """Summarize all traces from this run."""
@@ -236,6 +285,35 @@ class LLMSpinner:
 
 
 # ---------------------------------------------------------------------------
+# Phoenix observability (dev-only, optional)
+# ---------------------------------------------------------------------------
+
+_phoenix_initialized = False
+
+
+def _init_phoenix():
+    """Start Phoenix tracing if VX_TRACING=1 and deps installed. No-op otherwise."""
+    import os
+
+    global _phoenix_initialized
+    if _phoenix_initialized or os.environ.get("VX_TRACING") != "1":
+        return
+    try:
+        import phoenix as px
+        from phoenix.otel import register
+
+        px.launch_app(run_in_thread=True)
+        register(project_name="vx-pipeline")
+        from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
+
+        GoogleGenAIInstrumentor().instrument()
+        _phoenix_initialized = True
+        print("  [Tracing] Phoenix enabled — http://localhost:6006")
+    except ImportError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Gemini traced wrapper
 # ---------------------------------------------------------------------------
 
@@ -252,7 +330,7 @@ def traced_gemini_generate(
     num_video_files: int = 0,
     prompt_chars: int = 0,
 ):
-    """Wrapper around client.models.generate_content that records a trace."""
+    """Wrapper around client.models.generate_content with retry and tracing."""
     start = time.time()
     trace = LLMCallTrace(
         phase=phase,
@@ -263,34 +341,53 @@ def traced_gemini_generate(
         prompt_chars=prompt_chars,
     )
 
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
-        trace.duration_sec = round(time.time() - start, 2)
+    last_exc = None
+    for attempt in range(MAX_LLM_RETRIES + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.retries = attempt
 
-        # Extract token usage from response metadata
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            um = response.usage_metadata
-            trace.input_tokens = getattr(um, "prompt_token_count", 0) or 0
-            trace.output_tokens = getattr(um, "candidates_token_count", 0) or 0
-            trace.total_tokens = getattr(um, "total_token_count", 0) or 0
-        trace.estimated_cost_usd = estimate_cost(model, trace.input_tokens, trace.output_tokens)
-        trace.success = True
+            # Extract token usage from response metadata
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                um = response.usage_metadata
+                trace.input_tokens = getattr(um, "prompt_token_count", 0) or 0
+                trace.output_tokens = getattr(um, "candidates_token_count", 0) or 0
+                trace.total_tokens = getattr(um, "total_token_count", 0) or 0
+            trace.estimated_cost_usd = estimate_cost(model, trace.input_tokens, trace.output_tokens)
+            trace.success = True
 
-    except Exception as e:
-        trace.duration_sec = round(time.time() - start, 2)
-        trace.success = False
-        trace.error = str(e)
-        if tracer:
-            tracer.record(trace)
-        raise
+            if tracer:
+                tracer.record(trace)
+            return response
 
-    if tracer:
-        tracer.record(trace)
-    return response
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_LLM_RETRIES and _is_retryable_gemini(e):
+                delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
+                print(
+                    f"  Retryable error (attempt {attempt + 1}/{MAX_LLM_RETRIES}):"
+                    f" {type(e).__name__}"
+                )
+                print(f"  Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                continue
+
+            # Non-retryable or retries exhausted
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.success = False
+            trace.error = str(e)
+            trace.retries = attempt
+            if tracer:
+                tracer.record(trace)
+            raise
+
+    # Safety net (should not reach here)
+    raise last_exc  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

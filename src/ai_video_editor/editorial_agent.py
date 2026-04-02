@@ -67,6 +67,13 @@ def _require_api_key(name: str) -> str:
     return key
 
 
+def _get_gemini_client():
+    """Create a Gemini client with the API key from the environment."""
+    from google import genai
+
+    return genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+
+
 # ---------------------------------------------------------------------------
 # Clip discovery
 # ---------------------------------------------------------------------------
@@ -420,7 +427,6 @@ def _review_single_clip_gemini(
     user_context: dict | None = None,
 ) -> dict | None:
     """Review a single clip via Gemini. Returns review dict or None on failure."""
-    from google import genai
     from google.genai import types
 
     clip_id = clip_info["clip_id"]
@@ -438,7 +444,7 @@ def _review_single_clip_gemini(
         except json.JSONDecodeError:
             print(f"  {label}: corrupt cache, will re-review")
 
-    client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+    client = _get_gemini_client()
 
     # Check file cache before uploading (may already be cached by briefing or transcription)
     file_cache = load_file_api_cache(editorial_paths)
@@ -496,6 +502,42 @@ def _review_single_clip_gemini(
     )
 
     review = parse_clip_review(response.text)
+
+    # Validate review quality
+    val_warnings, val_critical = validate_clip_review(review, clip_info)
+    if val_warnings:
+        print(f"  {label}: validation warnings: {'; '.join(val_warnings[:3])}")
+    if tracer and tracer.traces:
+        tracer.traces[-1].validation_warnings = val_warnings
+
+    # Auto-retry once on critical validation failure
+    if val_critical:
+        feedback = "Your previous response had issues:\n" + "\n".join(
+            f"- {w}" for w in val_warnings
+        )
+        retry_prompt = prompt + f"\n\n{feedback}\nPlease fix these issues."
+        print(f"  {label}: critical validation issues, retrying with feedback...")
+        retry_response = traced_gemini_generate(
+            client,
+            model=cfg.model,
+            contents=[
+                types.Content(
+                    parts=[
+                        types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
+                        types.Part.from_text(text=retry_prompt),
+                    ]
+                )
+            ],
+            config=types.GenerateContentConfig(temperature=cfg.temperature),
+            phase="phase1",
+            clip_id=clip_id,
+            tracer=tracer,
+            num_video_files=1,
+            prompt_chars=len(retry_prompt),
+        )
+        review = parse_clip_review(retry_response.text)
+        if tracer and tracer.traces:
+            tracer.traces[-1].validation_retried = True
 
     v = next_version(clip_paths.root, "review_gemini")
     vpath = versioned_path(clip_paths.review / "review_gemini.json", v)
@@ -699,6 +741,92 @@ def run_phase1_claude(
 
 
 # ---------------------------------------------------------------------------
+# Response quality validation
+# ---------------------------------------------------------------------------
+
+
+def validate_clip_review(review: dict, clip_info: dict) -> tuple[list[str], bool]:
+    """Validate a Phase 1 clip review for structural correctness.
+
+    Returns (warnings, is_critical). is_critical means the review should be retried.
+    """
+    warnings = []
+    dur = clip_info.get("duration_sec", 0)
+    clip_id = clip_info.get("clip_id", "")
+
+    # Check clip_id match
+    review_cid = review.get("clip_id", "")
+    if review_cid and clip_id and not clip_id.endswith(review_cid):
+        warnings.append(f"clip_id mismatch: expected '{clip_id}', got '{review_cid}'")
+
+    # Check usable segments
+    for seg in review.get("usable_segments", []):
+        in_s = seg.get("in_sec", 0)
+        out_s = seg.get("out_sec", 0)
+        if in_s >= out_s:
+            warnings.append(f"Segment in_sec ({in_s}) >= out_sec ({out_s})")
+        if dur > 0 and out_s > dur + 1.0:
+            warnings.append(f"Segment out_sec ({out_s:.1f}) exceeds clip duration ({dur:.1f})")
+
+    # Check for empty review on non-trivial clips
+    has_segments = bool(review.get("usable_segments") or review.get("discard_segments"))
+    if not has_segments and dur > 5.0:
+        warnings.append("No usable or discard segments for a clip > 5s")
+
+    # Critical if: no segments on a real clip, or majority of segments have bad timestamps
+    bad_count = sum(
+        1
+        for seg in review.get("usable_segments", [])
+        if seg.get("in_sec", 0) >= seg.get("out_sec", 0)
+    )
+    total_segs = len(review.get("usable_segments", []))
+    is_critical = (not has_segments and dur > 5.0) or (
+        total_segs > 0 and bad_count > total_segs / 2
+    )
+
+    return warnings, is_critical
+
+
+def validate_storyboard(storyboard, clip_reviews: list[dict]) -> tuple[list[str], bool]:
+    """Validate a Phase 2 storyboard for structural correctness.
+
+    Returns (warnings, is_critical).
+    """
+    warnings = []
+    known_ids = {r.get("clip_id", "") for r in clip_reviews}
+    dur_map = {}
+    for r in clip_reviews:
+        cid = r.get("clip_id", "")
+        dur_map[cid] = r.get("duration_sec", 0)
+
+    unknown_count = 0
+    for seg in storyboard.segments:
+        if seg.clip_id not in known_ids:
+            warnings.append(f"Seg {seg.index}: unknown clip_id '{seg.clip_id}'")
+            unknown_count += 1
+        if seg.in_sec >= seg.out_sec:
+            warnings.append(f"Seg {seg.index}: in_sec ({seg.in_sec}) >= out_sec ({seg.out_sec})")
+        max_dur = dur_map.get(seg.clip_id, 0)
+        if max_dur > 0 and seg.out_sec > max_dur + 1.0:
+            warnings.append(
+                f"Seg {seg.index}: out_sec ({seg.out_sec:.1f}) > clip duration ({max_dur:.1f})"
+            )
+
+    if not storyboard.segments:
+        warnings.append("Storyboard has no segments")
+
+    # Check for duplicate indices
+    indices = [s.index for s in storyboard.segments]
+    if len(indices) != len(set(indices)):
+        warnings.append("Duplicate segment indices detected")
+
+    total = len(storyboard.segments)
+    is_critical = total == 0 or (total > 0 and unknown_count > total * 0.3)
+
+    return warnings, is_critical
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Editorial assembly
 # ---------------------------------------------------------------------------
 
@@ -740,7 +868,6 @@ def run_phase2(
     visual_timeline = None
     video_parts = []
     if visual and provider == "gemini":
-        from google import genai
         from google.genai import types
         from .preprocess import concat_proxies
 
@@ -748,7 +875,7 @@ def run_phase2(
         bundles = concat_proxies(editorial_paths, clip_ids)
 
         if bundles:
-            client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+            client = _get_gemini_client()
             file_cache = load_file_api_cache(editorial_paths)
 
             for i, bundle in enumerate(bundles):
@@ -795,10 +922,9 @@ def run_phase2(
 
     if provider == "gemini":
         if not visual_timeline:
-            from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+            client = _get_gemini_client()
 
         from .tracing import traced_gemini_generate
 
@@ -851,6 +977,18 @@ def run_phase2(
     # Resolve abbreviated clip IDs (e.g., LLM returns "C0073" but clip_id is "20260330114125_C0073")
     known_clip_ids = {r["clip_id"] for r in clip_reviews}
     _resolve_clip_id_refs(storyboard, known_clip_ids)
+
+    # Validate storyboard quality
+    val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
+    if val_warnings:
+        for w in val_warnings[:5]:
+            print(f"  WARN: {w}")
+        if len(val_warnings) > 5:
+            print(f"  ... and {len(val_warnings) - 5} more warnings")
+    if tracer and tracer.traces:
+        tracer.traces[-1].validation_warnings = val_warnings
+    if val_critical:
+        print("  Critical storyboard issues detected — consider re-running with --force")
 
     # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
@@ -954,11 +1092,10 @@ def run_monologue(
     from .tracing import LLMSpinner
 
     if provider == "gemini":
-        from google import genai
         from google.genai import types
         from .tracing import traced_gemini_generate
 
-        client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+        client = _get_gemini_client()
 
         with LLMSpinner("Generating visual monologue", provider="gemini"):
             response = traced_gemini_generate(
@@ -1152,15 +1289,17 @@ def run_editorial_pipeline(
     visual: bool = False,
     style_preset=None,
     included_clips: list[str] | None = None,
+    max_cost: float | None = None,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2 → optional Phase 3."""
-    from .tracing import ProjectTracer
+    from .tracing import ProjectTracer, _init_phoenix
 
     cfg = cfg or DEFAULT_CONFIG
     editorial_paths = cfg.editorial_project(project_name)
     editorial_paths.ensure_dirs()
 
-    tracer = ProjectTracer(editorial_paths.root)
+    _init_phoenix()
+    tracer = ProjectTracer(editorial_paths.root, max_cost_usd=max_cost)
 
     # Resolve style supplements from preset
     p1_supplement = style_preset.phase1_supplement if style_preset else None
@@ -1267,6 +1406,7 @@ def run_editorial_pipeline(
         user_context=user_context,
     )
     print(f"  Reviewed {len(reviews)} clips")
+    tracer.print_summary("Phase 1")
 
     # Manual briefing AFTER Phase 1 (non-Gemini path) — needs Phase 1 reviews
     # to generate smart questions about detected people and highlights.
@@ -1291,6 +1431,8 @@ def run_editorial_pipeline(
         style_supplement=p2_supplement,
     )
 
+    tracer.print_summary("Phase 2")
+
     # Phase 3 — visual monologue (if style preset has it)
     if has_phase3:
         print(f"[5/{total_phases}] Phase 3: Generating visual monologue...")
@@ -1303,6 +1445,7 @@ def run_editorial_pipeline(
             user_context=user_context,
             tracer=tracer,
         )
+        tracer.print_summary("Phase 3")
 
     tracer.print_summary("Pipeline Total")
     return output_path

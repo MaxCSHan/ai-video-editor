@@ -648,18 +648,26 @@ def cmd_analyze(args, cfg: Config):
         force = getattr(args, "force", False)
         interactive = not getattr(args, "no_interactive", False)
         visual = getattr(args, "visual", False)
-        output_path = run_editorial_pipeline(
-            source_dir=source_dir,
-            project_name=name,
-            provider=provider,
-            style=style,
-            cfg=cfg,
-            force=force,
-            interactive=interactive,
-            visual=visual,
-            style_preset=style_preset,
-            included_clips=meta.get("included_clips"),
-        )
+        from .tracing import CostLimitExceeded
+
+        try:
+            output_path = run_editorial_pipeline(
+                source_dir=source_dir,
+                project_name=name,
+                provider=provider,
+                style=style,
+                cfg=cfg,
+                force=force,
+                interactive=interactive,
+                visual=visual,
+                style_preset=style_preset,
+                included_clips=meta.get("included_clips"),
+                max_cost=getattr(args, "max_cost", None),
+            )
+        except CostLimitExceeded as e:
+            print(f"\n{RED}Cost limit reached:{RESET} {e}")
+            print("  Use --max-cost to increase the limit, or --dry-run to estimate first.")
+            sys.exit(1)
     else:
         # Descriptive pipeline
         pp = cfg.project(name)
@@ -1136,6 +1144,12 @@ def main():
     p_analyze.add_argument(
         "--preset",
         help="Style preset for creative direction (overrides project default)",
+    )
+    p_analyze.add_argument(
+        "--max-cost",
+        type=float,
+        metavar="USD",
+        help="Abort if cumulative LLM cost exceeds this amount (e.g., 0.50)",
     )
 
     # --- monologue ---

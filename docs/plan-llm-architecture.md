@@ -3,7 +3,8 @@
 **Status:** Planned (execute after codebase hardening batch 1-5)
 **Priority:** High — quality and cost are the primary bottlenecks
 **Created:** 2026-04-03
-**Depends on:** `plan-codebase-hardening.md` (Batches 1-5)
+**Updated:** 2026-04-03 — platform decision, dev-only design, agent readiness
+**Depends on:** `plan-codebase-hardening.md` (Batches 1-5) — **complete**
 
 ## Context
 
@@ -15,56 +16,185 @@ The current LLM integration works but has structural issues that make result qua
 4. **No cost guardrails** — no spending limit, no budget alerts, estimates disconnected from actuals.
 5. **Client constructed per-call** — `genai.Client()` instantiated 6+ times across the codebase.
 
-## Key Decision: Adopt LLM Observability Platform
+---
 
-The hand-rolled `tracing.py` should be replaced or supplemented with a proper LLM observability platform. This gives us structured tracing, evaluation, cost tracking, and debugging out of the box.
+## Platform Decision: Arize Phoenix
 
-### Options to Evaluate
+### Why Phoenix
 
-| Platform | Pricing | Key Features | Integration |
-|----------|---------|-------------|-------------|
-| **LangSmith** | Free tier (5K traces/mo), $39/seat/mo | Tracing, eval datasets, prompt playground, annotation queues | LangChain SDK or direct API |
-| **Langfuse** | Self-hosted (free) or cloud ($0 open-source tier) | Tracing, scoring, prompt management, cost tracking | OpenTelemetry-compatible, Python SDK |
-| **Braintrust** | Free tier (1K logs/mo) | Evals, scoring, prompt playground, dataset management | Python SDK, simple decorator-based |
-| **Phoenix (Arize)** | Open-source, self-hosted free | Tracing, eval, LLM-as-judge | OpenTelemetry-based |
-| **Weights & Biases Weave** | Free tier available | Tracing, eval, versioning | Python SDK |
+After evaluating 10 platforms (LangSmith, Langfuse, Opik, Phoenix, Braintrust, Helicone, Lunary, AgentOps, OpenLIT, Parea), **Arize Phoenix** is the best fit for VX based on these criteria:
 
-### Evaluation Criteria
+| Criterion | Phoenix | Why it wins |
+|---|---|---|
+| **Dev-only / optional** | `pip install arize-phoenix` — no Docker, no accounts, no API keys | Lowest-friction optional dep. Users who just run `vx` never see it. |
+| **CLI debuggability** | Zero-auth local access, returns **pandas DataFrames** | Claude Code can fetch+analyze traces with one-liner Python. No web UI needed. |
+| **Gemini support** | Auto-instrumentation via `openinference-instrumentation-google-genai` | 2 lines of setup, all `generate_content()` calls traced automatically. |
+| **Claude support** | Auto-instrumentation via `openinference-instrumentation-anthropic` | Same pattern for Claude `messages.create()`. |
+| **Agent-ready** | OpenTelemetry spans are inherently hierarchical | Any future agent framework (LangGraph, custom loops) works with OTel nesting. |
+| **Cost** | Apache 2.0, fully free, self-hosted, no feature gates | No limits, no cloud dependency. |
+| **Maturity** | ~8K GitHub stars, active development | Solid community, backed by Arize AI. |
 
-1. **Free/open-source option** — self-hosted or generous free tier (this is a personal project)
-2. **Gemini + Claude support** — must trace both providers
-3. **Structured output evaluation** — can score JSON responses against schemas
-4. **Minimal integration overhead** — decorator or context manager, not framework lock-in
-5. **Cost tracking built-in** — per-model cost aggregation
-6. **Eval datasets** — ability to build golden datasets for regression testing
-7. **Prompt versioning** — track prompt changes and their quality impact
+### Alternatives Considered
 
-### Recommendation
+| Platform | Why not primary | When to reconsider |
+|---|---|---|
+| **Langfuse** (22K stars, MIT) | Requires Docker + Postgres for self-host. Can't filter traces by arbitrary metadata via API — only tags. Needs API keys even locally. | If we need cloud-hosted dashboards for sharing with collaborators. |
+| **Opik** (4K stars, Apache 2.0) | Best metadata filtering (`filter_string`), uniquely captures video attachments in traces. But requires Docker for self-host. | If video-in-trace debugging becomes critical for diagnosing Phase 1 quality. |
+| **LangSmith** | Most mature, but LangChain ecosystem lock-in. Proprietary. | If we adopt LangGraph as agent framework. |
 
-**Langfuse** is the strongest fit: open-source, self-hosted option (Docker Compose), generous free cloud tier, OpenTelemetry-compatible, works with any LLM provider, has cost tracking and evaluation built in. No framework lock-in.
+### Design Principle: Dev-Only Tracing
 
-**LangSmith** is the most mature but requires LangChain ecosystem buy-in for full benefit.
+**Users who just run `vx` should never need to install or configure tracing.**
 
-**Action:** Evaluate Langfuse and LangSmith side-by-side with a small proof-of-concept (trace one Phase 1 call through each) before committing.
+Tracing is a dev/debugging tool. The integration must be:
+1. **Optional dependency** — not in core `[project.dependencies]`
+2. **Graceful degradation** — if Phoenix not installed, everything works exactly as before
+3. **Zero config for users** — no env vars, no accounts, no Docker
+4. **Lazy initialization** — Phoenix only starts when a dev explicitly enables it
+
+```toml
+# pyproject.toml
+[project.optional-dependencies]
+tracing = [
+    "arize-phoenix>=8.0",
+    "openinference-instrumentation-google-genai",
+    "openinference-instrumentation-anthropic",
+]
+dev = ["ruff", "pytest", "arize-phoenix", "openinference-instrumentation-google-genai", "openinference-instrumentation-anthropic"]
+```
+
+```python
+# tracing.py — initialization (dev-only, no-op for users)
+_phoenix_initialized = False
+
+def _init_phoenix():
+    """Start Phoenix tracing if installed. No-op otherwise."""
+    global _phoenix_initialized
+    if _phoenix_initialized:
+        return
+    _phoenix_initialized = True
+    try:
+        import phoenix as px
+        from phoenix.otel import register
+        px.launch_app(run_in_thread=True)  # background, non-blocking
+        register(project_name="vx-pipeline")
+
+        # Auto-instrument Gemini
+        from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
+        GoogleGenAIInstrumentor().instrument()
+
+        # Auto-instrument Claude
+        from openinference.instrumentation.anthropic import AnthropicInstrumentor
+        AnthropicInstrumentor().instrument()
+    except ImportError:
+        pass  # Phoenix not installed — user mode, skip silently
+```
+
+### CLI Debuggability — How Claude Code Uses Traces
+
+The key advantage of Phoenix for this project: **I (Claude Code) can programmatically fetch and analyze traces during a coding session** without needing a browser or web UI.
+
+```python
+# Example: debug why Phase 2 produced bad timestamps
+import phoenix as px
+client = px.Client()
+
+# Get all LLM spans from the last run
+spans = client.get_spans(project_name="vx-pipeline")
+llm_spans = spans[spans["span_kind"] == "LLM"]
+
+# Find the Phase 2 call
+phase2 = llm_spans[llm_spans["name"].str.contains("phase2")]
+
+# See what prompt was sent
+print(phase2["attributes.llm.input_messages"].values[0])
+
+# See what the LLM returned
+print(phase2["attributes.llm.output_messages"].values[0])
+
+# Check token usage and cost
+print(f"Tokens: {phase2['attributes.llm.token_count.total'].values[0]}")
+
+# Get all spans for a specific clip
+clip_spans = spans[spans["attributes"].apply(
+    lambda a: a.get("clip_id") == "20260330_C0059"
+)]
+
+# Export for deeper analysis
+spans.to_json("debug_traces.jsonl", orient="records", lines=True)
+```
+
+This means when you say "the storyboard for my-trip has bad timestamps, debug it", I can:
+1. Fetch the Phase 2 trace
+2. Read the exact prompt and response
+3. Identify where timestamps went wrong
+4. Suggest prompt or validation fixes
+
+### Agent Framework Readiness
+
+Phoenix uses OpenTelemetry spans, which are inherently hierarchical. This means:
+
+**Current state** — each LLM call is a flat span:
+```
+trace: vx-analyze
+  └─ span: phase1/clip_C0059 (LLM call)
+  └─ span: phase1/clip_C0073 (LLM call)
+  └─ span: phase2 (LLM call)
+```
+
+**Future agent state** — self-correcting loops nest naturally:
+```
+trace: vx-analyze
+  └─ span: self_correcting_phase2
+      └─ span: attempt_0
+      │   └─ span: call_gemini (LLM)
+      │   └─ span: validate_storyboard
+      └─ span: attempt_1
+      │   └─ span: call_gemini (LLM, with feedback)
+      │   └─ span: validate_storyboard
+      └─ span: attempt_2 (success)
+          └─ span: call_gemini (LLM, with feedback)
+          └─ span: validate_storyboard
+```
+
+No framework needed — just OTel context managers on existing functions:
+```python
+from opentelemetry import trace
+tracer = trace.get_tracer("vx.editorial")
+
+def self_correcting_phase2(reviews, ...):
+    with tracer.start_as_current_span("self_correcting_phase2") as span:
+        for attempt in range(3):
+            with tracer.start_as_current_span(f"attempt_{attempt}"):
+                storyboard = call_gemini_phase2(reviews, ...)  # auto-traced by instrumentor
+                with tracer.start_as_current_span("validate"):
+                    warnings = validate_storyboard(storyboard, reviews)
+                if not warnings:
+                    span.set_attribute("attempts", attempt + 1)
+                    return storyboard
+```
+
+If we later adopt a framework (LangGraph, Instructor, etc.), it plugs into the same OTel pipeline. Phoenix traces it all.
 
 ---
 
 ## Task List
 
-### Phase A: Observability Platform Integration
+### Phase A: Phoenix Integration (Dev-Only)
 
-- [ ] **A.1** Evaluate Langfuse vs LangSmith — trace one Phase 1 + one Phase 2 call through each, compare DX
-- [ ] **A.2** Integrate chosen platform into `traced_gemini_generate()` as primary tracing backend
-- [ ] **A.3** Add Claude call tracing (currently untraced — `client.messages.create()` calls in `editorial_agent.py` lines 615, 769, 921)
-- [ ] **A.4** Migrate cost tracking from hand-rolled `COST_PER_1M_TOKENS` to platform's built-in cost
-- [ ] **A.5** Keep `traces.jsonl` as local fallback (offline mode) but make platform the primary
+- [ ] **A.1** Add `arize-phoenix` + OpenInference instrumentors to `[project.optional-dependencies]` in `pyproject.toml`
+- [ ] **A.2** Add `_init_phoenix()` to `tracing.py` — lazy init, graceful ImportError fallback
+- [ ] **A.3** Call `_init_phoenix()` at pipeline start (`run_editorial_pipeline()`) — only when `VX_TRACING=1` env var is set
+- [ ] **A.4** Add `traced_claude_generate()` wrapper (currently Claude calls are untraced)
+- [ ] **A.5** Keep `traces.jsonl` + `ProjectTracer` as always-on local fallback — Phoenix supplements, doesn't replace
+- [ ] **A.6** Add `vx debug-traces` CLI command — thin wrapper around `px.Client().get_spans()` for quick terminal inspection
 
 ### Phase B: Retry & Resilience
 
 - [ ] **B.1** Add automatic retry with exponential backoff to `traced_gemini_generate()`
 - [ ] **B.2** Distinguish retryable (429, 500, 502, 503, network timeout) from permanent errors
 - [ ] **B.3** Add retry wrapper for Claude `client.messages.create()` calls
-- [ ] **B.4** Shared LLM client factory — replace 6+ `genai.Client()` instantiations with `_get_gemini_client()`
+- [ ] **B.4** Shared LLM client factory — replace `genai.Client()` instantiations with `_get_gemini_client()`
 - [ ] **B.5** Rate limiting — respect Gemini's QPM limits in parallel Phase 1 workers
 
 ### Phase C: Response Quality Validation
@@ -73,7 +203,7 @@ The hand-rolled `tracing.py` should be replaced or supplemented with a proper LL
 - [ ] **C.2** Phase 2 validation: clip IDs exist, segments have valid timestamps, total duration sanity
 - [ ] **C.3** Transcription validation: timestamps within clip duration, non-empty for clips with known speech
 - [ ] **C.4** Auto-retry on validation failure — inject validation feedback into retry prompt
-- [ ] **C.5** Log validation results to observability platform as quality scores
+- [ ] **C.5** Log validation results as OTel span attributes (visible in Phoenix traces)
 
 ### Phase D: Cost Management
 
@@ -86,7 +216,7 @@ The hand-rolled `tracing.py` should be replaced or supplemented with a proper LL
 
 - [ ] **E.1** Build golden dataset: 3-5 diverse projects with manually scored storyboards
 - [ ] **E.2** Define quality metrics: timestamp accuracy, segment coverage, narrative coherence
-- [ ] **E.3** Automated eval pipeline: run analysis on golden dataset, score against baselines
+- [ ] **E.3** Automated eval pipeline: run analysis on golden dataset, score against baselines (Phoenix evals)
 - [ ] **E.4** Prompt regression testing: detect when prompt changes degrade output quality
 - [ ] **E.5** Provider comparison: run same footage through Gemini vs Claude, compare scores
 
@@ -94,68 +224,60 @@ The hand-rolled `tracing.py` should be replaced or supplemented with a proper LL
 
 ## Detailed Design
 
-### Phase A: Observability Platform Integration
+### Phase A: Phoenix Integration
 
 #### Current tracing architecture
 
 ```
-editorial_agent.py ──→ traced_gemini_generate() ──→ traces.jsonl (append-only)
-                                                  ──→ ProjectTracer (in-memory)
+editorial_agent.py ──→ traced_gemini_generate() ──→ traces.jsonl (append-only, always)
+                                                  ──→ ProjectTracer (in-memory summary)
                                                   ──→ print_summary()
+
+Claude calls ──→ untraced
 ```
 
 #### Target architecture
 
 ```
-editorial_agent.py ──→ traced_gemini_generate() ──→ Langfuse/LangSmith (primary)
-                                                  ──→ traces.jsonl (offline fallback)
-                                                  ──→ ProjectTracer (in-memory summary)
+tracing.py: _init_phoenix()  ←── only when VX_TRACING=1
+    │
+    ├── GoogleGenAIInstrumentor()  ←── auto-traces all Gemini calls
+    └── AnthropicInstrumentor()    ←── auto-traces all Claude calls
+                │
+                ▼
+editorial_agent.py ──→ traced_gemini_generate() ──→ traces.jsonl (always, unchanged)
+                   │                             ──→ ProjectTracer (always, unchanged)
+                   │                             ──→ Phoenix (when available)
+                   │
+                   ──→ traced_claude_generate()  ──→ same three backends
+                   │
+                   ──→ OTel spans for pipeline   ──→ Phoenix (hierarchical view)
+                       stages (preprocess,
+                       Phase 1, Phase 2, etc.)
 
-Claude calls ──→ traced_claude_generate() ──→ same backends
+vx debug-traces ──→ px.Client().get_spans() ──→ terminal output (DataFrame)
 ```
 
-**Key changes to `tracing.py`:**
-- Add `traced_claude_generate()` — currently Claude calls are completely untraced
-- Both wrappers send traces to observability platform when available
-- Fallback to `traces.jsonl` when platform unavailable (offline mode)
-- Cost tracking delegated to platform (more accurate, auto-updated pricing)
-- Quality scores attached to traces after validation (Phase C)
+**Key design decisions:**
+- `traces.jsonl` + `ProjectTracer` remain **always-on** — they work without Phoenix for end users
+- Phoenix auto-instrumentors handle Gemini/Claude tracing transparently — no changes to existing `generate_content()` calls
+- `VX_TRACING=1` env var gates Phoenix initialization — off by default
+- `vx debug-traces` is a dev CLI command for terminal-based trace inspection
+- Future agent spans use OTel `tracer.start_as_current_span()` — nests under Phoenix traces automatically
 
-**Integration approach (Langfuse example):**
-```python
-from langfuse import Langfuse
+#### Activation flow
 
-_langfuse = None
-
-def _get_langfuse() -> Langfuse | None:
-    global _langfuse
-    if _langfuse is None:
-        try:
-            _langfuse = Langfuse()  # reads LANGFUSE_* env vars
-        except Exception:
-            return None
-    return _langfuse
-
-def traced_gemini_generate(...):
-    lf = _get_langfuse()
-    generation = lf.generation(name=phase, model=model, ...) if lf else None
-    try:
-        response = client.models.generate_content(...)
-        if generation:
-            generation.end(output=response.text, usage={...})
-        # ... existing local trace recording ...
-        return response
-    except Exception as e:
-        if generation:
-            generation.end(status_message=str(e), level="ERROR")
-        raise
+```
+User (normal):     vx analyze my-trip          → no Phoenix, traces.jsonl only
+Dev (debugging):   VX_TRACING=1 vx analyze ... → Phoenix starts, full tracing
+Dev (reviewing):   vx debug-traces my-trip     → fetch traces from Phoenix
+Claude Code:       python -c "import phoenix..." → programmatic trace access
 ```
 
 ### Phase B: Retry with Exponential Backoff
 
 ```python
 RETRYABLE_EXCEPTIONS = (
-    # google.api_core.exceptions
     "TooManyRequests",       # 429
     "ServiceUnavailable",    # 503
     "InternalServerError",   # 500
@@ -225,12 +347,11 @@ def validate_storyboard(sb: EditorialStoryboard, reviews: list[dict]) -> tuple[l
 ```
 
 **Auto-retry with feedback:**
-When validation finds critical issues, retry with feedback injected:
 ```python
 if is_critical and attempt < max_validation_retries:
     feedback = "\n".join(f"- {w}" for w in warnings)
     prompt += f"\n\nYour previous response had these issues:\n{feedback}\nPlease fix them."
-    # retry LLM call
+    # retry LLM call — Phoenix shows this as a new child span under the attempt
 ```
 
 ### Phase D: Cost Guard
@@ -262,24 +383,27 @@ CLI: `vx analyze my-trip --max-cost 1.00`
 ## Dependency Order
 
 ```
-Phase A (Observability) ──→ Phase C.5 (quality scores to platform)
-                         ──→ Phase E (eval datasets in platform)
-
-Phase B (Retry)         ──→ Phase C.4 (auto-retry on validation failure)
-
-Phase C (Validation)    ──→ independent core, but enhanced by A and B
-
-Phase D (Cost)          ──→ independent
-
+Phase B (Retry)         ──→ no external deps, quickest win
+Phase A (Phoenix)       ──→ enables C.5 and E
+Phase C (Validation)    ──→ uses B for auto-retry, uses A for trace logging
+Phase D (Cost)          ──→ independent, slot in anytime
 Phase E (Eval)          ──→ requires A + C
 ```
 
 Suggested execution order: **B → A → C → D → E**
-- B (retry) is quickest win, no external deps
-- A (observability) enables everything else
-- C (validation) is the biggest quality lever
-- D (cost) is independent, slot in anytime
-- E (eval) requires A+C foundation
+
+---
+
+## Future: Agent Self-Correction
+
+When we add agent loops (self-reviewing, timestamp correction), the architecture is already ready:
+
+1. **Tracing** — Phoenix OTel spans nest agent steps automatically
+2. **Framework** — No heavy framework needed. Options if we want one:
+   - **Instructor** — structured output + Pydantic validation + auto-retry (lightest, matches our existing Pydantic models)
+   - **Tenacity** — retry library, already covers 80% of what we need
+   - **LangGraph** — if we need complex multi-agent workflows later (overkill for now)
+3. **Debugging** — Claude Code can inspect each retry attempt's prompt/response via `px.Client().get_spans()`
 
 ---
 
@@ -288,5 +412,6 @@ Suggested execution order: **B → A → C → D → E**
 1. **Quality:** Storyboard validation catches >80% of invalid timestamps before reaching the user
 2. **Cost:** Actual cost within 20% of estimate; `--max-cost` prevents overspend
 3. **Reliability:** Transient API failures auto-recovered without user intervention
-4. **Observability:** Every LLM call traced with input/output/cost/quality in platform dashboard
-5. **Eval:** Can compare quality across prompt versions and providers on golden dataset
+4. **Observability:** Every LLM call traced with input/output/cost/quality (Phoenix when enabled, traces.jsonl always)
+5. **Dev ergonomics:** Claude Code can diagnose LLM quality issues from terminal in <30 seconds
+6. **User transparency:** End users never see or need to install tracing dependencies
