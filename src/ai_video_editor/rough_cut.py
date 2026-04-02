@@ -37,11 +37,15 @@ def _resolve_clip_source(
     clip_id: str,
     editorial_paths: EditorialProjectPaths,
     source_map: dict[str, Path] | None = None,
+    proxy_fallback: bool = False,
 ) -> Path | None:
     """Resolve the original source file for a clip.
 
     Prefers source_path from manifest (no copy needed). Falls back to
     the legacy source/ symlink/copy dir for older projects.
+
+    When *proxy_fallback* is True and no original source is reachable,
+    returns the proxy video as a last resort (offline / proxy mode).
     """
     if source_map and clip_id in source_map:
         p = source_map[clip_id]
@@ -55,6 +59,15 @@ def _resolve_clip_source(
         files = [f for f in source_dir.iterdir() if f.is_file()]
         if files:
             return files[0]
+
+    # Proxy fallback for offline mode
+    if proxy_fallback:
+        proxy_dir = clip_paths.proxy
+        if proxy_dir.exists():
+            proxies = list(proxy_dir.glob("*.mp4"))
+            if proxies:
+                return proxies[0]
+
     return None
 
 
@@ -62,20 +75,28 @@ def validate_edl(
     storyboard: EditorialStoryboard,
     editorial_paths: EditorialProjectPaths,
     source_map: dict[str, Path] | None = None,
+    manifest_durations: dict[str, float] | None = None,
 ) -> list[str]:
-    """Validate segments against actual clip durations. Clamps out-of-bounds in-place. Returns warnings."""
+    """Validate segments against actual clip durations. Clamps out-of-bounds in-place. Returns warnings.
+
+    When *manifest_durations* is provided (offline mode), uses those
+    cached durations instead of probing source files.
+    """
     warnings = []
     clip_durations: dict[str, float] = {}
 
     for seg in storyboard.segments:
         # Get clip duration (cached)
         if seg.clip_id not in clip_durations:
-            source = _resolve_clip_source(seg.clip_id, editorial_paths, source_map)
-            if source:
-                clip_durations[seg.clip_id] = get_video_duration(source)
+            if manifest_durations and seg.clip_id in manifest_durations:
+                clip_durations[seg.clip_id] = manifest_durations[seg.clip_id]
             else:
-                warnings.append(f"#{seg.index}: source not found for {seg.clip_id}")
-                continue
+                source = _resolve_clip_source(seg.clip_id, editorial_paths, source_map)
+                if source:
+                    clip_durations[seg.clip_id] = get_video_duration(source)
+                else:
+                    warnings.append(f"#{seg.index}: source not found for {seg.clip_id}")
+                    continue
 
         clip_dur = clip_durations[seg.clip_id]
 
@@ -666,11 +687,13 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
         }
 
     # Size mapping — sized to match typical silent vlog text (large, readable)
+    # Floors are scaled proportionally so text stays correct at low-res (e.g. 360p proxy)
     base_h = output_format.height if output_format else 1080
+    floor_scale = base_h / 1080
     size_map = {
-        "small": max(28, int(base_h * 0.035)),
-        "medium": max(38, int(base_h * 0.046)),
-        "large": max(50, int(base_h * 0.056)),
+        "small": max(int(28 * floor_scale), int(base_h * 0.035)),
+        "medium": max(int(38 * floor_scale), int(base_h * 0.046)),
+        "large": max(int(50 * floor_scale), int(base_h * 0.056)),
     }
 
     filters = []
@@ -745,8 +768,9 @@ def _build_caption_drawtext(
         latin_font = _resolve_font_path("sans-serif")
 
     base_h = output_format.height if output_format else 1080
-    normal_font_size = max(28, int(base_h * 0.038))
-    subordinate_font_size = max(22, int(base_h * 0.030))
+    floor_scale = base_h / 1080
+    normal_font_size = max(int(28 * floor_scale), int(base_h * 0.038))
+    subordinate_font_size = max(int(22 * floor_scale), int(base_h * 0.030))
 
     filters = []
     for ts in transcript_segments:
@@ -935,8 +959,13 @@ def assemble_rough_cut(
     clip_format_map: dict[str, dict] | None = None,
     monologue=None,
     burn_captions: bool = False,
+    proxy_mode: bool = False,
 ) -> tuple[Path, list[str]]:
-    """Assemble a rough cut video from the structured storyboard. Returns (path, warnings)."""
+    """Assemble a rough cut video from the structured storyboard. Returns (path, warnings).
+
+    When *proxy_mode* is True, falls back to proxy files when original
+    sources are unavailable and names the output ``rough_cut_proxy.mp4``.
+    """
     segments_dir = version_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -956,7 +985,9 @@ def assemble_rough_cut(
     expected_durations: dict[int, float] = {}  # index → expected duration for Layer 1
 
     for seg in storyboard.segments:
-        source = _resolve_clip_source(seg.clip_id, editorial_paths, source_map)
+        source = _resolve_clip_source(
+            seg.clip_id, editorial_paths, source_map, proxy_fallback=proxy_mode
+        )
         if not source:
             warnings.append(f"#{seg.index}: source not found for {seg.clip_id}")
             continue
@@ -1059,7 +1090,8 @@ def assemble_rough_cut(
         print("    All segments are compatible for concatenation")
 
     # Concatenate
-    rough_cut_path = version_dir / "rough_cut.mp4"
+    rc_name = "rough_cut_proxy.mp4" if proxy_mode else "rough_cut.mp4"
+    rough_cut_path = version_dir / rc_name
     concat_list = segments_dir / "concat_list.txt"
     concat_list.write_text("\n".join(f"file '{seg.resolve()}'" for seg in segment_files) + "\n")
 
@@ -1139,10 +1171,14 @@ def run_rough_cut(
     storyboard_json_path: Path,
     editorial_paths: EditorialProjectPaths,
     monologue=None,
+    proxy_mode: bool = False,
 ) -> dict:
     """Load structured storyboard → validate → ffmpeg assembly → HTML preview.
 
     Writes into the same exports/vN/ dir as the storyboard's analyze version.
+
+    When *proxy_mode* is True, uses cached proxy files and manifest
+    durations instead of original source files (offline mode).
     """
     storyboard = EditorialStoryboard.model_validate_json(storyboard_json_path.read_text())
 
@@ -1152,6 +1188,18 @@ def run_rough_cut(
     # Load output format and clip format info
     output_format = _load_output_format(editorial_paths)
     clip_format_map = _build_clip_format_map(editorial_paths)
+
+    # Build manifest durations for offline validation
+    manifest_durations: dict[str, float] | None = None
+    if proxy_mode:
+        manifest_path = editorial_paths.master_manifest
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            manifest_durations = {
+                clip["clip_id"]: clip["duration_sec"]
+                for clip in manifest.get("clips", [])
+                if "duration_sec" in clip
+            }
 
     # Derive version from storyboard JSON filename (editorial_gemini_v4.json → 4)
     import re
@@ -1163,8 +1211,10 @@ def run_rough_cut(
         v = next_version(editorial_paths.root, "cut")
     vdir = versioned_dir(editorial_paths.exports, v)
     print(f"  Export version: v{v}")
+    if proxy_mode:
+        print("  PROXY MODE: Using cached proxy files (source drive offline)")
     print(f"  Loaded storyboard: {storyboard.title} ({len(storyboard.segments)} segments)")
-    if output_format:
+    if output_format and not proxy_mode:
         sw_codec = output_format.codec if output_format.codec != "auto" else "libx264"
         resolved_enc = get_hwenc_codec(sw_codec)
         enc_label = (
@@ -1176,12 +1226,14 @@ def run_rough_cut(
             f"  Output format: {output_format.label} ({output_format.width}x{output_format.height}"
             f" @ {output_format.fps}fps, {enc_label}, fit={output_format.fit_mode})"
         )
-    else:
+    elif not proxy_mode:
         print("  Output format: default (no normalization)")
 
     # Validate
     print("  Validating...")
-    validation_warnings = validate_edl(storyboard, editorial_paths, source_map)
+    validation_warnings = validate_edl(
+        storyboard, editorial_paths, source_map, manifest_durations=manifest_durations
+    )
     if validation_warnings:
         for w in validation_warnings:
             print(f"    WARNING: {w}")
@@ -1191,15 +1243,23 @@ def run_rough_cut(
     # Assemble
     overlay_label = " (with text overlays + captions)" if monologue else ""
     print(f"\n  Extracting segments{overlay_label}...")
+    # In proxy mode, use a lightweight OutputFormat matching proxy dimensions
+    # so text overlays are sized correctly for 360p instead of defaulting to 1080p
+    effective_format = output_format
+    if proxy_mode:
+        effective_format = OutputFormat(
+            width=360, height=240, fps=1, label="Proxy 360p", codec="libx264"
+        )
     rough_cut_path, assembly_warnings = assemble_rough_cut(
         storyboard,
         editorial_paths,
         vdir,
         source_map,
-        output_format=output_format,
+        output_format=effective_format,
         clip_format_map=clip_format_map,
         monologue=monologue,
         burn_captions=monologue is not None,
+        proxy_mode=proxy_mode,
     )
     all_warnings = validation_warnings + assembly_warnings
 

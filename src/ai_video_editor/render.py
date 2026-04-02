@@ -127,7 +127,8 @@ def _resolve_clip_source(clip_id: str, clips_dir: Path) -> Path | None:
         files = [f for f in source_dir.iterdir() if f.is_file()]
         if files:
             return files[0]
-    return None
+    # Proxy fallback when source drive is offline
+    return _resolve_clip_proxy(clip_id, clips_dir)
 
 
 def _resolve_clip_proxy(clip_id: str, clips_dir: Path) -> Path | None:

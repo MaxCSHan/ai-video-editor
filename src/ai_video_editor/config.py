@@ -191,11 +191,18 @@ class EditorialProjectPaths:
         return ProjectPaths(root=self.clips_dir / clip_id)
 
     def discover_clips(self) -> list[str]:
-        """List clip IDs that have been ingested."""
+        """List clip IDs that have been ingested.
+
+        Accepts clips with either a source/ or proxy/ directory so that
+        clips remain discoverable when the source drive is offline
+        (broken symlinks in source/).
+        """
         if not self.clips_dir.exists():
             return []
         return sorted(
-            d.name for d in self.clips_dir.iterdir() if d.is_dir() and (d / "source").exists()
+            d.name
+            for d in self.clips_dir.iterdir()
+            if d.is_dir() and ((d / "source").exists() or (d / "proxy").exists())
         )
 
     def ensure_dirs(self):

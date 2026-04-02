@@ -346,12 +346,16 @@ def _project_actions(name, cfg):
     ep = cfg.editorial_project(name)
 
     while True:
+        # Detect offline source drive
+        source_dir = meta.get("source_dir", "")
+        offline = bool(source_dir) and not Path(source_dir).is_dir()
+
         # Check state
         has_storyboard = (
             any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
         )
         has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
-        has_rough_cut = any(ep.exports.glob("*/rough_cut.mp4")) if ep.exports.exists() else False
+        has_rough_cut = any(ep.exports.glob("*/rough_cut*.mp4")) if ep.exports.exists() else False
 
         has_monologue = (
             any(ep.storyboard.glob("monologue_*_latest.json")) if ep.storyboard.exists() else False
@@ -364,19 +368,31 @@ def _project_actions(name, cfg):
             _sp = _get_preset(preset_key)
             has_preset_phase3 = _sp.has_phase3 if _sp else False
 
+        has_manifest = ep.master_manifest.exists()
+
         choices = []
         if has_preview:
             choices.append("Open preview in browser")
         if has_storyboard:
             choices.append("Regenerate preview")
-            choices.append("Assemble rough cut")
+            if offline:
+                choices.append("Assemble rough cut (proxy)")
+            else:
+                choices.append("Assemble rough cut")
             if has_monologue:
-                choices.append("Assemble rough cut with text overlays")
+                if offline:
+                    choices.append("Assemble rough cut with text overlays (proxy)")
+                else:
+                    choices.append("Assemble rough cut with text overlays")
         if has_storyboard and has_preset_phase3:
             choices.append("Generate visual monologue")
-        choices.append("Manage clips")
+        if not offline:
+            choices.append("Manage clips")
         choices.append("Transcribe audio")
-        choices.append("Run analysis (Phase 1 + 2)")
+        if offline and has_manifest:
+            choices.append("Run analysis (Phase 1 + 2)")
+        elif not offline:
+            choices.append("Run analysis (Phase 1 + 2)")
         choices.append("Edit briefing (AI-guided)")
         choices.append("Edit briefing (manual)")
         choices.append("Set style preset")
@@ -385,7 +401,11 @@ def _project_actions(name, cfg):
             choices.append("Open rough cut video")
         choices.append(questionary.Choice("← Back", value="back"))
 
-        print(f"\n  Project: {name}")
+        if offline:
+            print(f"\n  Project: {name}  [OFFLINE]")
+            print(f"  Source offline: {source_dir}")
+        else:
+            print(f"\n  Project: {name}")
         action = questionary.select(
             "Action:",
             choices=choices,
@@ -402,7 +422,7 @@ def _project_actions(name, cfg):
                 if preview.exists():
                     subprocess.run(["open", str(preview)])
         elif action == "Open rough cut video":
-            cuts = sorted(ep.exports.glob("*/rough_cut.mp4"), reverse=True)
+            cuts = sorted(ep.exports.glob("*/rough_cut*.mp4"), reverse=True)
             if cuts:
                 subprocess.run(["open", str(cuts[0])])
         elif action == "Regenerate preview":
@@ -434,26 +454,38 @@ def _project_actions(name, cfg):
                 print(f"\n  Preview v{v} generated: {preview_path}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(preview_path)])
-        elif action == "Assemble rough cut":
+        elif action in ("Assemble rough cut", "Assemble rough cut (proxy)"):
             from .rough_cut import run_rough_cut
 
+            is_proxy = action.endswith("(proxy)")
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
-                print("\n  Assembling rough cut...\n")
-                result = run_rough_cut(json_files[0], ep)
+                if is_proxy:
+                    print("\n  Assembling PROXY rough cut (source drive offline)...\n")
+                else:
+                    print("\n  Assembling rough cut...\n")
+                result = run_rough_cut(json_files[0], ep, proxy_mode=is_proxy)
                 print(f"\n  Done! v{result['version']}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(result["preview"])])
-        elif action == "Assemble rough cut with text overlays":
+        elif action in (
+            "Assemble rough cut with text overlays",
+            "Assemble rough cut with text overlays (proxy)",
+        ):
             from .rough_cut import run_rough_cut
             from .models import MonologuePlan
 
+            is_proxy = action.endswith("(proxy)")
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             mono_files = sorted(ep.storyboard.glob("monologue_*_latest.json"))
             if json_files and mono_files:
                 monologue = MonologuePlan.model_validate_json(mono_files[0].read_text())
-                print(f"\n  Assembling rough cut with {len(monologue.overlays)} text overlays...\n")
-                result = run_rough_cut(json_files[0], ep, monologue=monologue)
+                label = f"with {len(monologue.overlays)} text overlays"
+                if is_proxy:
+                    print(f"\n  Assembling PROXY rough cut {label} (source drive offline)...\n")
+                else:
+                    print(f"\n  Assembling rough cut {label}...\n")
+                result = run_rough_cut(json_files[0], ep, monologue=monologue, proxy_mode=is_proxy)
                 print(f"\n  Done! v{result['version']}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(result["preview"])])
@@ -632,6 +664,7 @@ def _run_analyze(name, meta, cfg):
     """Run the full analysis pipeline."""
     from .editorial_agent import (
         discover_source_clips,
+        discover_clips_from_manifest,
         preprocess_all_clips,
         build_master_manifest,
         run_phase1_gemini,
@@ -645,6 +678,7 @@ def _run_analyze(name, meta, cfg):
     provider = meta.get("provider", "gemini")
     style = meta.get("style", "vlog")
     source_dir = Path(meta["source_dir"])
+    offline = not source_dir.is_dir()
     tracer = ProjectTracer(ep.root)
 
     # Resolve style preset
@@ -660,22 +694,37 @@ def _run_analyze(name, meta, cfg):
     if style_preset:
         print(f"\n  Style preset: {style_preset.label}")
 
-    all_clips = discover_source_clips(source_dir)
-    # Only process clips included in the project (respects manage-clips changes)
-    included = meta.get("included_clips")
-    if included:
-        included_set = set(included)
-        clips = [c for c in all_clips if c.stem in included_set]
+    if offline:
+        # Offline mode: load clip list from manifest instead of scanning source dir
+        print("\n  OFFLINE MODE: Source drive unavailable, skipping preprocessing.")
+        print("  Using cached project data.\n")
+        clip_metadata, manifest = discover_clips_from_manifest(ep)
+        if not clip_metadata:
+            print("  No manifest found — run analysis with source drive connected first.\n")
+            return
+        # Filter to included clips
+        included = meta.get("included_clips")
+        if included:
+            included_set = set(included)
+            clip_metadata = [c for c in clip_metadata if c["clip_id"] in included_set]
+        print(f"  {len(clip_metadata)} clips (from cached manifest)\n")
     else:
-        clips = all_clips
-    print(f"\n  {len(clips)} clips, preprocessing...\n")
-    clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
-    manifest = build_master_manifest(clip_metadata, ep, name)
-
-    # Format analysis + selection
-    clip_metadata, output_format = _run_format_selection(clip_metadata, meta, ep)
-    if len(clip_metadata) != manifest["clip_count"]:
+        all_clips = discover_source_clips(source_dir)
+        # Only process clips included in the project (respects manage-clips changes)
+        included = meta.get("included_clips")
+        if included:
+            included_set = set(included)
+            clips = [c for c in all_clips if c.stem in included_set]
+        else:
+            clips = all_clips
+        print(f"\n  {len(clips)} clips, preprocessing...\n")
+        clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
         manifest = build_master_manifest(clip_metadata, ep, name)
+
+        # Format analysis + selection
+        clip_metadata, output_format = _run_format_selection(clip_metadata, meta, ep)
+        if len(clip_metadata) != manifest["clip_count"]:
+            manifest = build_master_manifest(clip_metadata, ep, name)
 
     use_smart_briefing = bool(os.environ.get("GEMINI_API_KEY"))
 
@@ -961,34 +1010,21 @@ def _run_format_selection(clip_metadata, meta, ep):
 
 
 def _ask_visual_phase2(ep, reviews):
-    """Show cache status and ask about visual Phase 2. Returns bool.
+    """Show concat status and ask about visual Phase 2. Returns bool.
 
-    Visual mode is only available when clip count <= 10 (Gemini limit: 10 videos
-    per prompt). For larger projects, attaching a subset would bias the edit toward
-    those clips, so we skip visual mode entirely and rely on text reviews.
+    Proxies are concatenated into bundles (≤40 min each) to work around Gemini's
+    10-video-per-prompt limit. Works for any number of clips.
     """
-    from .file_cache import load_file_api_cache, get_cached_uri
-    from .editorial_agent import MAX_VISUAL_VIDEOS
-
     unique_ids = list(dict.fromkeys(r.get("clip_id", "") for r in reviews))
     total = len(unique_ids)
 
-    if total > MAX_VISUAL_VIDEOS:
-        print(
-            f"\n  Skipping visual Phase 2: {total} clips exceeds Gemini limit "
-            f"of {MAX_VISUAL_VIDEOS} videos per request."
-        )
-        print("  Phase 2 will use text reviews + transcripts (no video attachment).")
-        return False
+    # Check if concat bundles already exist
+    concat_dir = ep.root / "concat_proxies"
+    has_concat = concat_dir.exists() and list(concat_dir.glob("bundle_*.mp4"))
 
-    cache = load_file_api_cache(ep)
-    cached_count = sum(1 for cid in unique_ids if get_cached_uri(cache, cid))
-
-    print(f"\n  Visual Phase 2: {total} clips")
-    if cached_count == total:
-        print(f"  All {cached_count} proxy URIs cached (no upload needed)")
-    elif cached_count > 0:
-        print(f"  {cached_count} cached, {total - cached_count} need upload")
+    print(f"\n  Visual Phase 2: {total} clips (concatenated for Gemini)")
+    if has_concat:
+        print("  Concat bundles cached (no rebuild needed)")
 
     return questionary.confirm(
         "Include proxy videos in Phase 2? (AI sees footage, better edits)",

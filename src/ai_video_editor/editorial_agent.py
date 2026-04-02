@@ -60,6 +60,21 @@ def discover_source_clips(source_dir: Path) -> list[Path]:
     return clips
 
 
+def discover_clips_from_manifest(
+    editorial_paths: "EditorialProjectPaths",
+) -> tuple[list[dict], dict]:
+    """Load clip metadata from manifest.json for offline mode.
+
+    Returns (clip_metadata_list, manifest_dict).  Both are empty when
+    no manifest exists (project was never preprocessed).
+    """
+    manifest_path = editorial_paths.master_manifest
+    if not manifest_path.exists():
+        return [], {}
+    manifest = json.loads(manifest_path.read_text())
+    return manifest.get("clips", []), manifest
+
+
 # ---------------------------------------------------------------------------
 # Multi-clip preprocessing
 # ---------------------------------------------------------------------------
@@ -623,68 +638,8 @@ def run_phase1_claude(
 # ---------------------------------------------------------------------------
 
 
-MAX_VISUAL_VIDEOS = 10  # Gemini hard limit: max 10 videos per prompt
-
-
-def _upload_proxies_for_phase2(
-    client, clip_reviews, editorial_paths, types, max_videos=MAX_VISUAL_VIDEOS
-) -> tuple[list, list[str]]:
-    """Upload or reuse cached proxy videos for visual Phase 2.
-
-    Returns (parts, attached_clip_ids). Caps at max_videos (Gemini limit: 10).
-    Remaining clips still have text reviews in the prompt — only video is omitted.
-    """
-    cache = load_file_api_cache(editorial_paths)
-    parts = []
-    attached_ids = []
-    seen_clips = set()
-
-    for review in clip_reviews:
-        clip_id = review.get("clip_id", "")
-        if clip_id in seen_clips:
-            continue
-        seen_clips.add(clip_id)
-
-        if len(parts) >= max_videos:
-            continue  # count remaining clips but don't attach
-
-        # Try cached URI first
-        cached_uri = get_cached_uri(cache, clip_id)
-        if cached_uri:
-            parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
-            attached_ids.append(clip_id)
-            continue
-
-        # Upload proxy
-        proxy_dir = editorial_paths.clips_dir / clip_id / "proxy"
-        proxy_files = list(proxy_dir.glob("*_proxy.mp4")) if proxy_dir.exists() else []
-        if not proxy_files:
-            continue
-
-        print(f"    Uploading proxy: {clip_id}...")
-        video_file = client.files.upload(file=str(proxy_files[0]))
-
-        while video_file.state.name == "PROCESSING":
-            time.sleep(3)
-            video_file = client.files.get(name=video_file.name)
-
-        if video_file.state.name == "FAILED":
-            print(f"    WARNING: upload failed for {clip_id}, skipping")
-            continue
-
-        cache_file_uri(editorial_paths, clip_id, video_file.uri)
-        parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
-        attached_ids.append(clip_id)
-
-    total_unique = len(seen_clips)
-    if total_unique > max_videos:
-        print(
-            f"    {len(parts)} of {total_unique} proxy videos attached "
-            f"(Gemini limit: {max_videos} per request)"
-        )
-    else:
-        print(f"    {len(parts)} proxy videos attached to Phase 2")
-    return parts, attached_ids
+# Phase 2 visual mode now uses concat_proxies() from preprocess.py instead of
+# individual uploads. See run_phase2() below.
 
 
 def run_phase2(
@@ -715,25 +670,45 @@ def run_phase2(
     # Load transcripts for all clips
     transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
-    # Resolve visual clip IDs (upload/cache proxies) before building prompt.
-    # Visual mode only available for ≤10 clips (Gemini limit: 10 videos per prompt).
-    # For larger projects, attaching a subset would bias the edit toward those clips.
-    visual_clip_ids = None
+    # Resolve visual mode: concatenate proxies into bundles for Gemini.
+    # Uses concat_proxies() to avoid the 10-video-per-prompt limit.
+    visual_timeline = None
     video_parts = []
-    unique_clip_count = len({r.get("clip_id", "") for r in clip_reviews})
-    if visual and provider == "gemini" and unique_clip_count <= MAX_VISUAL_VIDEOS:
+    if visual and provider == "gemini":
         from google import genai
         from google.genai import types
+        from .preprocess import concat_proxies
 
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        video_parts, visual_clip_ids = _upload_proxies_for_phase2(
-            client, clip_reviews, editorial_paths, types
-        )
-    elif visual and unique_clip_count > MAX_VISUAL_VIDEOS:
-        print(
-            f"  Skipping visual mode: {unique_clip_count} clips exceeds "
-            f"Gemini limit of {MAX_VISUAL_VIDEOS} videos per request."
-        )
+        clip_ids = list(dict.fromkeys(r.get("clip_id", "") for r in clip_reviews))
+        bundles = concat_proxies(editorial_paths, clip_ids)
+
+        if bundles:
+            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+            file_cache = load_file_api_cache(editorial_paths)
+
+            for i, bundle in enumerate(bundles):
+                cache_key = f"_concat_bundle_{i}"
+                cached_uri = get_cached_uri(file_cache, cache_key)
+                if cached_uri:
+                    video_parts.append(
+                        types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4")
+                    )
+                    continue
+
+                print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
+                video_file = client.files.upload(file=str(bundle["path"]))
+                while video_file.state.name == "PROCESSING":
+                    time.sleep(3)
+                    video_file = client.files.get(name=video_file.name)
+                if video_file.state.name == "FAILED":
+                    print(f"  WARNING: bundle {i + 1} upload failed")
+                    continue
+                cache_file_uri(editorial_paths, cache_key, video_file.uri)
+                video_parts.append(
+                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4")
+                )
+
+            visual_timeline = bundles
 
     prompt = build_editorial_assembly_prompt(
         project_name=project_name,
@@ -742,7 +717,7 @@ def run_phase2(
         clip_count=len(clip_reviews),
         total_duration_sec=total_duration,
         transcripts=transcripts,
-        visual_clip_ids=visual_clip_ids,
+        visual_timeline=visual_timeline,
         style_supplement=style_supplement,
     )
 
@@ -755,8 +730,7 @@ def run_phase2(
     print(f"  Generating editorial storyboard ({provider}, {mode_label})...")
 
     if provider == "gemini":
-        if not visual_clip_ids:
-            # Only import if not already done above for visual mode
+        if not visual_timeline:
             from google import genai
             from google.genai import types
 
@@ -764,9 +738,9 @@ def run_phase2(
 
         from .tracing import traced_gemini_generate
 
-        # Build contents: text-only or multipart with proxy videos
+        # Build contents: text-only or multipart with concat video bundles
         num_videos = len(video_parts)
-        if visual_clip_ids:
+        if visual_timeline and video_parts:
             contents = [types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])]
         else:
             contents = prompt
@@ -909,7 +883,9 @@ def run_monologue(
     seg_count = len(storyboard.segments)
     transcript_count = len(transcripts) if transcripts else 0
     prompt_kb = len(prompt) / 1024
-    print(f"  Storyboard: {seg_count} segments, {transcript_count} transcripts, prompt ~{prompt_kb:.0f}KB")
+    print(
+        f"  Storyboard: {seg_count} segments, {transcript_count} transcripts, prompt ~{prompt_kb:.0f}KB"
+    )
 
     from .tracing import LLMSpinner
 
