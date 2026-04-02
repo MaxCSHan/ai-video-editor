@@ -35,12 +35,13 @@
 - [x] Phase 1: Per-clip LLM review — quality, people, key moments, usable/discard segments, audio
 - [x] Phase 2: Cross-clip editorial assembly — story arc, cast, EDL with precise in/out seconds, pacing, music plan, technical notes
 - [x] Clip ID fuzzy resolution (handles LLM abbreviations like `C0073` → `20260330114125_C0073`)
-- [x] User briefing context injected into Phase 2 prompt
+- [x] User briefing context injected into Phase 1 and Phase 2 prompts
+- [x] Proxy video concatenation for multi-clip Gemini calls (briefing + Phase 2 visual)
 
 ### Interactive TUI
 - [x] `vx` (no args) launches guided interactive mode via questionary/prompt_toolkit
 - [x] Main menu: New project / Open existing / Settings / Quit
-- [x] New project flow: name → footage folder → clip selection → style → preprocess → transcribe → review → briefing → analyze
+- [x] New project flow: name → footage folder → clip selection → style → preset → preprocess → briefing → transcribe → review → analyze
 - [x] Project actions menu: preview, cut, re-analyze, transcribe, manage clips, edit briefing (AI-guided/manual), status
 - [x] Editorial briefing: AI-guided (quick scan + targeted questions) or manual (smart hints from Phase 1)
 - [x] Transcription with provider selection (mlx/gemini) and overwrite prompt for cached transcripts
@@ -137,6 +138,9 @@
 - [x] File API URI caching from Phase 1 uploads (90-min TTL, avoids redundant uploads)
 - [x] Phase 2 prompt enhanced with visual context instructions when videos attached
 - [x] Dry-run shows cost comparison: text-only vs visual mode
+- [x] Proxy concatenation: proxies concatenated into ≤40 min bundles with filename overlay, bypassing Gemini 10-video limit
+- [x] Chronological ordering: clips sorted by creation_time metadata for natural vlog narrative
+- [x] Concat bundles cached on disk and shared between briefing quick_scan and Phase 2
 
 ### Smart Briefing (AI-Guided Context Gathering)
 - [x] Quick scan: single Gemini call watches all proxy videos, produces structured overview
@@ -146,6 +150,16 @@
 - [x] `vx brief --scan`: standalone AI-guided briefing with fresh scan
 - [x] Interactive TUI: "Edit briefing (AI-guided)" vs "Edit briefing (manual)"
 - [x] Auto-used in pipeline when GEMINI_API_KEY available, falls back to manual
+- [x] Quick scan uses concat bundles instead of individual videos (fixes Gemini 10-video limit)
+- [x] Q&A pairs stored with full question text (not truncated keys) for clean LLM prompt passthrough
+
+### Pipeline Ordering & Context Flow
+- [x] Shared Gemini File API cache (`file_cache.py`): upload once, reuse across briefing → transcription → Phase 1 → Phase 2
+- [x] Smart briefing runs before transcription (Gemini path): speaker names available for transcription
+- [x] Transcription runs before Phase 1: transcripts available for clip review
+- [x] User context (people, activity, tone, highlights) injected into Phase 1 prompts
+- [x] Manual briefing (non-Gemini path) runs after Phase 1 (depends on review data for smart questions)
+- [x] Force re-run option for cached Phase 1 reviews in TUI re-analyze flow
 
 ### Multi-Track Audio Assembly
 - [ ] Parse `audio_note` field from EDL segments (already in the data model)
@@ -157,10 +171,13 @@
 
 ### Improved Phase 1 (Holistic Context)
 - [x] Transcripts injected into Phase 1 prompt (what was said, when, by whom)
-- [ ] Pass user_context.json into each Phase 1 review (filmmaker's intent, people names)
-- [ ] Pass clip list overview to each Phase 1 review so the agent knows the full shooting context
-- [ ] Sequential clip review with accumulated context (each review informed by previous)
-- [ ] Or: single-pass multi-clip review where Gemini sees all proxies at once (up to 10)
+- [x] Pass user_context.json into each Phase 1 review (filmmaker's intent, people names)
+- [x] Briefing Q&A context formatted with full question text for clean LLM consumption
+
+### Transcription & Timestamp Precision
+- [ ] Improve transcription timestamp accuracy (chunked processing, cross-validation)
+- [ ] Better speaker diarization for multi-person conversations
+- [ ] Phase 2 timestamp validation against clip review usable_segments
 
 ### Preview UI Improvements
 - [ ] Drag-to-reorder segments in the timeline
@@ -185,10 +202,10 @@
 - [ ] Duplicate/similar clip detection (same scene from multiple takes)
 - [ ] Auto-group clips by location/time (GPS metadata, filename timestamps)
 
-### Parallel Phase 1 with Context
-- [ ] Batch upload all proxies to Gemini (up to 10 per request)
-- [ ] Single-call multi-clip review for better cross-clip awareness
-- [ ] Fallback to sequential for > 10 clips
+### Phase 1 with Cross-Clip Awareness
+- [ ] Single-pass multi-clip review via concat video (all clips in one LLM call)
+- [ ] Clip list overview in each review so the agent knows the full shooting context
+- [ ] Cross-clip people matching from the start (not just in Phase 2)
 
 ### Template System
 - [ ] Predefined editing templates: "travel vlog", "event recap", "day-in-the-life"
@@ -232,11 +249,13 @@
 ### Design Principles
 1. **Structured data first**: Pydantic models are the source of truth. Markdown and HTML are rendered views.
 2. **LLM calls are minimal and traced**: Transcribe + Phase 1 + Phase 2 + optional quick scan. Every call logs tokens, cost, and timing to `traces.jsonl`.
-3. **Cache everything**: Preprocessing, transcription, and Phase 1 reviews cached per-clip. Re-runs are fast.
-4. **Version everything**: Every LLM output is versioned. Compare, rollback, iterate.
-5. **Human-in-the-loop**: AI proposes, user adjusts via interactive preview, then execute.
-6. **No build step**: HTML preview is self-contained. No React, no bundling, opens in any browser.
-7. **Cost visibility**: Dry-run estimation before committing, per-phase cost breakdown in status, cumulative tracking across runs.
+3. **Cache everything**: Preprocessing, transcription, Phase 1 reviews, concat bundles, Gemini File API URIs. Re-runs are fast.
+4. **Context flows downstream**: Briefing → Transcription → Phase 1 → Phase 2 → Phase 3. Each stage benefits from all prior context.
+5. **Version everything**: Every LLM output is versioned. Compare, rollback, iterate.
+6. **Human-in-the-loop**: AI proposes, user adjusts via interactive preview, then execute.
+7. **No build step**: HTML preview is self-contained. No React, no bundling, opens in any browser.
+8. **Cost visibility**: Dry-run estimation before committing, per-phase cost breakdown in status, cumulative tracking across runs.
+9. **Respect API limits**: Proxy concatenation bypasses Gemini's 10-video limit. Chronological ordering aids editorial judgment.
 
 ### Tech Stack
 - **Python 3.11+** with Pydantic for data models
