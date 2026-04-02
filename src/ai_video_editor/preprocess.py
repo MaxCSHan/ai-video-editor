@@ -214,6 +214,7 @@ def get_video_info(video_path: Path) -> dict:
         "pix_fmt": video_stream.get("pix_fmt", "unknown"),
         "color_transfer": color_transfer,
         "is_hdr": is_hdr,
+        "creation_time": data.get("format", {}).get("tags", {}).get("creation_time"),
     }
 
 
@@ -482,3 +483,235 @@ def _fmt_timestamp(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Proxy concatenation — combine per-clip proxies into bundles for multi-clip
+# Gemini API calls (briefing quick_scan, Phase 2 visual mode).
+# Gemini limit: max 10 videos per prompt, ~45 min per video with audio.
+# ---------------------------------------------------------------------------
+
+MAX_CONCAT_DURATION_SEC = 40 * 60  # 40 min safe cap (Gemini: ~45 min with audio)
+
+
+def concat_proxies(
+    editorial_paths,
+    clip_ids: list[str],
+    max_duration_sec: int = MAX_CONCAT_DURATION_SEC,
+) -> list[dict]:
+    """Concatenate proxy videos into chronologically-ordered bundles.
+
+    Sorts clips by creation_time (from source video metadata), then packs into
+    bundles of ≤max_duration_sec. Each bundle has a drawtext overlay showing the
+    clip filename so the LLM can identify clip boundaries.
+
+    Returns list of bundles:
+        [{"path": Path, "clips": [{"clip_id", "start_sec", "end_sec", "filename"}]}]
+
+    Cached — skips rebuild if concat file exists and is newer than all source proxies.
+    """
+
+    concat_dir = editorial_paths.root / "concat_proxies"
+    concat_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = concat_dir / "manifest.json"
+
+    # Gather proxy paths and metadata for sorting
+    clip_infos = []
+    for cid in clip_ids:
+        clip_paths = editorial_paths.clip_paths(cid)
+        proxy_files = list(clip_paths.proxy.glob("*_proxy.mp4"))
+        if not proxy_files:
+            continue
+        proxy_path = proxy_files[0]
+        duration = get_video_duration(proxy_path)
+
+        # Try to get creation_time from source video for chronological sorting
+        source_files = list(clip_paths.source.glob("*")) if clip_paths.source.exists() else []
+        creation_time = None
+        if source_files:
+            try:
+                info = get_video_info(source_files[0])
+                creation_time = info.get("creation_time")
+            except Exception:
+                pass
+
+        clip_infos.append(
+            {
+                "clip_id": cid,
+                "proxy_path": proxy_path,
+                "duration_sec": duration,
+                "creation_time": creation_time,
+                "filename": proxy_path.stem.replace("_proxy", ""),
+            }
+        )
+
+    if not clip_infos:
+        return []
+
+    # Sort chronologically: creation_time first, fall back to clip_id (name sort)
+    clip_infos.sort(key=lambda c: (c["creation_time"] or "", c["clip_id"]))
+
+    # Pack into bundles respecting max_duration_sec
+    bundles_plan = []
+    current_bundle = []
+    current_duration = 0.0
+
+    for info in clip_infos:
+        if current_duration + info["duration_sec"] > max_duration_sec and current_bundle:
+            bundles_plan.append(current_bundle)
+            current_bundle = []
+            current_duration = 0.0
+        current_bundle.append(info)
+        current_duration += info["duration_sec"]
+
+    if current_bundle:
+        bundles_plan.append(current_bundle)
+
+    # Build each bundle
+    results = []
+    all_cached = True
+
+    for bundle_idx, bundle_clips in enumerate(bundles_plan):
+        bundle_path = concat_dir / f"bundle_{bundle_idx}.mp4"
+
+        # Check cache: skip if output exists and is newer than all source proxies
+        if bundle_path.exists():
+            bundle_mtime = bundle_path.stat().st_mtime
+            sources_newer = any(
+                c["proxy_path"].stat().st_mtime > bundle_mtime for c in bundle_clips
+            )
+            if not sources_newer:
+                # Cached — rebuild manifest entry from existing file
+                offset = 0.0
+                clips_manifest = []
+                for c in bundle_clips:
+                    clips_manifest.append(
+                        {
+                            "clip_id": c["clip_id"],
+                            "start_sec": round(offset, 2),
+                            "end_sec": round(offset + c["duration_sec"], 2),
+                            "filename": c["filename"],
+                            "creation_time": c["creation_time"],
+                        }
+                    )
+                    offset += c["duration_sec"]
+                results.append({"path": bundle_path, "clips": clips_manifest})
+                continue
+
+        all_cached = False
+        print(
+            f"  Concatenating bundle {bundle_idx + 1}/{len(bundles_plan)} "
+            f"({len(bundle_clips)} clips)..."
+        )
+
+        # Build per-clip segments with drawtext overlay, then concat
+        segment_files = []
+        offset = 0.0
+        clips_manifest = []
+
+        for i, c in enumerate(bundle_clips):
+            seg_path = concat_dir / f"_seg_{bundle_idx}_{i:03d}.mp4"
+
+            # drawtext: show filename in top-left with semi-transparent background
+            label = c["filename"]
+            drawtext = (
+                f"drawtext=text='{label}'"
+                f":fontsize=14:fontcolor=white"
+                f":x=8:y=8"
+                f":box=1:boxcolor=black@0.5:boxborderw=4"
+            )
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(c["proxy_path"]),
+                "-vf",
+                drawtext,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "28",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-movflags",
+                "+faststart",
+                str(seg_path),
+            ]
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            segment_files.append(seg_path)
+
+            clips_manifest.append(
+                {
+                    "clip_id": c["clip_id"],
+                    "start_sec": round(offset, 2),
+                    "end_sec": round(offset + c["duration_sec"], 2),
+                    "filename": c["filename"],
+                    "creation_time": c["creation_time"],
+                }
+            )
+            offset += c["duration_sec"]
+
+        # Concat segments using ffmpeg concat demuxer
+        concat_list = concat_dir / f"_concat_list_{bundle_idx}.txt"
+        concat_list.write_text("\n".join(f"file '{seg.resolve()}'" for seg in segment_files) + "\n")
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(bundle_path),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+        # Clean up temp segments and concat list
+        for seg in segment_files:
+            seg.unlink(missing_ok=True)
+        concat_list.unlink(missing_ok=True)
+
+        results.append({"path": bundle_path, "clips": clips_manifest})
+
+    # Write manifest for all bundles
+    manifest_data = [
+        {"bundle": f"bundle_{i}.mp4", "clips": r["clips"]} for i, r in enumerate(results)
+    ]
+    manifest_path.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False))
+
+    total_clips = sum(len(r["clips"]) for r in results)
+    if all_cached:
+        print(f"  Concat cached: {len(results)} bundle(s), {total_clips} clips")
+    else:
+        total_dur = sum(r["clips"][-1]["end_sec"] for r in results if r["clips"])
+        print(
+            f"  Concat done: {len(results)} bundle(s), {total_clips} clips, "
+            f"{_fmt_timestamp(total_dur)} total"
+        )
+
+    return results
+
+
+def format_concat_timeline(bundles: list[dict]) -> str:
+    """Format concat bundle manifests into a timeline string for LLM prompts."""
+    lines = []
+    for bundle_idx, bundle in enumerate(bundles):
+        if len(bundles) > 1:
+            lines.append(f"Video {bundle_idx + 1}:")
+        for entry in bundle["clips"]:
+            start = _fmt_timestamp(entry["start_sec"])
+            lines.append(f"  {start}: {entry['clip_id']} ({entry['filename']})")
+    return "\n".join(lines)

@@ -73,7 +73,13 @@ class ClaudeConfig:
 @dataclass
 class GeminiConfig:
     model: str = "gemini-3-flash-preview"
+    phase2_model: str | None = "gemini-3.1-pro-preview"
     temperature: float = 0.2
+
+    @property
+    def phase2(self) -> str:
+        """Model to use for Phase 2 (editorial assembly). Falls back to self.model."""
+        return self.phase2_model or self.model
 
 
 @dataclass

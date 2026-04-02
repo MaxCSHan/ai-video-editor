@@ -225,8 +225,8 @@ Less frequent than the opening — let the conversations and visuals breathe.
 - **ONLY place text on SCENERY/B-ROLL segments** — segments WITHOUT speech.
 - **NEVER place text on segments with conversation/dialogue.** Those will have their \
 own speech captions. Check the transcript and segment descriptions carefully.
-- **Position text in negative space.** Use "lower_third" as default safe zone, \
-"center" for emphasis, "upper_third" when the lower frame is busy.
+- **Position text at "lower_third" always.** The rendering engine handles positioning — \
+always use "lower_third" for monologue overlays.
 - **Leave at least 3 seconds of no-text between consecutive overlays.**
 - The opening section should have more overlays (setting context). The middle can \
 be sparser (letting footage and conversations carry the story).

@@ -8,12 +8,23 @@ Providers:
     gemini — Cloud, richer output (speaker ID, sound events). Requires: GEMINI_API_KEY
 """
 
+from __future__ import annotations
+
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import ProjectPaths, TranscribeConfig
+
+if TYPE_CHECKING:
+    from .models import GeminiTranscript
+
+# Max chunk duration for Gemini transcription to avoid timestamp drift.
+# Gemini's timestamps drift progressively on videos longer than ~3-5 minutes.
+TRANSCRIBE_CHUNK_SEC = 90  # 1.5 minutes — Gemini drifts noticeably past ~3 min
 
 
 def transcribe_clip(
@@ -122,40 +133,119 @@ def _build_gemini_prompt(speaker_context: str | None = None) -> str:
     return prompt
 
 
-def transcribe_clip_gemini(
-    proxy_path: Path,
-    clip_paths: ProjectPaths,
-    cfg: TranscribeConfig,
-    speaker_context: str | None = None,
-    tracer=None,
-    editorial_paths=None,
-) -> dict | None:
-    """Transcribe a clip via Gemini structured output from its proxy video.
+def _split_video_chunks(proxy_path: Path, chunk_sec: float = TRANSCRIBE_CHUNK_SEC) -> list[Path]:
+    """Split a video into ≤chunk_sec chunks for accurate Gemini transcription.
 
-    Uses the same File API upload pattern as Phase 1 clip review.
-    Results are cached to clip_paths.audio / "transcript.json".
-    If editorial_paths is provided, reuses/populates the shared Gemini File API cache.
+    Returns list of chunk paths. If the video is already short enough, returns [proxy_path].
+    Chunks are written to a _transcribe_chunks/ subdir alongside the proxy.
     """
-    transcript_path = clip_paths.audio / "transcript.json"
-    if transcript_path.exists():
-        return json.loads(transcript_path.read_text())
+    from .preprocess import get_video_duration
 
+    duration = get_video_duration(proxy_path)
+    if duration <= chunk_sec:
+        return [proxy_path]
+
+    chunk_dir = proxy_path.parent / "_transcribe_chunks"
+    chunk_dir.mkdir(exist_ok=True)
+
+    chunks: list[Path] = []
+    offset = 0.0
+    idx = 0
+    while offset < duration:
+        chunk_path = chunk_dir / f"chunk_{idx:03d}.mp4"
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "quiet",
+            "-ss",
+            str(offset),
+            "-i",
+            str(proxy_path),
+            "-t",
+            str(chunk_sec),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(chunk_path),
+        ]
+        subprocess.run(cmd, check=True)
+        chunks.append(chunk_path)
+        offset += chunk_sec
+        idx += 1
+
+    return chunks
+
+
+def _merge_chunk_transcripts(
+    chunks: list[tuple[float, float, "GeminiTranscript"]],
+) -> "GeminiTranscript":
+    """Merge transcripts from sequential chunks into one.
+
+    Each tuple is (offset_sec, chunk_duration_sec, transcript) where offset_sec
+    is the chunk's start time in the original video. Segments with timestamps
+    exceeding the chunk duration are discarded (Gemini drift protection).
+    """
+    from .models import GeminiTranscript, GeminiTranscriptSegment
+
+    all_segments: list[GeminiTranscriptSegment] = []
+    all_speakers: set[str] = set()
+    language = "unknown"
+    has_speech = False
+
+    for offset_sec, chunk_dur, transcript in chunks:
+        language = transcript.language
+        if transcript.has_speech:
+            has_speech = True
+        all_speakers.update(transcript.speakers)
+
+        for seg in transcript.segments:
+            # Discard segments where Gemini's timestamps drifted past the chunk boundary
+            if seg.start > chunk_dur + 2.0:
+                continue
+            # Clamp end to chunk duration
+            clamped_end = min(seg.end, chunk_dur)
+            all_segments.append(
+                GeminiTranscriptSegment(
+                    start=round(seg.start + offset_sec, 3),
+                    end=round(clamped_end + offset_sec, 3),
+                    text=seg.text,
+                    speaker=seg.speaker,
+                    type=seg.type,
+                )
+            )
+
+    return GeminiTranscript(
+        language=language,
+        segments=all_segments,
+        speakers=sorted(all_speakers),
+        has_speech=has_speech,
+    )
+
+
+def _transcribe_short_clip_gemini(
+    proxy_path: Path,
+    clip_id: str,
+    cfg: TranscribeConfig,
+    speaker_context: str | None,
+    tracer,
+    editorial_paths,
+) -> "GeminiTranscript":
+    """Transcribe a short clip (≤TRANSCRIBE_CHUNK_SEC) via Gemini with file cache support."""
     from google import genai
     from google.genai import types
 
     from .models import GeminiTranscript
+    from .tracing import traced_gemini_generate
 
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return None
-
     client = genai.Client(api_key=api_key)
 
     # Check file cache before uploading (may already be cached by briefing)
-    clip_id = proxy_path.stem.replace("_proxy", "")
     cached_uri = None
     if editorial_paths:
-        from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
+        from .file_cache import cache_file_uri, get_cached_uri, load_file_api_cache
 
         file_cache = load_file_api_cache(editorial_paths)
         cached_uri = get_cached_uri(file_cache, clip_id)
@@ -168,14 +258,12 @@ def transcribe_clip_gemini(
             time.sleep(3)
             video_file = client.files.get(name=video_file.name)
         if video_file.state.name == "FAILED":
-            return None
+            raise RuntimeError(f"Gemini file upload failed for {clip_id}")
         file_uri = video_file.uri
         if editorial_paths:
             cache_file_uri(editorial_paths, clip_id, file_uri)
 
     prompt = _build_gemini_prompt(speaker_context)
-
-    from .tracing import traced_gemini_generate
 
     response = traced_gemini_generate(
         client,
@@ -194,20 +282,16 @@ def transcribe_clip_gemini(
             response_schema=GeminiTranscript,
         ),
         phase="transcribe",
-        clip_id=proxy_path.stem.replace("_proxy", ""),
+        clip_id=clip_id,
         tracer=tracer,
         num_video_files=1,
         prompt_chars=len(prompt),
     )
 
-    # The SDK auto-populates response.parsed when response_schema is a Pydantic model.
-    # If Gemini returns malformed JSON (e.g., trailing data), parsed will be None — fall back
-    # to extracting the first JSON object manually.
     gemini_result = getattr(response, "parsed", None)
     if gemini_result is None:
         raw_text = (response.text or "").strip()
-        clip_tag = proxy_path.stem.replace("_proxy", "")
-        print(f"  WARN [{clip_tag}] Gemini returned malformed JSON, attempting recovery...")
+        print(f"  WARN [{clip_id}] Gemini returned malformed JSON, attempting recovery...")
         print(f"  Raw response ({len(raw_text)} chars):\n{raw_text[:500]}")
         decoder = json.JSONDecoder()
         parsed, end_idx = decoder.raw_decode(raw_text)
@@ -215,6 +299,137 @@ def transcribe_clip_gemini(
         if trailing:
             print(f"  Discarded trailing data ({len(trailing)} chars): {trailing[:200]}")
         gemini_result = GeminiTranscript.model_validate(parsed)
+
+    return gemini_result
+
+
+def _transcribe_single_chunk_gemini(
+    chunk_path: Path,
+    cfg: TranscribeConfig,
+    speaker_context: str | None,
+    tracer,
+    clip_id_tag: str,
+    chunk_label: str,
+) -> "GeminiTranscript":
+    """Transcribe a single video chunk via Gemini. Returns parsed GeminiTranscript."""
+    from google import genai
+    from google.genai import types
+
+    from .models import GeminiTranscript
+    from .tracing import traced_gemini_generate
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+
+    video_file = client.files.upload(file=str(chunk_path))
+    while video_file.state.name == "PROCESSING":
+        time.sleep(3)
+        video_file = client.files.get(name=video_file.name)
+    if video_file.state.name == "FAILED":
+        raise RuntimeError(f"Gemini file upload failed for {chunk_label}")
+
+    prompt = _build_gemini_prompt(speaker_context)
+
+    response = traced_gemini_generate(
+        client,
+        model=cfg.gemini_model,
+        contents=[
+            types.Content(
+                parts=[
+                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                    types.Part.from_text(text=prompt),
+                ]
+            )
+        ],
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            response_mime_type="application/json",
+            response_schema=GeminiTranscript,
+        ),
+        phase="transcribe",
+        clip_id=f"{clip_id_tag}/{chunk_label}",
+        tracer=tracer,
+        num_video_files=1,
+        prompt_chars=len(prompt),
+    )
+
+    gemini_result = getattr(response, "parsed", None)
+    if gemini_result is None:
+        raw_text = (response.text or "").strip()
+        print(f"  WARN [{clip_id_tag}/{chunk_label}] malformed JSON, attempting recovery...")
+        print(f"  Raw response ({len(raw_text)} chars):\n{raw_text[:500]}")
+        decoder = json.JSONDecoder()
+        parsed, end_idx = decoder.raw_decode(raw_text)
+        trailing = raw_text[end_idx:].strip()
+        if trailing:
+            print(f"  Discarded trailing data ({len(trailing)} chars): {trailing[:200]}")
+        gemini_result = GeminiTranscript.model_validate(parsed)
+
+    return gemini_result
+
+
+def transcribe_clip_gemini(
+    proxy_path: Path,
+    clip_paths: ProjectPaths,
+    cfg: TranscribeConfig,
+    speaker_context: str | None = None,
+    tracer=None,
+    editorial_paths=None,
+) -> dict | None:
+    """Transcribe a clip via Gemini structured output from its proxy video.
+
+    For videos longer than TRANSCRIBE_CHUNK_SEC (1.5 min), splits into chunks and
+    transcribes each separately to avoid Gemini's progressive timestamp drift,
+    then merges with corrected offsets.
+
+    Results are cached to clip_paths.audio / "transcript.json".
+    If editorial_paths is provided, reuses/populates the shared Gemini File API cache.
+    """
+    transcript_path = clip_paths.audio / "transcript.json"
+    if transcript_path.exists():
+        return json.loads(transcript_path.read_text())
+
+    from .preprocess import get_video_duration
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+
+    clip_id = proxy_path.stem.replace("_proxy", "")
+
+    # Split into chunks if video is long enough to cause timestamp drift
+    chunks = _split_video_chunks(proxy_path)
+
+    if len(chunks) == 1 and chunks[0] == proxy_path:
+        # Short video — single-call path (uses file cache for efficiency)
+        gemini_result = _transcribe_short_clip_gemini(
+            proxy_path, clip_id, cfg, speaker_context, tracer, editorial_paths
+        )
+    else:
+        # Long video — chunked transcription
+        print(f"  [{clip_id}] Splitting into {len(chunks)} chunks for transcription...")
+        chunk_results: list[tuple[float, float, GeminiTranscript]] = []
+        offset = 0.0
+        for i, chunk_path in enumerate(chunks):
+            chunk_label = f"chunk_{i:03d}"
+            chunk_dur = get_video_duration(chunk_path)
+            print(
+                f"  [{clip_id}] Transcribing {chunk_label} (offset {offset:.1f}s, {chunk_dur:.1f}s)..."
+            )
+            result = _transcribe_single_chunk_gemini(
+                chunk_path, cfg, speaker_context, tracer, clip_id, chunk_label
+            )
+            chunk_results.append((offset, chunk_dur, result))
+            offset += chunk_dur
+
+        gemini_result = _merge_chunk_transcripts(chunk_results)
+
+        # Clean up chunk files
+        chunk_dir = proxy_path.parent / "_transcribe_chunks"
+        if chunk_dir.exists():
+            for f in chunk_dir.iterdir():
+                f.unlink()
+            chunk_dir.rmdir()
 
     # Transform lean Gemini response into canonical transcript.json format
     result = _gemini_to_canonical(gemini_result, cfg.gemini_model)

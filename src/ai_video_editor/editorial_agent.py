@@ -726,6 +726,7 @@ def run_phase2(
         context_text = format_context_for_prompt(user_context)
         prompt = prompt + "\n\n" + context_text
 
+    p2_model = gemini_cfg.phase2 if gemini_cfg else None
     mode_label = "visual" if visual else "text-only"
     print(f"  Generating editorial storyboard ({provider}, {mode_label})...")
 
@@ -747,7 +748,7 @@ def run_phase2(
 
         response = traced_gemini_generate(
             client,
-            model=gemini_cfg.model,
+            model=p2_model,
             contents=contents,
             config=types.GenerateContentConfig(
                 temperature=gemini_cfg.temperature,

@@ -152,8 +152,10 @@ Think like an editor who has watched all the dailies:
 
 CRITICAL RULES for the structured output:
 - All timestamps must be in SECONDS (float) — these will be used directly by ffmpeg
+- in_sec and out_sec MUST come from the clip reviews or transcripts above — do NOT estimate timestamps by watching the video
 - clip_id MUST be the EXACT clip_id from the reviews above (e.g., "{example_clip_id}"). Do NOT abbreviate or shorten clip IDs.
 - in_sec and out_sec are relative to the START of each clip
+- Each clip's maximum duration is listed in its review — NEVER use timestamps that exceed it
 - Include every segment needed for the final cut, in chronological order of the output video
 - Be thorough — a complete edit plan that a human can execute
 """
@@ -166,7 +168,7 @@ def build_editorial_assembly_prompt(
     clip_count: int,
     total_duration_sec: float,
     transcripts: dict[str, str] | None = None,
-    visual_clip_ids: list[str] | None = None,
+    visual_timeline: list[dict] | None = None,
     style_supplement: str | None = None,
 ) -> str:
     reviews_json = json.dumps(clip_reviews, indent=2, ensure_ascii=False)
@@ -181,17 +183,24 @@ def build_editorial_assembly_prompt(
         example_clip_id=example_clip_id,
         style=style,
     )
-    if visual_clip_ids:
-        id_list = ", ".join(visual_clip_ids)
+    if visual_timeline:
+        from .preprocess import format_concat_timeline
+
+        timeline_text = format_concat_timeline(visual_timeline)
+        total_clips = sum(len(b["clips"]) for b in visual_timeline)
         prompt += (
-            f"\n\nProxy videos are attached for these {len(visual_clip_ids)} clips: {id_list}. "
-            "Use them to make visual judgments:\n"
-            "- Assess energy, pacing, and composition directly from the footage\n"
+            f"\n\nProxy videos for all {total_clips} clips are attached as a concatenated "
+            "video in chronological shooting order. Each clip has its filename overlaid.\n"
+            f"Timeline:\n{timeline_text}\n\n"
+            "Use the attached video ONLY for qualitative visual judgments:\n"
+            "- Assess energy, pacing, and composition\n"
             "- Verify which moments have the strongest visual impact\n"
             "- Match people across clips by their actual appearance\n"
-            "- Judge transitions based on visual continuity between clips\n"
-            "- Identify the best b-roll and establishing shots visually\n"
-            "For clips without video attached, rely on the text reviews and transcripts."
+            "- Judge transitions based on visual continuity\n\n"
+            "CRITICAL: Do NOT use the video to determine timestamps. "
+            "The video timeline may not match the actual clip timecodes. "
+            "ALL in_sec/out_sec values MUST come from the clip reviews and transcripts above. "
+            "Each clip's usable_segments define the valid timestamp ranges — stay within them."
         )
     if transcripts:
         sections = []
@@ -204,7 +213,10 @@ def build_editorial_assembly_prompt(
             "- Identify dialogue-driven segments that should be preserved intact\n"
             "- Find natural speech breaks for cut points\n"
             "- Use dialogue content to drive narrative arc and story concept\n"
-            "- Note where speech and visuals complement or contrast each other"
+            "- Note where speech and visuals complement or contrast each other\n\n"
+            "TIMESTAMP VALIDATION: Before outputting each segment, verify that in_sec and "
+            "out_sec fall within a usable_segment from the clip review for that clip_id. "
+            "Never reference a timestamp beyond the clip's duration."
         )
     if style_supplement:
         prompt += "\n\n" + style_supplement

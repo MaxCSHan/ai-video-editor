@@ -702,13 +702,9 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
         font_file = fmap.get(ov.style.font, fmap["sans-serif"])
         font_size = size_map.get(ov.style.size, size_map["medium"])
 
-        # Position — lower_third sits at ~88% from top (above playback controls)
-        if ov.style.position == "center":
-            y_expr = "(h-th)/2"
-        elif ov.style.position == "upper_third":
-            y_expr = "h*0.15"
-        else:  # lower_third (default)
-            y_expr = "h*0.88-th"
+        # Monologue overlays always render at lower_third — captions move up if colliding.
+        # "center" position is reserved for future title cards / word cards, not monologue.
+        y_expr = "h*0.88-th"
 
         # Alignment — default center for silent vlog aesthetic
         if ov.style.alignment == "center":

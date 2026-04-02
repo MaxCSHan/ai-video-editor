@@ -249,39 +249,47 @@ def run_quick_scan(
         return json.loads(scan_path.read_text())
 
     from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
+    from .preprocess import concat_proxies, format_concat_timeline
 
     client = genai.Client(api_key=api_key)
 
-    # Upload all proxies (reuse cached URIs, cache new uploads for downstream stages)
-    file_cache = load_file_api_cache(editorial_paths)
-    print(f"  Uploading {len(clip_ids)} proxy videos for quick scan...")
-    video_parts = []
-    for cid in clip_ids:
-        proxy_dir = clips_dir / cid / "proxy"
-        proxy_files = list(proxy_dir.glob("*_proxy.mp4"))
-        if not proxy_files:
-            continue
+    # Concatenate proxies into bundles (chronological order, ≤40 min each)
+    # This avoids Gemini's 10-video-per-prompt limit.
+    bundles = concat_proxies(editorial_paths, clip_ids)
+    if not bundles:
+        return None
 
-        cached_uri = get_cached_uri(file_cache, cid)
+    # Upload concat bundles (reuse cached URIs)
+    file_cache = load_file_api_cache(editorial_paths)
+    video_parts = []
+    for i, bundle in enumerate(bundles):
+        cache_key = f"_concat_bundle_{i}"
+        cached_uri = get_cached_uri(file_cache, cache_key)
         if cached_uri:
             video_parts.append(types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4"))
             continue
 
-        video_file = client.files.upload(file=str(proxy_files[0]))
+        print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
+        video_file = client.files.upload(file=str(bundle["path"]))
         while video_file.state.name == "PROCESSING":
             time.sleep(2)
             video_file = client.files.get(name=video_file.name)
         if video_file.state.name == "FAILED":
             continue
-        cache_file_uri(editorial_paths, cid, video_file.uri)
+        cache_file_uri(editorial_paths, cache_key, video_file.uri)
         video_parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
 
     if not video_parts:
         return None
 
-    # Build prompt with clip IDs for reference
-    clip_list = "\n".join(f"- Clip {i + 1}: {cid}" for i, cid in enumerate(clip_ids))
-    prompt = QUICK_SCAN_PROMPT + f"\n\nClip IDs (in order of the attached videos):\n{clip_list}\n"
+    # Build prompt with chronological timeline mapping
+    timeline = format_concat_timeline(bundles)
+    prompt = (
+        QUICK_SCAN_PROMPT
+        + "\n\nThe attached video contains all clips concatenated in chronological "
+        "shooting order. Each clip has its filename overlaid in the top-left corner.\n"
+        f"Timeline:\n{timeline}\n"
+    )
 
     print(f"  Running quick scan ({gemini_model})...")
     response = traced_gemini_generate(
