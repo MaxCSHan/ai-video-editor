@@ -324,6 +324,7 @@ def _reencode_segment(path: Path, output_format: OutputFormat | None) -> bool:
         cmd.extend(["-preset", "fast", "-crf", "23"])
         if codec == "libx264":
             cmd.extend(["-profile:v", "high", "-level", "4.2"])
+    cmd.extend(["-force_key_frames", "expr:eq(n,0)"])
     cmd.extend(["-pix_fmt", "yuv420p"])
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(tmp)])
@@ -382,8 +383,13 @@ def _verify_rough_cut(
                 f"(drift {drift:.1f}s)"
             )
 
-    # Seek test: try reading a frame from 1s in — validates moov atom + index
-    if probe.duration > 1.0:
+    # Seek tests: validate the file is playable at start and midpoint.
+    # Use a generous timeout — large 4K files need time even with faststart.
+    seek_timeout = max(30, int(size / (200 * 1024 * 1024)))  # 30s or 1s per 200MB
+
+    for label, interval in [("start", "%+0.5"), ("midpoint", f"{probe.duration / 2}%+0.5")]:
+        if probe.duration < 1.0:
+            break
         try:
             seek_result = subprocess.run(
                 [
@@ -391,11 +397,11 @@ def _verify_rough_cut(
                     "-v",
                     "error",
                     "-read_intervals",
-                    "%1",
+                    interval,
                     "-select_streams",
                     "v:0",
                     "-show_frames",
-                    "-entries",
+                    "-show_entries",
                     "frame=pkt_pts_time",
                     "-of",
                     "csv=p=0",
@@ -403,12 +409,26 @@ def _verify_rough_cut(
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=seek_timeout,
             )
-            if seek_result.returncode != 0 or not seek_result.stdout.strip():
-                errors.append("Rough cut failed seek test — moov atom may be corrupt")
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            errors.append("Rough cut seek test timed out")
+            if seek_result.returncode != 0:
+                errors.append(
+                    f"Seek test failed at {label}: ffprobe error "
+                    f"(rc={seek_result.returncode}, stderr={seek_result.stderr[:200]})"
+                )
+            elif not seek_result.stdout.strip():
+                errors.append(
+                    f"Seek test failed at {label}: no decodable frames found "
+                    f"— possible moov atom corruption or missing keyframes"
+                )
+        except subprocess.TimeoutExpired:
+            errors.append(
+                f"Seek test timed out at {label} ({seek_timeout}s) "
+                f"— moov atom may be at end of file (faststart failed?)"
+            )
+        except FileNotFoundError:
+            errors.append("ffprobe not found")
+            break
 
     return errors
 
@@ -480,10 +500,9 @@ def _build_segment_vf(
             filters.append(f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease")
             filters.append(f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black")
 
-    # 3. FPS normalization
-    src_fps = clip_info.get("fps_float", 0)
-    if src_fps > 0 and abs(src_fps - target_fps) > 0.5:
-        filters.append(f"fps={target_fps}")
+    # 3. FPS normalization — always apply to ensure uniform timebase across segments,
+    # even when source FPS matches target (VFR sources, different timebases)
+    filters.append(f"fps={target_fps}")
 
     return ",".join(filters) if filters else None
 
@@ -836,7 +855,10 @@ def _extract_segment(
             vf = ",".join(extra_filters)
 
     cmd = ["ffmpeg", "-y"]
-    cmd.extend(get_hwaccel_args())
+    # NOTE: no -hwaccel videotoolbox here — HW decoder drops frames when
+    # fast-seeking (-ss before -i), producing corrupt segments. Software
+    # decode is fast enough since we only decode a few seconds per segment.
+    # HW *encoding* (h264_videotoolbox) is still used for output.
 
     # Disable autorotate when we handle rotation explicitly
     if clip_info and clip_info.get("rotation", 0) != 0:
@@ -866,6 +888,8 @@ def _extract_segment(
         cmd.extend(["-preset", "fast", "-crf", "23"])
         if codec == "libx264":
             cmd.extend(["-profile:v", "high", "-level", "4.2"])
+    # Guarantee first frame is an IDR keyframe — required for concat -c:v copy
+    cmd.extend(["-force_key_frames", "expr:eq(n,0)"])
     cmd.extend(["-pix_fmt", "yuv420p"])
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(output_path)])
@@ -877,13 +901,19 @@ def _extract_segment(
         )
     elif result.stderr:
         # Log warnings even on success — ffmpeg often warns about issues that
-        # produce a technically valid but subtly broken file
-        stderr_lower = result.stderr.lower()
-        if any(
-            kw in stderr_lower
-            for kw in ["discarding", "discarded", "non monoton", "error", "invalid"]
-        ):
-            log.warning("ffmpeg warnings for %s: %s", output_path.name, result.stderr[:500])
+        # produce a technically valid but subtly broken file.
+        # Filter out the version/config banner to surface only meaningful lines.
+        warn_keywords = ("discarding", "discarded", "non monoton", "error", "invalid")
+        relevant = [
+            line
+            for line in result.stderr.splitlines()
+            if not line.startswith(("ffmpeg version", "  built with", "  configuration:", "  lib"))
+            and any(kw in line.lower() for kw in warn_keywords)
+        ]
+        if relevant:
+            log.warning(
+                "ffmpeg warnings for %s:\n  %s", output_path.name, "\n  ".join(relevant[:10])
+            )
     return result.returncode == 0
 
 
@@ -1045,18 +1075,14 @@ def assemble_rough_cut(
             "concat",
             "-safe",
             "0",
+            "-avoid_negative_ts",
+            "make_zero",
             "-i",
             str(concat_list),
             "-c:v",
             "copy",
             "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
+            "copy",
             "-movflags",
             "+faststart",
             str(rough_cut_path),

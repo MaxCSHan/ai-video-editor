@@ -223,3 +223,81 @@ src/ai_video_editor/
 | Phase 2 | Reviews + transcripts + briefing (+ videos with --visual) | EditorialStoryboard (Pydantic JSON) | Yes — one call |
 | Render | Structured JSON | Markdown + HTML preview (with transcript overlay) | No — templates |
 | Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
+
+## Rough Cut: Decode → Encode → Concat Pipeline
+
+The rough cut stage (`rough_cut.py`) is a pure ffmpeg pipeline — no LLM calls. It takes the `EditorialStoryboard` JSON and produces a playable `rough_cut.mp4`. The pipeline has three phases, each with specific design decisions learned through real-world testing with mixed 4K footage.
+
+### Phase A: Segment Extraction (decode + encode)
+
+Each segment is extracted from its source clip, re-encoded, and format-normalized:
+
+```
+ffmpeg -y
+  -ss {in_sec} -i {source} -t {duration}       # Fast-seek + trim
+  -vf "scale=...,pad=...,fps={target_fps},..."  # Format normalization + overlays
+  -c:v h264_videotoolbox -q:v 65 -allow_sw 1    # HW encode (macOS)
+  -force_key_frames "expr:eq(n,0)"               # IDR at frame 0
+  -pix_fmt yuv420p                               # iPhone compatibility
+  -c:a aac -b:a 128k -ar 48000 -ac 2            # Audio normalization
+  -movflags +faststart                           # Seekable output
+  seg_NNN.mp4
+```
+
+**Key decisions:**
+
+- **Software decode, hardware encode.** The command intentionally omits `-hwaccel videotoolbox` for decoding. VideoToolbox hardware decoder drops frames when fast-seeking (`-ss` before `-i`), producing corrupt segments with ~1-second freezes. Software decode is reliable and fast enough since each segment only decodes a few seconds of source. Hardware encoding (`h264_videotoolbox` / `hevc_videotoolbox`) is still used for output.
+
+- **`-ss` before `-i` (input seeking).** Seeks to the nearest keyframe before `in_sec`, then decodes forward to the exact frame. Much faster than output seeking (`-ss` after `-i`) for large 4K source files.
+
+- **`-force_key_frames "expr:eq(n,0)"`** guarantees an IDR keyframe at frame 0 of every segment. Without this, VideoToolbox may start with P/B-frames, and the concat demuxer (which uses stream copy) would hit undecodable frames at segment boundaries — causing freezes.
+
+- **`fps=` filter always applied** (via `-vf`), even when source FPS matches target. This normalizes the timebase across all segments. Without it, different source clips can produce segments with mismatched timebases (e.g., 1/600 vs 1/48000), causing PTS discontinuities during concat.
+
+- **Full re-encode per segment** (not stream copy). This is necessary because segments need format normalization (resolution, fps, rotation, padding, text overlays). The cost is acceptable: each segment is only a few seconds long.
+
+### Phase B: Validation (3-layer)
+
+Before concatenation, segments pass through a validation pipeline:
+
+1. **Per-segment** — ffprobe each segment: has video + audio, correct codec/resolution/fps, duration matches expected (±1s).
+2. **Cross-segment compatibility** — compares all segments for matching video codec, resolution, pixel format, fps, audio sample rate, and channel count. Mismatched segments are automatically re-encoded to match the majority.
+3. **Post-concat integrity** — validates the final rough cut: file size sanity, has both streams, duration matches (±2s), seek tests at start and midpoint.
+
+### Phase C: Concatenation (stream copy)
+
+All validated segments are joined using the ffmpeg concat demuxer:
+
+```
+ffmpeg -y
+  -fflags +genpts                    # Regenerate PTS as safety net
+  -f concat -safe 0                  # Concat demuxer, allow absolute paths
+  -avoid_negative_ts make_zero       # Shift negative timestamps to zero
+  -i concat_list.txt
+  -c:v copy                          # Video: stream copy (no re-encode)
+  -c:a copy                          # Audio: stream copy (already normalized)
+  -movflags +faststart               # Seekable output
+  rough_cut.mp4
+```
+
+**Key decisions:**
+
+- **Stream copy for both video and audio.** Since Phase A already normalizes all segments to matching format, codec, resolution, fps, and audio parameters, no re-encoding is needed during concat. This makes concatenation fast (seconds, not minutes).
+
+- **`-avoid_negative_ts make_zero`** prevents negative timestamps at segment boundaries from producing invalid moov atom edit lists.
+
+- **`-fflags +genpts`** regenerates presentation timestamps from frame rate as a safety net for any residual PTS irregularities.
+
+- **Concat demuxer** (not concat filter or protocol). The demuxer reads a text file listing segment paths and joins them without re-encoding. This is the right choice when segments are already format-normalized.
+
+### What went wrong (and why these choices exist)
+
+These design decisions were not obvious upfront. They emerged from debugging real failures:
+
+| Symptom | Root cause | Fix |
+|---------|-----------|-----|
+| ~1s video freezes at segment boundaries | VideoToolbox HW decoder drops frames during fast-seek (`-ss` before `-i`) | Remove `-hwaccel videotoolbox` from decode; keep HW encode only |
+| ~1s freezes at concat joins | Segments missing IDR keyframe at frame 0; concat `-c:v copy` hits undecodable P/B-frames | Add `-force_key_frames "expr:eq(n,0)"` to segment extraction |
+| PTS discontinuities / cranky playback | Different source clips produce segments with mismatched timebases | Always apply `fps=` filter to normalize timebase, even when FPS matches |
+| A/V sync drift at segment boundaries | Audio re-encoded during concat while video was stream-copied | Switch concat audio to `-c:a copy` (audio already normalized in Phase A) |
+| "moov atom may be corrupt" false positives | Seek test too tight (10s timeout for 2GB+ files) and imprecise diagnostics | Scale timeout with file size, test both start and midpoint, report specific failure mode |
