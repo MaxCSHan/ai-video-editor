@@ -13,6 +13,22 @@ from pathlib import Path
 import questionary
 from questionary import Style
 
+_GEMINI_UPLOAD_TIMEOUT_SEC = 300
+
+
+def _wait_for_gemini_file(video_file, client, timeout_sec: int = _GEMINI_UPLOAD_TIMEOUT_SEC):
+    """Poll until Gemini file processing completes, with timeout."""
+    start = time.monotonic()
+    while video_file.state.name == "PROCESSING":
+        if time.monotonic() - start > timeout_sec:
+            raise TimeoutError(
+                f"Gemini file processing timed out after {timeout_sec}s for {video_file.name}"
+            )
+        time.sleep(2)
+        video_file = client.files.get(name=video_file.name)
+    return video_file
+
+
 # Custom style matching the vx aesthetic
 VX_STYLE = Style(
     [
@@ -271,9 +287,7 @@ def run_quick_scan(
 
         print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
         video_file = client.files.upload(file=str(bundle["path"]))
-        while video_file.state.name == "PROCESSING":
-            time.sleep(2)
-            video_file = client.files.get(name=video_file.name)
+        video_file = _wait_for_gemini_file(video_file, client)
         if video_file.state.name == "FAILED":
             continue
         cache_file_uri(editorial_paths, cache_key, video_file.uri)

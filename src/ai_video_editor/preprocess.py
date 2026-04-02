@@ -10,6 +10,19 @@ from pathlib import Path
 from .config import PreprocessConfig, ProjectPaths
 
 
+def _escape_drawtext(text: str) -> str:
+    """Escape text for ffmpeg drawtext filter special characters."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("'", "\u2019")
+        .replace(":", "\\:")
+        .replace("%", "%%")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace(";", "\\;")
+    )
+
+
 def get_video_duration(video_path: Path) -> float:
     """Get video duration in seconds via ffprobe."""
     result = subprocess.run(
@@ -248,7 +261,7 @@ def create_proxy(
 ) -> Path:
     """Downscale video to a lightweight proxy for AI analysis."""
     proxy_path = paths.proxy / f"{video_path.stem}_proxy.mp4"
-    if proxy_path.exists():
+    if proxy_path.exists() and proxy_path.stat().st_size > 0:
         return proxy_path
     rot = _rotation_vf(rotation)
     # scale width to proxy_width, auto-calculate height preserving aspect ratio
@@ -277,7 +290,7 @@ def create_proxy(
             str(proxy_path),
         ]
     )
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
     return proxy_path
 
 
@@ -308,7 +321,7 @@ def extract_frames(
             str(frames_dir / "frame_%05d.jpg"),
         ]
     )
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
 
     duration = get_video_duration(video_path)
     frame_files = sorted(frames_dir.glob("frame_*.jpg"))
@@ -364,7 +377,19 @@ def detect_scenes(
             str(scenes_dir / "scene_%03d.jpg"),
         ]
     )
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    if result.returncode != 0:
+        print(f"  WARN: scene detection failed (rc={result.returncode}): {result.stderr[:200]}")
+        # Write empty manifest so cache prevents re-runs
+        empty_manifest = {
+            "source": str(video_path.name),
+            "threshold": cfg.scene_threshold,
+            "scene_count": 0,
+            "scenes": [],
+        }
+        (scenes_dir / "manifest.json").write_text(json.dumps(empty_manifest, indent=2))
+        return []
 
     scenes = []
     scene_files = sorted(scenes_dir.glob("scene_*.jpg"))
@@ -395,7 +420,7 @@ def detect_scenes(
 def extract_audio(video_path: Path, paths: ProjectPaths, cfg: PreprocessConfig) -> Path:
     """Extract audio as mono WAV for transcription."""
     audio_path = paths.audio / f"{video_path.stem}.wav"
-    if audio_path.exists():
+    if audio_path.exists() and audio_path.stat().st_size > 0:
         return audio_path
     subprocess.run(
         [
@@ -415,6 +440,7 @@ def extract_audio(video_path: Path, paths: ProjectPaths, cfg: PreprocessConfig) 
         capture_output=True,
         text=True,
         check=True,
+        timeout=120,
     )
     return audio_path
 
@@ -448,7 +474,7 @@ def generate_contact_sheet(
             str(sheet_path),
         ]
     )
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
     return sheet_path
 
 
@@ -532,7 +558,7 @@ def concat_proxies(
             try:
                 info = get_video_info(source_files[0])
                 creation_time = info.get("creation_time")
-            except Exception:
+            except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError):
                 pass
 
         clip_infos.append(
@@ -613,7 +639,7 @@ def concat_proxies(
             seg_path = concat_dir / f"_seg_{bundle_idx}_{i:03d}.mp4"
 
             # drawtext: show filename in top-left with semi-transparent background
-            label = c["filename"]
+            label = _escape_drawtext(c["filename"])
             drawtext = (
                 f"drawtext=text='{label}'"
                 f":fontsize=14:fontcolor=white"
@@ -642,7 +668,7 @@ def concat_proxies(
                 "+faststart",
                 str(seg_path),
             ]
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
             segment_files.append(seg_path)
 
             clips_manifest.append(
@@ -677,7 +703,7 @@ def concat_proxies(
             "+faststart",
             str(bundle_path),
         ]
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
 
         # Clean up temp segments and concat list
         for seg in segment_files:

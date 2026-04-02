@@ -13,10 +13,23 @@ FILE_API_CACHE_MAX_AGE_SEC = 90 * 60  # 90 minutes (Gemini keeps files for 2 hou
 
 
 def load_file_api_cache(editorial_paths: EditorialProjectPaths) -> dict:
-    """Load cached Gemini File API URIs."""
+    """Load cached Gemini File API URIs, purging expired entries."""
     cache_path = editorial_paths.root / "file_api_cache.json"
     if cache_path.exists():
-        return json.loads(cache_path.read_text())
+        try:
+            cache = json.loads(cache_path.read_text())
+        except json.JSONDecodeError:
+            return {}
+        # Purge expired entries
+        now = time.time()
+        expired = [
+            k for k, v in cache.items() if now - v.get("cached_at", 0) > FILE_API_CACHE_MAX_AGE_SEC
+        ]
+        if expired:
+            for k in expired:
+                del cache[k]
+            save_file_api_cache(editorial_paths, cache)
+        return cache
     return {}
 
 

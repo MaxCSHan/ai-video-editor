@@ -66,6 +66,9 @@ class LLMCallTrace:
     error: str | None = None
 
 
+_warned_models: set[str] = set()
+
+
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimate cost in USD for a given model and token counts."""
     rates = COST_PER_1M_TOKENS.get(model)
@@ -76,6 +79,11 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
                 rates = COST_PER_1M_TOKENS[key]
                 break
     if not rates:
+        if model not in _warned_models:
+            _warned_models.add(model)
+            print(
+                f"  WARN: Unknown model '{model}' for cost estimation — update COST_PER_1M_TOKENS"
+            )
         return 0.0
     return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
 

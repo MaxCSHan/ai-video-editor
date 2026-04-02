@@ -914,7 +914,7 @@ def _extract_segment(
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(output_path)])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         log.warning(
             "ffmpeg segment extraction failed for %s: %s", output_path.name, result.stderr[:500]
@@ -1117,6 +1117,7 @@ def assemble_rough_cut(
         ],
         capture_output=True,
         text=True,
+        timeout=600,
     )
 
     if result.returncode != 0:

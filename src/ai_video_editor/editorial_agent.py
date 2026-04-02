@@ -43,6 +43,30 @@ from .file_cache import (
 )
 
 
+GEMINI_UPLOAD_TIMEOUT_SEC = 300  # 5 minutes
+
+
+def _wait_for_gemini_file(video_file, client, timeout_sec: int = GEMINI_UPLOAD_TIMEOUT_SEC):
+    """Poll until Gemini file processing completes, with timeout."""
+    start = time.monotonic()
+    while video_file.state.name == "PROCESSING":
+        if time.monotonic() - start > timeout_sec:
+            raise TimeoutError(
+                f"Gemini file processing timed out after {timeout_sec}s for {video_file.name}"
+            )
+        time.sleep(3)
+        video_file = client.files.get(name=video_file.name)
+    return video_file
+
+
+def _require_api_key(name: str) -> str:
+    """Get a required API key from the environment, or raise with a helpful message."""
+    key = os.environ.get(name)
+    if not key:
+        raise RuntimeError(f"{name} is not set. Add it to your .env file (see .env.example).")
+    return key
+
+
 # ---------------------------------------------------------------------------
 # Clip discovery
 # ---------------------------------------------------------------------------
@@ -71,7 +95,11 @@ def discover_clips_from_manifest(
     manifest_path = editorial_paths.master_manifest
     if not manifest_path.exists():
         return [], {}
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"  WARN: corrupt manifest.json ({e}), treating as empty")
+        return [], {}
     return manifest.get("clips", []), manifest
 
 
@@ -161,12 +189,24 @@ def preprocess_all_clips(
 
         # Collect results preserving input order
         results_by_id = {}
+        failed_ids = []
         for fut in as_completed(futures):
             clip_id = futures[fut]
             try:
                 results_by_id[clip_id] = fut.result()
             except Exception as e:
                 print(f"  ERROR preprocessing {clip_id}: {e}")
+                failed_ids.append(clip_id)
+
+    if failed_ids:
+        print(
+            f"\n  WARNING: {len(failed_ids)}/{total} clips failed preprocessing: "
+            f"{', '.join(failed_ids)}"
+        )
+        if len(failed_ids) > total // 2:
+            raise RuntimeError(
+                f"Too many preprocessing failures ({len(failed_ids)}/{total}). Aborting."
+            )
 
     # Return in original file order
     return [results_by_id[f.stem] for f in clip_files if f.stem in results_by_id]
@@ -303,6 +343,7 @@ def transcribe_all_clips(
             )
             futures[fut] = clip_info["clip_id"]
 
+        failed_ids = []
         for fut in as_completed(futures):
             clip_id = futures[fut]
             try:
@@ -311,6 +352,13 @@ def transcribe_all_clips(
                     results[clip_id] = transcript
             except Exception as e:
                 print(f"  ERROR transcribing {clip_id}: {e}")
+                failed_ids.append(clip_id)
+
+    if failed_ids:
+        print(
+            f"\n  WARNING: {len(failed_ids)}/{total} clips failed transcription: "
+            f"{', '.join(failed_ids)}"
+        )
 
     return results
 
@@ -322,7 +370,10 @@ def _load_transcript_for_prompt(clip_paths) -> str | None:
         return None
     from .transcribe import format_transcript_for_prompt
 
-    transcript = json.loads(transcript_path.read_text())
+    try:
+        transcript = json.loads(transcript_path.read_text())
+    except json.JSONDecodeError:
+        return None
     if not transcript.get("has_speech"):
         return None
     return format_transcript_for_prompt(transcript)
@@ -342,7 +393,10 @@ def _load_all_transcripts_for_prompt(
         clip_paths = editorial_paths.clip_paths(clip_id)
         transcript_path = clip_paths.audio / "transcript.json"
         if transcript_path.exists():
-            t = json.loads(transcript_path.read_text())
+            try:
+                t = json.loads(transcript_path.read_text())
+            except json.JSONDecodeError:
+                continue
             if t.get("has_speech"):
                 transcripts[clip_id] = format_transcript_for_prompt(t, max_chars_per_clip)
 
@@ -378,10 +432,13 @@ def _review_single_clip_gemini(
     legacy_review = clip_paths.review / "review_gemini.json"
     if not force and (latest_review.exists() or legacy_review.exists()):
         cached = latest_review if latest_review.exists() else legacy_review
-        print(f"  {label}: review cached")
-        return json.loads(cached.read_text())
+        try:
+            print(f"  {label}: review cached")
+            return json.loads(cached.read_text())
+        except json.JSONDecodeError:
+            print(f"  {label}: corrupt cache, will re-review")
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
 
     # Check file cache before uploading (may already be cached by briefing or transcription)
     file_cache = load_file_api_cache(editorial_paths)
@@ -394,10 +451,7 @@ def _review_single_clip_gemini(
         print(f"  {label}: uploading proxy...")
         proxy_path = Path(clip_info["proxy_path"])
         video_file = client.files.upload(file=str(proxy_path))
-
-        while video_file.state.name == "PROCESSING":
-            time.sleep(3)
-            video_file = client.files.get(name=video_file.name)
+        video_file = _wait_for_gemini_file(video_file, client)
 
         if video_file.state.name == "FAILED":
             print(f"  {label}: WARNING — Gemini processing failed, skipping")
@@ -512,7 +566,10 @@ def run_phase1_gemini(
             for name in ["review_gemini_latest.json", "review_gemini.json"]:
                 cached = cp.review / name
                 if cached.exists():
-                    results_by_id[cid] = json.loads(cached.read_text())
+                    try:
+                        results_by_id[cid] = json.loads(cached.read_text())
+                    except json.JSONDecodeError:
+                        print(f"  WARN: corrupt cache {cached.name} for {cid}, skipping")
                     break
 
     # Return in original clip order
@@ -554,7 +611,10 @@ def run_phase1_claude(
             for name in ["review_claude_latest.json", "review_claude.json"]:
                 cached = clip_paths.review / name
                 if cached.exists():
-                    reviews.append(json.loads(cached.read_text()))
+                    try:
+                        reviews.append(json.loads(cached.read_text()))
+                    except json.JSONDecodeError:
+                        print(f"  WARN: corrupt cache {cached.name} for {clip_id}")
                     break
             continue
 
@@ -564,8 +624,13 @@ def run_phase1_claude(
             legacy_review = clip_paths.review / "review_claude.json"
             if not force and (latest_review.exists() or legacy_review.exists()):
                 cached = latest_review if latest_review.exists() else legacy_review
-                print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
-                reviews.append(json.loads(cached.read_text()))
+                try:
+                    print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
+                    reviews.append(json.loads(cached.read_text()))
+                except json.JSONDecodeError:
+                    print(
+                        f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: corrupt cache, will re-review"
+                    )
                 continue
 
         try:
@@ -683,7 +748,7 @@ def run_phase2(
         bundles = concat_proxies(editorial_paths, clip_ids)
 
         if bundles:
-            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+            client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
             file_cache = load_file_api_cache(editorial_paths)
 
             for i, bundle in enumerate(bundles):
@@ -697,9 +762,7 @@ def run_phase2(
 
                 print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
                 video_file = client.files.upload(file=str(bundle["path"]))
-                while video_file.state.name == "PROCESSING":
-                    time.sleep(3)
-                    video_file = client.files.get(name=video_file.name)
+                video_file = _wait_for_gemini_file(video_file, client)
                 if video_file.state.name == "FAILED":
                     print(f"  WARNING: bundle {i + 1} upload failed")
                     continue
@@ -735,7 +798,7 @@ def run_phase2(
             from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+            client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
 
         from .tracing import traced_gemini_generate
 
@@ -765,7 +828,7 @@ def run_phase2(
     elif provider == "claude":
         import anthropic
 
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
         response = client.messages.create(
             model=claude_cfg.model,
             max_tokens=claude_cfg.max_tokens * 2,
@@ -895,7 +958,7 @@ def run_monologue(
         from google.genai import types
         from .tracing import traced_gemini_generate
 
-        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
 
         with LLMSpinner("Generating visual monologue", provider="gemini"):
             response = traced_gemini_generate(
@@ -916,7 +979,7 @@ def run_monologue(
     elif provider == "claude":
         import anthropic
 
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
         with LLMSpinner("Generating visual monologue", provider="claude"):
             response = client.messages.create(
                 model=claude_cfg.model,

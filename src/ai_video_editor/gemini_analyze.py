@@ -18,12 +18,20 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+_GEMINI_UPLOAD_TIMEOUT_SEC = 300
+
+
 def upload_video(client: genai.Client, video_path: Path) -> types.File:
     """Upload video to Gemini File API and wait for processing."""
     print(f"  Uploading {video_path.name} ({video_path.stat().st_size / 1024 / 1024:.1f} MB)...")
     video_file = client.files.upload(file=str(video_path))
 
+    start = time.monotonic()
     while video_file.state.name == "PROCESSING":
+        if time.monotonic() - start > _GEMINI_UPLOAD_TIMEOUT_SEC:
+            raise TimeoutError(
+                f"Gemini file processing timed out after {_GEMINI_UPLOAD_TIMEOUT_SEC}s"
+            )
         print("  Waiting for Gemini to process video...")
         time.sleep(5)
         video_file = client.files.get(name=video_file.name)

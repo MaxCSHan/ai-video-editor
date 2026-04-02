@@ -1,9 +1,16 @@
 """Render EditorialStoryboard to markdown and HTML — pure templates, no LLM."""
 
+import html as html_mod
 import json
 import os
 import subprocess
 from pathlib import Path
+
+
+def _esc(val) -> str:
+    """Escape a value for safe HTML interpolation (XSS prevention)."""
+    return html_mod.escape(str(val), quote=True)
+
 
 from .models import EditorialStoryboard
 from .storyboard_format import format_duration
@@ -294,34 +301,34 @@ def render_html_preview(
         <tr class="edl-row" data-seg-index="{seg.index}" onclick="openSegment({seg.index})">
           <td class="idx">{seg.index}</td>
           <td class="thumb-cell">{thumb_html}</td>
-          <td><strong>{seg.clip_id}</strong></td>
+          <td><strong>{_esc(seg.clip_id)}</strong></td>
           <td class="tc">{format_duration(seg.in_sec)}</td>
           <td class="tc">{format_duration(seg.out_sec)}</td>
           <td class="tc">{seg.duration_sec:.1f}s</td>
-          <td><span class="tag" style="background:{color}">{seg.purpose}</span></td>
-          <td class="desc">{seg.description}</td>
-          <td class="trans">{seg.transition}</td>
+          <td><span class="tag" style="background:{color}">{_esc(seg.purpose)}</span></td>
+          <td class="desc">{_esc(seg.description)}</td>
+          <td class="trans">{_esc(seg.transition)}</td>
         </tr>"""
 
         timeline_blocks += f"""
         <div class="tl-block" style="width:{width_pct}%;background:{color}"
              data-seg-index="{seg.index}"
              onclick="openSegment({seg.index})"
-             title="#{seg.index} {seg.clip_id} ({seg.duration_sec:.1f}s) — {seg.purpose}">
+             title="#{seg.index} {_esc(seg.clip_id)} ({seg.duration_sec:.1f}s) — {_esc(seg.purpose)}">
           <span>{seg.index}</span>
         </div>"""
 
     # Cast, music, etc.
     cast_rows = "".join(
-        f"<tr><td><strong>{p.name}</strong></td><td>{p.description}</td><td>{p.role}</td><td>{', '.join(p.appears_in)}</td></tr>"
+        f"<tr><td><strong>{_esc(p.name)}</strong></td><td>{_esc(p.description)}</td><td>{_esc(p.role)}</td><td>{_esc(', '.join(p.appears_in))}</td></tr>"
         for p in sb.cast
     )
     music_rows = "".join(
-        f"<tr><td>{m.section}</td><td>{m.strategy}</td><td>{m.notes}</td></tr>"
+        f"<tr><td>{_esc(m.section)}</td><td>{_esc(m.strategy)}</td><td>{_esc(m.notes)}</td></tr>"
         for m in sb.music_plan
     )
-    tech_notes = "".join(f"<li>{n}</li>" for n in sb.technical_notes)
-    pacing = "".join(f"<li>{n}</li>" for n in sb.pacing_notes)
+    tech_notes = "".join(f"<li>{_esc(n)}</li>" for n in sb.technical_notes)
+    pacing = "".join(f"<li>{_esc(n)}</li>" for n in sb.pacing_notes)
     used = set(s.purpose for s in sb.segments)
     legend = "".join(
         f'<span><span class="dot" style="background:{PURPOSE_COLORS.get(p, "#999")}"></span>{p.replace("_", " ")}</span>'
@@ -331,19 +338,19 @@ def render_html_preview(
 
     video_html = ""
     if rough_cut_path and rough_cut_path.exists():
-        video_html = f'<video controls preload="metadata"><source src="{rough_cut_path.name}" type="video/mp4" /></video>'
+        video_html = f'<video controls preload="metadata"><source src="{_esc(rough_cut_path.name)}" type="video/mp4" /></video>'
     else:
         video_html = '<p class="muted">Run <code>vx cut</code> to generate the rough cut video.</p>'
 
     warn_html = ""
     if warnings:
-        warn_items = "".join(f"<li>{w}</li>" for w in warnings)
+        warn_items = "".join(f"<li>{_esc(w)}</li>" for w in warnings)
         warn_html = (
             f'<h2 style="color:#e74c3c">Warnings</h2><ul style="color:#e74c3c">{warn_items}</ul>'
         )
 
     arc_html = "".join(
-        f'<div class="arc-section"><div class="arc-title">{a.title}</div><div class="arc-body">{a.description[:250]}</div></div>'
+        f'<div class="arc-section"><div class="arc-title">{_esc(a.title)}</div><div class="arc-body">{_esc(a.description[:250])}</div></div>'
         for a in sb.story_arc
     )
 
@@ -352,7 +359,7 @@ def render_html_preview(
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{sb.title}</title>
+<title>{_esc(sb.title)}</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{ font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif; background: #0a0a0a; color: #e0e0e0; padding: 32px; max-width: 1200px; margin: 0 auto; }}
@@ -450,9 +457,9 @@ def render_html_preview(
 </head>
 <body>
 
-<h1>{sb.title}</h1>
-<div class="meta">{len(sb.segments)} segments &middot; ~{format_duration(total_dur)} &middot; {len(sb.cast)} cast &middot; {sb.style}</div>
-<p class="concept">{sb.story_concept}</p>
+<h1>{_esc(sb.title)}</h1>
+<div class="meta">{len(sb.segments)} segments &middot; ~{format_duration(total_dur)} &middot; {len(sb.cast)} cast &middot; {_esc(sb.style)}</div>
+<p class="concept">{_esc(sb.story_concept)}</p>
 
 <h2>Timeline <span style="font-weight:400;color:#555;text-transform:none;letter-spacing:0">(click a segment to preview &amp; adjust)</span></h2>
 <div class="timeline" id="timeline">{timeline_blocks}</div>

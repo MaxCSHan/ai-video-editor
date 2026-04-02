@@ -18,6 +18,7 @@ Commands:
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,6 +116,13 @@ def _header(text: str):
 def cmd_new(args, cfg: Config):
     """Create a new project from footage."""
     name = args.name
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        print(
+            f"{RED}Error:{RESET} Project name may only contain letters, digits, hyphens, and underscores."
+        )
+        sys.exit(1)
+
     source = Path(args.source).resolve()
 
     if not source.exists():

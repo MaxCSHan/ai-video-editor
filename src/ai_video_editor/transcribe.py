@@ -19,6 +19,24 @@ from typing import TYPE_CHECKING
 
 from .config import ProjectPaths, TranscribeConfig
 
+_GEMINI_UPLOAD_TIMEOUT_SEC = 300
+
+
+def _wait_for_gemini_file(video_file, client, label: str = ""):
+    """Poll until Gemini file processing completes, with timeout."""
+    start = time.monotonic()
+    while video_file.state.name == "PROCESSING":
+        if time.monotonic() - start > _GEMINI_UPLOAD_TIMEOUT_SEC:
+            raise TimeoutError(
+                f"Gemini file processing timed out after {_GEMINI_UPLOAD_TIMEOUT_SEC}s ({label})"
+            )
+        time.sleep(3)
+        video_file = client.files.get(name=video_file.name)
+    if video_file.state.name == "FAILED":
+        raise RuntimeError(f"Gemini file processing failed for {label}")
+    return video_file
+
+
 if TYPE_CHECKING:
     from .models import GeminiTranscript
 
@@ -193,6 +211,7 @@ def _merge_chunk_transcripts(
     all_speakers: set[str] = set()
     language = "unknown"
     has_speech = False
+    dropped_count = 0
 
     for offset_sec, chunk_dur, transcript in chunks:
         language = transcript.language
@@ -203,6 +222,7 @@ def _merge_chunk_transcripts(
         for seg in transcript.segments:
             # Discard segments where Gemini's timestamps drifted past the chunk boundary
             if seg.start > chunk_dur + 2.0:
+                dropped_count += 1
                 continue
             # Clamp end to chunk duration
             clamped_end = min(seg.end, chunk_dur)
@@ -215,6 +235,10 @@ def _merge_chunk_transcripts(
                     type=seg.type,
                 )
             )
+
+    if dropped_count > 0:
+        total_segs = sum(len(t.segments) for _, _, t in chunks)
+        print(f"  Transcript merge: dropped {dropped_count}/{total_segs} drifted segments")
 
     return GeminiTranscript(
         language=language,
@@ -254,11 +278,7 @@ def _transcribe_short_clip_gemini(
         file_uri = cached_uri
     else:
         video_file = client.files.upload(file=str(proxy_path))
-        while video_file.state.name == "PROCESSING":
-            time.sleep(3)
-            video_file = client.files.get(name=video_file.name)
-        if video_file.state.name == "FAILED":
-            raise RuntimeError(f"Gemini file upload failed for {clip_id}")
+        video_file = _wait_for_gemini_file(video_file, client, clip_id)
         file_uri = video_file.uri
         if editorial_paths:
             cache_file_uri(editorial_paths, clip_id, file_uri)
@@ -322,11 +342,7 @@ def _transcribe_single_chunk_gemini(
     client = genai.Client(api_key=api_key)
 
     video_file = client.files.upload(file=str(chunk_path))
-    while video_file.state.name == "PROCESSING":
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
-    if video_file.state.name == "FAILED":
-        raise RuntimeError(f"Gemini file upload failed for {chunk_label}")
+    video_file = _wait_for_gemini_file(video_file, client, chunk_label)
 
     prompt = _build_gemini_prompt(speaker_context)
 
@@ -408,28 +424,30 @@ def transcribe_clip_gemini(
     else:
         # Long video — chunked transcription
         print(f"  [{clip_id}] Splitting into {len(chunks)} chunks for transcription...")
-        chunk_results: list[tuple[float, float, GeminiTranscript]] = []
-        offset = 0.0
-        for i, chunk_path in enumerate(chunks):
-            chunk_label = f"chunk_{i:03d}"
-            chunk_dur = get_video_duration(chunk_path)
-            print(
-                f"  [{clip_id}] Transcribing {chunk_label} (offset {offset:.1f}s, {chunk_dur:.1f}s)..."
-            )
-            result = _transcribe_single_chunk_gemini(
-                chunk_path, cfg, speaker_context, tracer, clip_id, chunk_label
-            )
-            chunk_results.append((offset, chunk_dur, result))
-            offset += chunk_dur
-
-        gemini_result = _merge_chunk_transcripts(chunk_results)
-
-        # Clean up chunk files
         chunk_dir = proxy_path.parent / "_transcribe_chunks"
-        if chunk_dir.exists():
-            for f in chunk_dir.iterdir():
-                f.unlink()
-            chunk_dir.rmdir()
+        try:
+            chunk_results: list[tuple[float, float, GeminiTranscript]] = []
+            offset = 0.0
+            for i, chunk_path in enumerate(chunks):
+                chunk_label = f"chunk_{i:03d}"
+                chunk_dur = get_video_duration(chunk_path)
+                print(
+                    f"  [{clip_id}] Transcribing {chunk_label}"
+                    f" (offset {offset:.1f}s, {chunk_dur:.1f}s)..."
+                )
+                result = _transcribe_single_chunk_gemini(
+                    chunk_path, cfg, speaker_context, tracer, clip_id, chunk_label
+                )
+                chunk_results.append((offset, chunk_dur, result))
+                offset += chunk_dur
+
+            gemini_result = _merge_chunk_transcripts(chunk_results)
+        finally:
+            # Clean up chunk files even on error
+            if chunk_dir.exists():
+                for f in chunk_dir.iterdir():
+                    f.unlink()
+                chunk_dir.rmdir()
 
     # Transform lean Gemini response into canonical transcript.json format
     result = _gemini_to_canonical(gemini_result, cfg.gemini_model)
