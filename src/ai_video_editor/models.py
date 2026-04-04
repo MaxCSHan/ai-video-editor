@@ -7,7 +7,7 @@ These models are used for:
 4. ffmpeg rough cut assembly
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -48,18 +48,23 @@ class Transcript(BaseModel):
 
 
 class GeminiTranscriptSegment(BaseModel):
-    start: float  # seconds from clip start
-    end: float
-    text: str
-    speaker: str | None = None  # "Person_A", specific name, or None for non-speech
-    type: str = "speech"  # speech | music | sound_effect | silence
+    start: float = Field(description="Start time in seconds from clip start")
+    end: float = Field(description="End time in seconds from clip start")
+    text: str = Field(description="Transcribed text, or [inaudible] if speech is unclear")
+    speaker: str | None = Field(
+        default=None,
+        description="Speaker name or label (Speaker_A, Speaker_B). None for non-speech segments.",
+    )
+    type: str = Field(default="speech", description="speech, music, sound_effect, or silence")
 
 
 class GeminiTranscript(BaseModel):
-    language: str
-    segments: list[GeminiTranscriptSegment]
-    speakers: list[str] = []  # unique speaker labels
-    has_speech: bool
+    language: str = Field(description="Primary language detected (e.g. 'en', 'ja', 'zh')")
+    segments: list[GeminiTranscriptSegment] = Field(
+        description="Chronological list of audio segments"
+    )
+    speakers: list[str] = Field(default=[], description="All unique speaker labels detected")
+    has_speech: bool = Field(description="Whether any human speech was detected")
 
 
 # ---------------------------------------------------------------------------
@@ -68,24 +73,125 @@ class GeminiTranscript(BaseModel):
 
 
 class PersonSighting(BaseModel):
-    description: str  # "man in green PUMA shirt with race bib #30860"
-    estimated_appearances: int  # how many clips they appear in
-    role_guess: str  # "main subject", "companion", "bystander", "camera person"
+    description: str = Field(
+        description="Detailed visual appearance: clothing, hair, build, distinguishing features"
+    )
+    estimated_appearances: int = Field(description="How many clips this person appears in")
+    role_guess: str = Field(description="main_subject, companion, bystander, or camera_person")
 
 
 class ClipSummary(BaseModel):
-    clip_id: str
-    summary: str  # one-line description
-    energy: str  # "high", "medium", "low"
+    clip_id: str = Field(description="Exact clip identifier matching the filename")
+    summary: str = Field(description="One-line description of what happens in this clip")
+    energy: str = Field(description="high, medium, or low")
 
 
 class QuickScanResult(BaseModel):
-    overall_summary: str  # 2-3 sentences about the footage as a whole
-    people: list[PersonSighting]
-    activities: list[str]  # observed activities/locations
-    mood: str  # overall mood/energy description
-    suggested_questions: list[str]  # targeted questions to ask the filmmaker
-    clip_summaries: list[ClipSummary] = []
+    overall_summary: str = Field(description="2-3 sentences about the footage as a whole")
+    people: list[PersonSighting] = Field(description="All distinct people observed across clips")
+    activities: list[str] = Field(description="Activities, locations, and events observed")
+    mood: str = Field(description="Overall mood and energy of the footage")
+    suggested_questions: list[str] = Field(
+        description="Specific questions to ask the filmmaker based on what you observed "
+        "— focus on identifying people, relationships, and story context"
+    )
+    clip_summaries: list[ClipSummary] = Field(
+        default=[], description="Per-clip one-line summary and energy level"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 clip review models (Gemini response_schema)
+# ---------------------------------------------------------------------------
+
+
+class ReviewQuality(BaseModel):
+    overall: str = Field(description="good, fair, or poor")
+    stability: str = Field(description="steady, slightly_shaky, or very_shaky")
+    lighting: str = Field(description="well_lit, mixed, dark, or overexposed")
+    focus: str = Field(description="sharp, soft, or out_of_focus")
+    composition: str = Field(description="intentional, casual, or accidental")
+
+
+class ReviewPerson(BaseModel):
+    label: str = Field(description="Consistent label: person_A, person_B, etc.")
+    description: str = Field(
+        description="Detailed appearance: clothing, hair, build, "
+        "distinguishing features for cross-clip matching"
+    )
+    role: str = Field(description="main_subject, companion, bystander, or crowd")
+    screen_time_pct: float = Field(
+        description="Approximate fraction of clip where this person is visible (0.0-1.0)"
+    )
+    speaking: bool = Field(description="Whether this person speaks in the clip")
+    timestamps: list[str] = Field(
+        default=[], description="Time ranges when visible, e.g. ['0:05-0:30', '1:10-1:25']"
+    )
+
+
+class ReviewKeyMoment(BaseModel):
+    timestamp: str = Field(description="Human-readable timestamp M:SS")
+    timestamp_sec: float = Field(description="Timestamp in seconds from clip start")
+    description: str = Field(description="What happens at this moment")
+    editorial_value: str = Field(description="high, medium, or low")
+    suggested_use: str = Field(
+        description="opening_hook, establishing, context, action, reaction, "
+        "b_roll, cutaway, climax, or outro"
+    )
+
+
+class ReviewUsableSegment(BaseModel):
+    in_point: str = Field(description="Human-readable start time M:SS")
+    in_sec: float = Field(description="Start time in seconds from clip start")
+    out_point: str = Field(description="Human-readable end time M:SS")
+    out_sec: float = Field(description="End time in seconds from clip start")
+    duration_sec: float = Field(description="Segment duration in seconds")
+    description: str = Field(description="What this segment contains")
+    quality: str = Field(description="good or fair")
+
+
+class ReviewDiscardSegment(BaseModel):
+    in_point: str = Field(description="Human-readable start time M:SS")
+    out_point: str = Field(description="Human-readable end time M:SS")
+    reason: str = Field(
+        description="blurry, shaky, accidental, redundant, boring, lens_cap, or out_of_focus"
+    )
+
+
+class ReviewAudio(BaseModel):
+    has_speech: bool = Field(description="Whether speech is present")
+    speech_language: str | None = Field(default=None, description="Detected language or null")
+    speech_summary: str | None = Field(
+        default=None, description="Key things said, or null if no speech"
+    )
+    ambient_description: str = Field(
+        description="Ambient sounds: wind, crowd, traffic, silence, etc."
+    )
+    music_potential: str = Field(
+        description="good_for_music_bed, needs_music_overlay, or has_natural_soundtrack"
+    )
+
+
+class ClipReview(BaseModel):
+    clip_id: str = Field(description="Exact clip identifier — must match the clip_id provided")
+    summary: str = Field(description="2-3 sentence visual summary of the clip")
+    quality: ReviewQuality
+    content_type: list[str] = Field(
+        description="Types: talking_head, b_roll, action, landscape, "
+        "transition, establishing, accidental"
+    )
+    people: list[ReviewPerson] = Field(default=[], description="All people observed in this clip")
+    key_moments: list[ReviewKeyMoment] = Field(
+        default=[], description="Notable moments with editorial value"
+    )
+    usable_segments: list[ReviewUsableSegment] = Field(
+        description="Every usable segment — be thorough"
+    )
+    discard_segments: list[ReviewDiscardSegment] = Field(
+        default=[], description="Segments to exclude and why"
+    )
+    audio: ReviewAudio
+    editorial_notes: str = Field(description="Free-form: how this clip might fit into a final edit")
 
 
 # ---------------------------------------------------------------------------
@@ -94,22 +200,50 @@ class QuickScanResult(BaseModel):
 
 
 class CastMember(BaseModel):
-    name: str
-    description: str
-    role: str  # main_subject, companion, bystander
-    appears_in: list[str]  # clip_ids
+    name: str = Field(description="Person's name or label (e.g. 'person_A', 'Max')")
+    description: str = Field(
+        description="Visual appearance and distinguishing features for cross-clip matching"
+    )
+    role: str = Field(description="main_subject, companion, or bystander")
+    appears_in: list[str] = Field(description="List of clip_ids where this person appears")
 
 
 class Segment(BaseModel):
-    index: int
-    clip_id: str
-    in_sec: float  # seconds from clip start
-    out_sec: float  # seconds from clip start
-    purpose: str  # hook, establish, context, action, reaction, b_roll, cutaway, climax, payoff, reflection, outro, stakes, build_up, tension
-    description: str
-    transition: str  # cut, dissolve, fade_in, fade_out, fade_to_black, j_cut, l_cut, wipe
-    audio_note: str = ""
-    text_overlay: str = ""
+    index: int = Field(description="Sequential position in the final edit (0-based)")
+    clip_id: str = Field(
+        description="Exact clip_id from the clip reviews — must not be abbreviated or shortened"
+    )
+    in_sec: float = Field(
+        description="Start time in seconds from clip start. "
+        "Must fall within a usable_segment from the clip review."
+    )
+    out_sec: float = Field(
+        description="End time in seconds from clip start. Must not exceed the clip's duration."
+    )
+    purpose: str = Field(
+        description="Editorial role of this segment: "
+        "hook (attention-grabbing opener), establish (set location/mood), "
+        "context (provide background), action (key activity), "
+        "reaction (emotional response), b_roll (visual variety), "
+        "cutaway (brief insert), climax (peak moment), "
+        "payoff (resolution), reflection (quiet beat), outro (closing)"
+    )
+    description: str = Field(
+        description="Why this segment is included — what it contributes to the narrative arc, "
+        "not just what is visually happening"
+    )
+    transition: str = Field(
+        description="Transition into this segment: "
+        "cut (hard cut), dissolve (cross-dissolve), "
+        "fade_in, fade_out, j_cut (audio leads), l_cut (audio trails)"
+    )
+    audio_note: str = Field(
+        default="",
+        description="Audio strategy: preserve_dialogue, music_bed, ambient, voice_over, mute",
+    )
+    text_overlay: str = Field(
+        default="", description="On-screen text if needed, empty string if none"
+    )
 
     @property
     def duration_sec(self) -> float:
@@ -117,34 +251,64 @@ class Segment(BaseModel):
 
 
 class DiscardedClip(BaseModel):
-    clip_id: str
-    reason: str
+    clip_id: str = Field(description="Exact clip_id being discarded")
+    reason: str = Field(description="Why this clip is not used in the final edit")
 
 
 class MusicCue(BaseModel):
-    section: str
-    strategy: str
-    notes: str = ""
+    section: str = Field(description="Which story arc section this music covers")
+    strategy: str = Field(
+        description="Music approach: upbeat_background, emotional_underscore, "
+        "ambient_texture, silence, or natural_audio_only"
+    )
+    notes: str = Field(default="", description="Tempo, mood, or genre suggestions")
 
 
 class StoryArcSection(BaseModel):
-    title: str  # Opening Hook, Introduction, Body, Climax, Outro, etc.
-    description: str
-    segment_indices: list[int] = []  # indices into segments list
+    title: str = Field(description="Section name: Opening Hook, Rising Action, Climax, Outro, etc.")
+    description: str = Field(description="What this section accomplishes narratively")
+    segment_indices: list[int] = Field(
+        default=[], description="Indices into the segments list that belong to this section"
+    )
 
 
 class EditorialStoryboard(BaseModel):
-    title: str
-    estimated_duration_sec: float
-    style: str
-    story_concept: str
-    cast: list[CastMember] = []
-    story_arc: list[StoryArcSection] = []
-    segments: list[Segment]
-    discarded: list[DiscardedClip] = []
-    music_plan: list[MusicCue] = []
-    technical_notes: list[str] = []
-    pacing_notes: list[str] = []
+    editorial_reasoning: str = Field(
+        description="Think through the edit before producing the storyboard: "
+        "What story does this footage tell? What is the strongest opening hook? "
+        "How should the narrative flow chronologically? Which clips are redundant? "
+        "Where do speech and music carry the edit? How should pacing shift across sections?"
+    )
+    title: str = Field(description="Creative title for the final video")
+    estimated_duration_sec: float = Field(
+        description="Target total duration of the final edit in seconds"
+    )
+    style: str = Field(description="Video style matching the request (e.g. vlog, recap, highlight)")
+    story_concept: str = Field(
+        description="The narrative thesis — what makes this edit compelling, "
+        "not a plot summary but the editorial angle"
+    )
+    cast: list[CastMember] = Field(
+        default=[], description="People identified across clips with consistent identities"
+    )
+    story_arc: list[StoryArcSection] = Field(
+        default=[], description="Narrative structure dividing the edit into dramatic sections"
+    )
+    segments: list[Segment] = Field(
+        description="Ordered list of every segment in the final edit, from first to last"
+    )
+    discarded: list[DiscardedClip] = Field(
+        default=[], description="Clips intentionally excluded and why"
+    )
+    music_plan: list[MusicCue] = Field(
+        default=[], description="Music strategy for each section of the edit"
+    )
+    technical_notes: list[str] = Field(
+        default=[], description="Notes on color grading, aspect ratio, or format considerations"
+    )
+    pacing_notes: list[str] = Field(
+        default=[], description="Notes on rhythm, energy shifts, and timing"
+    )
 
     @property
     def total_segments_duration(self) -> float:

@@ -67,6 +67,7 @@ class ClaudeConfig:
     model: str = "claude-sonnet-4-20250514"
     max_images_per_batch: int = 20
     temperature: float = 0.2
+    phase2_temperature: float = 0.8
     max_tokens: int = 4096
 
 
@@ -75,6 +76,7 @@ class GeminiConfig:
     model: str = "gemini-3-flash-preview"
     phase2_model: str | None = "gemini-3-flash-preview"
     temperature: float = 0.2
+    phase2_temperature: float = 0.8
 
     @property
     def phase2(self) -> str:
