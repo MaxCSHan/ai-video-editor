@@ -168,6 +168,7 @@ def _preprocess_single_clip(
         "resolution_class": video_info["resolution_class"],
         "fps_float": video_info["fps_float"],
         "is_hdr": video_info["is_hdr"],
+        "creation_time": video_info.get("creation_time"),
     }
 
 
@@ -485,10 +486,13 @@ def _review_single_clip_gemini(
         transcript_text=transcript_text,
         style_supplement=style_supplement,
         user_context=user_context,
+        include_json_template=False,
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
     from .tracing import traced_gemini_generate
+
+    from .models import ClipReview
 
     response = traced_gemini_generate(
         client,
@@ -501,7 +505,11 @@ def _review_single_clip_gemini(
                 ]
             )
         ],
-        config=types.GenerateContentConfig(temperature=cfg.temperature),
+        config=types.GenerateContentConfig(
+            temperature=cfg.temperature,
+            response_mime_type="application/json",
+            response_schema=ClipReview,
+        ),
         phase="phase1",
         clip_id=clip_id,
         tracer=tracer,
@@ -509,7 +517,7 @@ def _review_single_clip_gemini(
         prompt_chars=len(prompt),
     )
 
-    review = parse_clip_review(response.text)
+    review = ClipReview.model_validate_json(response.text).model_dump()
 
     # Validate review quality
     val_warnings, val_critical = validate_clip_review(review, clip_info)
@@ -536,14 +544,18 @@ def _review_single_clip_gemini(
                     ]
                 )
             ],
-            config=types.GenerateContentConfig(temperature=cfg.temperature),
+            config=types.GenerateContentConfig(
+                temperature=cfg.temperature,
+                response_mime_type="application/json",
+                response_schema=ClipReview,
+            ),
             phase="phase1",
             clip_id=clip_id,
             tracer=tracer,
             num_video_files=1,
             prompt_chars=len(retry_prompt),
         )
-        review = parse_clip_review(retry_response.text)
+        review = ClipReview.model_validate_json(retry_response.text).model_dump()
         if tracer and tracer.traces:
             tracer.traces[-1].validation_retried = True
 
@@ -904,6 +916,24 @@ def run_phase2(
     if total_duration == 0:
         total_duration = sum(r.get("duration_sec", 0) for r in clip_reviews if "duration_sec" in r)
 
+    # Sort clip reviews in chronological filming order
+    filming_timeline = None
+    manifest_file = editorial_paths.master_manifest
+    if manifest_file.exists():
+        manifest_data = json.loads(manifest_file.read_text())
+        creation_times = {
+            c["clip_id"]: c.get("creation_time") for c in manifest_data.get("clips", [])
+        }
+        clip_reviews.sort(
+            key=lambda r: (creation_times.get(r.get("clip_id"), "") or "", r.get("clip_id", ""))
+        )
+        timeline_lines = []
+        for i, r in enumerate(clip_reviews, 1):
+            cid = r.get("clip_id", "unknown")
+            ct = creation_times.get(cid)
+            timeline_lines.append(f"  {i}. {cid} — filmed {ct}" if ct else f"  {i}. {cid}")
+        filming_timeline = "\n".join(timeline_lines)
+
     # Load transcripts for all clips
     transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
@@ -944,6 +974,8 @@ def run_phase2(
 
             visual_timeline = bundles
 
+    user_context_text = format_context_for_prompt(user_context) if user_context else None
+
     prompt = build_editorial_assembly_prompt(
         project_name=project_name,
         clip_reviews=clip_reviews,
@@ -953,12 +985,9 @@ def run_phase2(
         transcripts=transcripts,
         visual_timeline=visual_timeline,
         style_supplement=style_supplement,
+        filming_timeline=filming_timeline,
+        user_context_text=user_context_text,
     )
-
-    # Inject user context if provided
-    if user_context:
-        context_text = format_context_for_prompt(user_context)
-        prompt = prompt + "\n\n" + context_text
 
     p2_model = gemini_cfg.phase2 if gemini_cfg else None
     mode_label = "visual" if visual else "text-only"
@@ -984,7 +1013,7 @@ def run_phase2(
             model=p2_model,
             contents=contents,
             config=types.GenerateContentConfig(
-                temperature=gemini_cfg.temperature,
+                temperature=gemini_cfg.phase2_temperature,
                 response_mime_type="application/json",
                 response_schema=EditorialStoryboard,
             ),
@@ -1002,7 +1031,7 @@ def run_phase2(
         response = client.messages.create(
             model=claude_cfg.model,
             max_tokens=claude_cfg.max_tokens * 2,
-            temperature=claude_cfg.temperature,
+            temperature=claude_cfg.phase2_temperature,
             messages=[
                 {
                     "role": "user",
