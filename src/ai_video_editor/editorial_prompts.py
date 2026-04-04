@@ -689,6 +689,189 @@ def build_editorial_assembly_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Multi-call Phase 3 — Visual Monologue prompt builders
+# ---------------------------------------------------------------------------
+
+
+def build_monologue_call1_prompt(
+    storyboard,
+    transcripts: dict[str, str] | None = None,
+    user_context_text: str | None = None,
+) -> str:
+    """Call 1: Segment analysis & arc planning — which segments get overlays?"""
+    rows = []
+    for seg in storyboard.segments:
+        has_speech = "SPEECH" if seg.audio_note and "dialogue" in seg.audio_note.lower() else ""
+        if not has_speech and seg.audio_note and "preserve" in seg.audio_note.lower():
+            has_speech = "SPEECH"
+        rows.append(
+            f"  [{seg.index}] {seg.clip_id} {seg.in_sec:.1f}-{seg.out_sec:.1f}s "
+            f"({seg.duration_sec:.1f}s) purpose={seg.purpose} audio={seg.audio_note or 'none'} "
+            f"{'[HAS SPEECH]' if has_speech else '[NO SPEECH]'}: {seg.description}"
+        )
+
+    prompt = (
+        "You are analyzing a video edit timeline to plan text overlay placement.\n\n"
+        f"Title: {storyboard.title}\n"
+        f"Style: {storyboard.style}\n"
+        f"Story: {storyboard.story_concept}\n"
+    )
+
+    if user_context_text:
+        prompt += f"\n{user_context_text}\n"
+
+    prompt += "\nSegments:\n" + "\n".join(rows)
+
+    if transcripts:
+        prompt += "\n\nTranscripts (to verify speech presence):"
+        for cid, text in transcripts.items():
+            if text.strip():
+                prompt += f"\n### {cid}\n{text}"
+
+    prompt += (
+        "\n\n---\n"
+        "For each segment, determine if it is ELIGIBLE for text overlays:\n"
+        "- ELIGIBLE: No speech in the segment (check transcript + audio_note)\n"
+        "- NOT ELIGIBLE: Contains dialogue or speech (those get speech captions instead)\n\n"
+        "For eligible segments, provide:\n"
+        "- arc_phase: grounding_hook (first 15-20%), wandering_middle (20-80%), "
+        "resolution (final 20%)\n"
+        "- intent: what should the overlay accomplish at this narrative moment?\n"
+        "- preceding/following context: 1-line summary of adjacent speech segments\n"
+        "- max_overlay_count: 1-3 based on segment duration and arc phase\n\n"
+        "Also recommend a persona (conversational_confidant, detached_observer, "
+        "or stream_of_consciousness) with rationale.\n\n"
+        "Output as OverlayPlan JSON."
+    )
+    return prompt
+
+
+def build_monologue_call2_prompt(
+    overlay_plan,
+    storyboard,
+    persona_hint: str | None = None,
+) -> str:
+    """Call 2: Creative text generation within bounded segment windows."""
+    persona = persona_hint or overlay_plan.persona_recommendation
+
+    prompt = (
+        f"You are writing visual monologue text overlays as the **{persona}** persona.\n\n"
+        "WRITING RULES:\n"
+        "- ALL TEXT MUST BE LOWERCASE (the 'lowercase whisper' — soft, intimate tone)\n"
+        "- Use '...' for pauses, passage of time, or deep sighs\n"
+        "- Keep overlays concise: 5-8 words each\n"
+        "- Break one thought across multiple overlays on consecutive segments\n"
+        "- Two-Breath Rule: duration = word_count * 0.4 minimum, word_count * 0.6 recommended\n"
+        "- Leave at least 3 seconds of no-text between consecutive overlays\n"
+        "- Position: always 'lower_third'\n\n"
+        "SYNERGY: For each overlay, choose:\n"
+        "- 'harmony' — text matches visual mood\n"
+        "- 'dissonance' — text contrasts visuals for humor/relatability\n\n"
+    )
+
+    prompt += "ELIGIBLE SEGMENTS (write overlays ONLY for these):\n\n"
+    for es in overlay_plan.eligible_segments:
+        seg = next((s for s in storyboard.segments if s.index == es.segment_index), None)
+        prompt += f"## Segment {es.segment_index}"
+        if seg:
+            prompt += f" — {seg.description}"
+        prompt += (
+            f"\nDuration: {es.segment_duration_sec:.1f}s"
+            f"\nArc phase: {es.arc_phase}"
+            f"\nIntent: {es.intent}"
+            f"\nMax overlays: {es.max_overlay_count}"
+        )
+        if es.preceding_context:
+            prompt += f"\nPreceding speech: {es.preceding_context}"
+        if es.following_context:
+            prompt += f"\nFollowing speech: {es.following_context}"
+        if es.notes:
+            prompt += f"\nNotes: {es.notes}"
+        prompt += (
+            f"\n→ Write 1-{es.max_overlay_count} overlays. appear_at must be 0.0 to "
+            f"{es.segment_duration_sec:.1f}. appear_at + duration must not exceed "
+            f"{es.segment_duration_sec:.1f}.\n\n"
+        )
+
+    prompt += (
+        "MONOLOGUE ARC:\n"
+        "- grounding_hook segments: Welcome audience, establish theme/location/mood. "
+        "Most text-heavy section.\n"
+        "- wandering_middle segments: Reflect on what's happening. "
+        "Sparser — let visuals breathe.\n"
+        "- resolution segments: Wind down. Warm sign-off.\n\n"
+        "Output as OverlayDrafts JSON with all overlays in chronological order."
+    )
+    return prompt
+
+
+def validate_monologue_overlays(
+    overlays: list,
+    eligible_segments: list,
+    storyboard_segments: list,
+) -> tuple[list, list[str]]:
+    """Deterministic validation and auto-fix of monologue overlays.
+
+    Returns (fixed_overlays, fix_log).
+    """
+    fix_log = []
+    seg_durations = {es.segment_index: es.segment_duration_sec for es in eligible_segments}
+    eligible_indices = {es.segment_index for es in eligible_segments}
+
+    fixed = []
+    for ov in overlays:
+        # Skip overlays on non-eligible segments
+        if ov.segment_index not in eligible_indices:
+            fix_log.append(
+                f"Removed overlay on non-eligible segment {ov.segment_index}: '{ov.text}'"
+            )
+            continue
+
+        seg_dur = seg_durations.get(ov.segment_index, 999)
+
+        # Ensure lowercase
+        if ov.text != ov.text.lower():
+            fix_log.append(f"Lowercased: '{ov.text}' → '{ov.text.lower()}'")
+            ov.text = ov.text.lower()
+
+        # Clamp appear_at
+        if ov.appear_at < 0:
+            fix_log.append(f"Seg {ov.segment_index}: clamped appear_at {ov.appear_at:.1f} → 0.0")
+            ov.appear_at = 0.0
+
+        # Enforce word count
+        wc = len(ov.text.split())
+        ov.word_count = wc
+
+        # Enforce two-breath rule minimum
+        min_dur = wc * 0.4
+        if ov.duration_sec < min_dur:
+            fix_log.append(
+                f"Seg {ov.segment_index}: duration {ov.duration_sec:.1f}s "
+                f"below minimum {min_dur:.1f}s for {wc} words → fixed"
+            )
+            ov.duration_sec = min_dur
+
+        # Clamp to segment boundary
+        if ov.appear_at + ov.duration_sec > seg_dur:
+            old_dur = ov.duration_sec
+            ov.duration_sec = max(0.1, seg_dur - ov.appear_at)
+            fix_log.append(
+                f"Seg {ov.segment_index}: clamped duration {old_dur:.1f}s → {ov.duration_sec:.1f}s "
+                f"(segment boundary)"
+            )
+
+        # Skip if no time left
+        if ov.duration_sec < 0.5:
+            fix_log.append(f"Removed overlay too short after clamping: '{ov.text}'")
+            continue
+
+        fixed.append(ov)
+
+    return fixed, fix_log
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 — Visual Monologue (text overlay generation)
 # ---------------------------------------------------------------------------
 

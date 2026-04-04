@@ -375,6 +375,61 @@ class StoryPlan(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class EligibleSegment(BaseModel):
+    """A segment eligible for text overlays — output of monologue Call 1."""
+
+    segment_index: int = Field(description="Index into the storyboard segments list")
+    segment_duration_sec: float = Field(description="Duration of this segment in seconds")
+    arc_phase: str = Field(description="grounding_hook, wandering_middle, or resolution")
+    intent: str = Field(description="1 sentence: what the overlay should accomplish narratively")
+    preceding_context: str | None = Field(
+        default=None, description="1-line summary of the speech in the preceding segment"
+    )
+    following_context: str | None = Field(
+        default=None, description="1-line summary of the speech in the following segment"
+    )
+    max_overlay_count: int = Field(
+        default=2, description="Maximum number of overlays for this segment (1-3)"
+    )
+    notes: str = Field(default="", description="Additional placement or timing notes")
+
+
+class OverlayPlan(BaseModel):
+    """Segment analysis and arc planning — output of monologue Call 1."""
+
+    persona_recommendation: str = Field(
+        description="Recommended persona: conversational_confidant, detached_observer, "
+        "or stream_of_consciousness"
+    )
+    persona_rationale: str = Field(
+        description="1-2 sentences explaining why this persona fits the footage"
+    )
+    eligible_segments: list[EligibleSegment] = Field(
+        description="Segments eligible for text overlays (no speech, scenery/b-roll only)"
+    )
+
+
+class OverlayDraft(BaseModel):
+    """A single overlay draft — output of monologue Call 2."""
+
+    segment_index: int = Field(description="Which storyboard segment this overlay belongs to")
+    text: str = Field(description="The overlay text — lowercase, 5-8 words")
+    appear_at: float = Field(description="Seconds from segment start to show the overlay")
+    duration_sec: float = Field(description="How long the overlay stays on screen")
+    word_count: int = Field(description="Number of words in the text")
+    synergy: str = Field(default="harmony", description="harmony or dissonance")
+    arc_phase: str = Field(
+        default="", description="grounding_hook, wandering_middle, or resolution"
+    )
+    position: str = Field(default="lower_third", description="Always lower_third")
+
+
+class OverlayDrafts(BaseModel):
+    """Collection of overlay drafts — output of monologue Call 2."""
+
+    overlays: list[OverlayDraft] = Field(description="All overlay drafts in chronological order")
+
+
 class TextOverlayStyle(BaseModel):
     font: str = "sans-serif"  # "sans-serif" | "handwritten"
     case: str = "lowercase"  # "lowercase" | "sentence"
