@@ -1088,8 +1088,15 @@ def _project_actions(name, cfg):
                 if arts:
                     version_choices = []
                     for art in sorted(arts, key=lambda a: a.version):
-                        lineage = _format_lineage_ref(art)
-                        label = f"{art.artifact_id}{lineage}"
+                        # Plain text for questionary (no ANSI codes)
+                        lineage = ""
+                        if art.parent_id:
+                            lineage = f" <- {art.parent_id}"
+                        elif art.inputs:
+                            refs = [v for v in art.inputs.values() if v][:2]
+                            if refs:
+                                lineage = f" <- {', '.join(refs)}"
+                        label = f"v{art.version}{lineage}"
                         version_choices.append(questionary.Choice(label, value=art.version))
                     selected = questionary.select(
                         f"{NODE_FULL_NAMES[active_node]} versions:",
