@@ -41,7 +41,7 @@ pytest                      # Tests (no test suite yet)
 - `EditorialStoryboard` in `models.py` is the single source of truth. All timestamps in seconds (float), used directly by ffmpeg.
 - LLM calls occur in briefing (quick scan), transcription (Gemini), Phase 1, Phase 2, and Phase 3 (optional). Everything else is deterministic.
 - Clip IDs may be abbreviated by LLMs (e.g., `C0073` instead of `20260330114125_C0073`). `_resolve_clip_id_refs()` in `editorial_agent.py` handles fuzzy resolution via suffix matching.
-- Versioning (`versioning.py`): auto-incrementing versions with `_latest` symlinks. Version counters stored in `project.json`.
+- Versioning (`versioning.py`): Two-phase commit (`begin_version`/`commit_version`/`fail_version`) with `.meta.json` sidecar files for lineage tracking. Failed runs don't pollute `_latest` symlinks. Compositions (`compositions.json`) allow mixing storyboard + monologue versions. Experiment tracks namespace outputs under `storyboard/<track>/`. Legacy projects auto-migrated on first access.
 - Two LLM providers: Gemini (native video upload, structured output schema) and Claude (frame-based with base64 images). Provider-specific code in `gemini_analyze.py` and `claude_analyze.py` (descriptive mode) or branched within `editorial_agent.py` (editorial mode).
 
 **Project data lives in `library/<project-name>/`** with per-clip subdirectories under `clips/`. See README for full layout.

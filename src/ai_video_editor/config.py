@@ -171,9 +171,15 @@ class ProjectPaths:
 
 @dataclass
 class EditorialProjectPaths:
-    """Multi-clip editorial project layout."""
+    """Multi-clip editorial project layout.
+
+    Supports experiment tracks: named tracks store AI-generated artifacts
+    (storyboard, monologue, exports) in subdirectories, while sharing
+    preprocessing, transcription, and briefing with the main track.
+    """
 
     root: Path
+    track: str = "main"
 
     @property
     def clips_dir(self) -> Path:
@@ -182,11 +188,17 @@ class EditorialProjectPaths:
 
     @property
     def storyboard(self) -> Path:
-        return self.root / "storyboard"
+        base = self.root / "storyboard"
+        if self.track != "main":
+            return base / self.track
+        return base
 
     @property
     def exports(self) -> Path:
-        return self.root / "exports"
+        base = self.root / "exports"
+        if self.track != "main":
+            return base / self.track
+        return base
 
     @property
     def master_manifest(self) -> Path:
@@ -195,6 +207,10 @@ class EditorialProjectPaths:
     def clip_paths(self, clip_id: str) -> ProjectPaths:
         """Get ProjectPaths for a specific clip."""
         return ProjectPaths(root=self.clips_dir / clip_id)
+
+    def with_track(self, track: str) -> "EditorialProjectPaths":
+        """Return a copy of this paths object pointing to a different track."""
+        return EditorialProjectPaths(root=self.root, track=track)
 
     def discover_clips(self) -> list[str]:
         """List clip IDs that have been ingested.

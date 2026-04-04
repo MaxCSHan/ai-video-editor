@@ -10,7 +10,13 @@ from .config import EditorialProjectPaths, OutputFormat
 from .models import EditorialStoryboard
 from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
 from .render import render_html_preview
-from .versioning import next_version, versioned_dir, update_latest_symlink
+from .versioning import (
+    begin_version,
+    commit_version,
+    next_version,
+    versioned_dir,
+    update_latest_symlink,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1169,6 +1175,7 @@ def run_rough_cut(
     editorial_paths: EditorialProjectPaths,
     monologue=None,
     proxy_mode: bool = False,
+    composition=None,
 ) -> dict:
     """Load structured storyboard → validate → ffmpeg assembly → HTML preview.
 
@@ -1176,7 +1183,24 @@ def run_rough_cut(
 
     When *proxy_mode* is True, uses cached proxy files and manifest
     durations instead of original source files (offline mode).
+
+    When *composition* is provided (a Composition model), resolves storyboard
+    and monologue paths from artifact IDs instead of using the provided paths.
     """
+    # If a composition is provided, resolve paths from artifact IDs
+    if composition:
+        from .versioning import resolve_artifact_path
+
+        resolved_sb = resolve_artifact_path(editorial_paths.root, composition.storyboard)
+        if resolved_sb:
+            storyboard_json_path = resolved_sb
+        if composition.monologue:
+            resolved_mono = resolve_artifact_path(editorial_paths.root, composition.monologue)
+            if resolved_mono:
+                from .models import MonologuePlan
+
+                monologue = MonologuePlan.model_validate_json(resolved_mono.read_text())
+
     storyboard = EditorialStoryboard.model_validate_json(storyboard_json_path.read_text())
 
     # Build source map from manifest (clip_id → original file path)
@@ -1198,14 +1222,36 @@ def run_rough_cut(
                 if "duration_sec" in clip
             }
 
-    # Derive version from storyboard JSON filename (editorial_gemini_v4.json → 4)
+    # Derive version and build lineage
     import re
 
+    storyboard_input = {}
     v_match = re.search(r"_v(\d+)\.", storyboard_json_path.name)
     if v_match:
         v = int(v_match.group(1))
+        # Extract provider from filename (editorial_gemini_v4.json → gemini)
+        p_match = re.search(r"editorial_(\w+)_v\d+", storyboard_json_path.name)
+        if p_match:
+            storyboard_input["storyboard"] = f"storyboard:{p_match.group(1)}:v{v}"
     else:
         v = next_version(editorial_paths.root, "cut")
+
+    monologue_input = {}
+    if monologue:
+        monologue_input["monologue"] = "monologue:latest"
+
+    art_meta = begin_version(
+        editorial_paths.root,
+        phase="cut",
+        provider="ffmpeg",
+        inputs={**storyboard_input, **monologue_input},
+        target_dir=editorial_paths.exports,
+    )
+    # Use storyboard-derived version if available, otherwise use artifact version
+    if v_match:
+        art_meta.version = v
+    else:
+        v = art_meta.version
     vdir = versioned_dir(editorial_paths.exports, v)
     print(f"  Export version: v{v}")
     if proxy_mode:
@@ -1272,7 +1318,13 @@ def run_rough_cut(
     preview_path = vdir / "preview.html"
     preview_path.write_text(html)
 
-    # Symlink latest
+    # Commit version and symlink latest
+    commit_version(
+        editorial_paths.root,
+        art_meta,
+        output_paths=[rough_cut_path, preview_path],
+        target_dir=editorial_paths.exports,
+    )
     update_latest_symlink(vdir)
 
     return {

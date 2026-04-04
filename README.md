@@ -18,7 +18,7 @@ VX automates the editor's thinking, not just the cutting. Here's what that means
 
 **The output must be usable or it's worthless.** This is automation, not assistance. If the AI produces a storyboard that a human still needs to heavily rework, we've just added a step instead of removing one. Every segment in the EDL has precise in/out timestamps in seconds. The rough cut assembles from these without any human intervention. The HTML preview lets you verify and adjust, but the default should be good enough to share.
 
-**Iterate, don't perfect.** The versioning system exists because the first AI pass won't be the best. Run analyze, review, adjust the briefing, run again. Each version is preserved. The interactive preview lets you nudge cut points without re-running the AI. The goal is convergence: each pass gets closer to what you want.
+**Iterate, don't perfect.** The versioning system exists because the first AI pass won't be the best. Run analyze, review, adjust the briefing, run again. Each version is preserved with full lineage tracking — every artifact records which inputs produced it, what model and settings were used, and whether it completed or failed. Compositions let you mix-and-match versions across phases (storyboard v2 + monologue v1). Experiment tracks let you try different pipeline orderings (narrative-first vs vision-first) without disturbing the main workflow. The interactive preview lets you nudge cut points without re-running the AI. The goal is convergence: each pass gets closer to what you want.
 
 ## How It Works
 
@@ -136,6 +136,21 @@ vx status my-trip                     # Per-clip cache, versions, LLM usage
 vx config --provider gemini           # Set defaults
 ```
 
+### Versioning and composition
+
+```bash
+vx versions my-trip                   # List all artifact versions with lineage
+vx versions my-trip --all             # Include failed/pending versions
+vx compose my-trip                    # Create a named composition (interactive)
+vx cut my-trip --composition my-cut   # Assemble using a named composition
+vx cut my-trip --storyboard v3        # Use a specific storyboard version
+vx cut my-trip --storyboard v3 --monologue-version v1  # Mix specific versions
+vx monologue my-trip --storyboard v2  # Generate monologue from a specific storyboard
+vx analyze my-trip --track experiment # Run analysis on an experiment track
+vx track list --project my-trip       # List experiment tracks
+vx track create narrative-first --project my-trip  # Create a new track
+```
+
 ### Interactive HTML preview
 
 The preview (`storyboard/*_preview.html`) is an editing tool:
@@ -164,7 +179,8 @@ cp .env.example .env
 ```
 library/
   my-trip/
-    project.json                        # Type, provider, style, versions
+    project.json                        # Type, provider, style, versions, tracks
+    compositions.json                   # Named version combinations for cuts
     user_context.json                   # Briefing answers (people, tone, etc.)
     quick_scan.json                     # AI quick scan results (smart briefing)
     manifest.json                       # Aggregated clip metadata
@@ -180,10 +196,14 @@ library/
           transcript_preview.html       # Video + captions side-by-side viewer
         review/
           review_gemini_v1.json         # Phase 1 review (versioned, cached)
+          review_gemini_v1.meta.json    # Artifact sidecar (lineage, config, status)
           review_gemini_latest.json     # Symlink → latest version
     storyboard/
       editorial_gemini_v1.json          # Phase 2: structured data (source of truth)
+      editorial_gemini_v1.meta.json     # Artifact sidecar (inputs, config snapshot)
       editorial_gemini_v1.md            # Rendered markdown
+      monologue_gemini_v1.json          # Phase 3: text overlay plan
+      monologue_gemini_v1.meta.json     # Artifact sidecar (storyboard lineage)
     exports/
       v1/                               # Versioned rough cuts
         rough_cut.mp4
@@ -200,15 +220,15 @@ src/ai_video_editor/
   briefing.py           # Editorial briefing + AI-guided smart briefing (quick scan)
   transcribe.py         # Audio transcription (mlx-whisper local + Gemini cloud)
   tracing.py            # LLM call tracing (tokens, cost, timing per API call)
-  models.py             # Pydantic models (EditorialStoryboard, Transcript, etc.)
-  config.py             # Settings, paths, provider configs, OutputFormat
+  models.py             # Pydantic models (EditorialStoryboard, ArtifactMeta, Composition, etc.)
+  config.py             # Settings, paths, provider configs, OutputFormat, track-aware paths
   preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached, hwaccel)
   format_analyzer.py    # Source format detection, Live Photo filter, output recommendation
   editorial_prompts.py  # Phase 1 + 2 prompt engineering
   editorial_agent.py    # Multi-clip orchestrator (transcribe, review, assemble)
   render.py             # Markdown + interactive HTML from Pydantic models
   rough_cut.py          # Validation + format-normalized ffmpeg assembly (no LLM)
-  versioning.py         # Run versioning with symlinks
+  versioning.py         # Composable versioning: begin/commit/fail, lineage, compositions
 ```
 
 ## LLM Calls
@@ -421,6 +441,46 @@ spans.to_json("debug_traces.jsonl", orient="records", lines=True)
 | `library/<project>/clips/<clip>/audio/transcript.json` | Transcription output |
 | `library/<project>/user_context.json` | Briefing context passed to all LLM calls |
 | `library/<project>/quick_scan.json` | AI quick scan results (briefing input) |
+
+## Versioning and Composition
+
+VX uses an artifact-centric versioning system where every LLM-generated output is a self-describing artifact with lineage tracking.
+
+### How it works
+
+Every phase (clip review, storyboard, monologue, rough cut) produces versioned output files with `.meta.json` sidecar files that record:
+
+- **Lineage** — which inputs produced this output (e.g., storyboard v3 was built from review v1 reviews)
+- **Status** — `pending`, `complete`, or `failed`. Failed runs never become `_latest` or increment version counters
+- **Config snapshot** — which model, temperature, and style were used
+
+The versioning protocol is two-phase commit: `begin_version()` reserves a version number, and `commit_version()` finalizes it only on success. This prevents interrupted or failed runs from creating phantom versions.
+
+### Compositions
+
+A composition is a named combination of artifact versions for rendering:
+
+```json
+{"name": "my-cut", "storyboard": "storyboard:gemini:v3", "monologue": "monologue:gemini:v1"}
+```
+
+This lets you mix-and-match: use storyboard v3's edit decisions with monologue v1's text overlays. Create compositions via `vx compose` (interactive) or the TUI's "Compose a cut" action.
+
+### Experiment tracks
+
+Tracks are lightweight namespaces for trying different pipeline configurations without disturbing the main workflow. For example, a "narrative-first" track where you generate the monologue before the storyboard:
+
+```bash
+vx track create narrative-first --project my-trip
+vx monologue my-trip --track narrative-first --storyboard v2
+vx analyze my-trip --track narrative-first
+```
+
+Tracks share preprocessing, transcription, and briefing (expensive/deterministic). Only AI-generated artifacts and downstream outputs are per-track. Track outputs go to `storyboard/<track>/` and `exports/<track>/`.
+
+### Legacy migration
+
+Existing projects (before the composable versioning system) are automatically migrated on first access. The migration scans existing versioned files and creates `.meta.json` sidecars retroactively. Legacy sidecars have empty lineage (`inputs: {}`), but all new runs record full lineage.
 
 ## Rough Cut: Decode → Encode → Concat Pipeline
 

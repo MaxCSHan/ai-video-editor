@@ -396,6 +396,10 @@ def _project_actions(name, cfg):
         choices.append("Edit briefing (AI-guided)")
         choices.append("Edit briefing (manual)")
         choices.append("Set style preset")
+        if has_storyboard:
+            choices.append("Compose a cut")
+            choices.append("Compare versions")
+        choices.append("Version history")
         choices.append("Show status")
         if has_rough_cut:
             choices.append("Open rough cut video")
@@ -428,12 +432,23 @@ def _project_actions(name, cfg):
         elif action == "Regenerate preview":
             from .models import EditorialStoryboard
             from .render import render_html_preview
-            from .versioning import next_version, versioned_dir, update_latest_symlink
+            from .versioning import (
+                begin_version,
+                commit_version,
+                versioned_dir,
+                update_latest_symlink,
+            )
 
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
                 sb = EditorialStoryboard.model_validate_json(json_files[0].read_text())
-                v = next_version(ep.root, "preview")
+                art_meta = begin_version(
+                    ep.root,
+                    phase="preview",
+                    provider="render",
+                    target_dir=ep.exports,
+                )
+                v = art_meta.version
                 vdir = versioned_dir(ep.exports, v)
                 # Embed existing rough cut if available
                 rough_cut_path = None
@@ -450,6 +465,9 @@ def _project_actions(name, cfg):
                 )
                 preview_path = vdir / "preview.html"
                 preview_path.write_text(html)
+                commit_version(
+                    ep.root, art_meta, output_paths=[preview_path], target_dir=ep.exports
+                )
                 update_latest_symlink(vdir)
                 print(f"\n  Preview v{v} generated: {preview_path}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
@@ -568,8 +586,231 @@ def _project_actions(name, cfg):
                 (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
         elif action == "Manage clips":
             _manage_clips(name, meta, cfg)
+        elif action == "Compose a cut":
+            _compose_cut_flow(name, ep)
+        elif action == "Compare versions":
+            _compare_versions_flow(name, ep)
+        elif action == "Version history":
+            _version_history_flow(name, ep)
         elif action == "Show status":
             _show_status(name, meta, cfg)
+
+
+def _compose_cut_flow(name, ep):
+    """Guided flow: pick storyboard + monologue → save composition → optionally assemble."""
+    from datetime import datetime, timezone
+    from .versioning import list_artifacts, save_composition, list_compositions
+    from .models import Composition, EditorialStoryboard
+    from .storyboard_format import format_duration
+
+    storyboards = [
+        a for a in list_artifacts(ep.root) if a.phase == "storyboard" and a.status == "complete"
+    ]
+    if not storyboards:
+        print("\n  No storyboards found. Run analysis first.")
+        return
+
+    # Pick storyboard
+    sb_choices = []
+    for sb in storyboards:
+        # Load summary info
+        label = f"{sb.artifact_id}"
+        try:
+            sb_path = ep.storyboard / [f for f in sb.output_files if f.endswith(".json")][0]
+            if sb_path.exists():
+                data = EditorialStoryboard.model_validate_json(sb_path.read_text())
+                dur = format_duration(data.total_segments_duration)
+                label += f"  ({len(data.segments)} segments, {dur})"
+        except Exception:
+            pass
+        sb_choices.append(questionary.Choice(label, value=sb))
+
+    selected_sb = questionary.select(
+        "Pick storyboard version:",
+        choices=sb_choices,
+        style=VX_STYLE,
+    ).ask()
+    if not selected_sb:
+        return
+
+    # Pick monologue (optional)
+    monologues = [
+        a for a in list_artifacts(ep.root) if a.phase == "monologue" and a.status == "complete"
+    ]
+    selected_mono = None
+    if monologues:
+        mono_choices = [questionary.Choice("None (no text overlays)", value=None)]
+        for m in monologues:
+            mono_choices.append(questionary.Choice(f"{m.artifact_id}  (v{m.version})", value=m))
+
+        selected_mono = questionary.select(
+            "Include monologue?",
+            choices=mono_choices,
+            style=VX_STYLE,
+        ).ask()
+
+    # Name the composition
+    existing = list_compositions(ep.root)
+    default_name = f"comp-{len(existing) + 1}"
+    comp_name = questionary.text(
+        "Composition name:",
+        default=default_name,
+        style=VX_STYLE,
+    ).ask()
+    if not comp_name:
+        return
+
+    comp = Composition(
+        name=comp_name,
+        storyboard=selected_sb.artifact_id,
+        monologue=selected_mono.artifact_id if selected_mono else None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    save_composition(ep.root, comp)
+    mono_str = f" + {selected_mono.artifact_id}" if selected_mono else ""
+    print(f"\n  Saved: {comp_name} = {selected_sb.artifact_id}{mono_str}")
+
+    # Offer to assemble now
+    if questionary.confirm("Assemble rough cut now?", default=True, style=VX_STYLE).ask():
+        from .versioning import resolve_artifact_path
+
+        sb_path = resolve_artifact_path(ep.root, comp.storyboard)
+        if sb_path:
+            from .rough_cut import run_rough_cut
+            from .models import MonologuePlan
+
+            monologue_obj = None
+            if comp.monologue:
+                mono_path = resolve_artifact_path(ep.root, comp.monologue)
+                if mono_path:
+                    monologue_obj = MonologuePlan.model_validate_json(mono_path.read_text())
+
+            result = run_rough_cut(
+                storyboard_json_path=sb_path,
+                editorial_paths=ep,
+                monologue=monologue_obj,
+            )
+            v = result.get("version", "?")
+            print(f"\n  Rough cut v{v} assembled.")
+            if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
+                subprocess.run(["open", str(result["preview"])])
+
+
+def _compare_versions_flow(name, ep):
+    """Side-by-side comparison of two storyboard versions."""
+    from .versioning import list_artifacts
+    from .models import EditorialStoryboard
+    from .storyboard_format import format_duration
+
+    storyboards = [
+        a for a in list_artifacts(ep.root) if a.phase == "storyboard" and a.status == "complete"
+    ]
+    if len(storyboards) < 2:
+        print("\n  Need at least 2 storyboard versions to compare.")
+        return
+
+    sb_choices = [questionary.Choice(f"{sb.artifact_id}", value=sb) for sb in storyboards]
+
+    sb_a = questionary.select("First version:", choices=sb_choices, style=VX_STYLE).ask()
+    if not sb_a:
+        return
+    sb_b = questionary.select(
+        "Second version:",
+        choices=[c for c in sb_choices if c.value != sb_a],
+        style=VX_STYLE,
+    ).ask()
+    if not sb_b:
+        return
+
+    # Load both storyboards
+    try:
+        path_a = ep.storyboard / [f for f in sb_a.output_files if f.endswith(".json")][0]
+        path_b = ep.storyboard / [f for f in sb_b.output_files if f.endswith(".json")][0]
+        data_a = EditorialStoryboard.model_validate_json(path_a.read_text())
+        data_b = EditorialStoryboard.model_validate_json(path_b.read_text())
+    except Exception as e:
+        print(f"\n  Error loading storyboards: {e}")
+        return
+
+    print(f"\n  Comparing {sb_a.artifact_id} vs {sb_b.artifact_id}:")
+    print(f"  {'':36s} {'v' + str(sb_a.version):>10s}  {'v' + str(sb_b.version):>10s}")
+    print(f"  {'Segments':36s} {len(data_a.segments):>10d}  {len(data_b.segments):>10d}")
+    print(
+        f"  {'Duration':36s} {format_duration(data_a.total_segments_duration):>10s}  {format_duration(data_b.total_segments_duration):>10s}"
+    )
+
+    clips_a = {s.clip_id for s in data_a.segments}
+    clips_b = {s.clip_id for s in data_b.segments}
+    only_a = clips_a - clips_b
+    only_b = clips_b - clips_a
+    if only_a:
+        print(f"  Only in v{sb_a.version}: {', '.join(sorted(only_a)[:5])}")
+    if only_b:
+        print(f"  Only in v{sb_b.version}: {', '.join(sorted(only_b)[:5])}")
+    if not only_a and not only_b:
+        print("  Same clips used in both versions")
+
+    discarded_a = len(data_a.discarded)
+    discarded_b = len(data_b.discarded)
+    if discarded_a != discarded_b:
+        print(f"  {'Discarded clips':36s} {discarded_a:>10d}  {discarded_b:>10d}")
+
+
+def _version_history_flow(name, ep):
+    """Show version history for all phases."""
+    from datetime import datetime
+    from .versioning import list_artifacts, list_compositions
+
+    artifacts = list_artifacts(ep.root, include_failed=True)
+
+    if not artifacts:
+        from .versioning import all_versions
+
+        versions = all_versions(ep.root)
+        if versions:
+            print("\n  Legacy versioning (no artifact metadata):")
+            for phase, v in sorted(versions.items()):
+                print(f"    {phase}: v{v}")
+        else:
+            print("\n  No versions found.")
+        return
+
+    phases = {}
+    for art in artifacts:
+        phases.setdefault(art.phase, []).append(art)
+
+    phase_labels = {
+        "storyboard": "Storyboards (Phase 2)",
+        "monologue": "Monologues (Phase 3)",
+        "cut": "Rough Cuts",
+        "preview": "Previews",
+    }
+
+    for phase, arts in phases.items():
+        label = phase_labels.get(phase, phase.title())
+        print(f"\n  {label}:")
+        for art in arts:
+            status = {"complete": "OK", "failed": "FAIL", "pending": "..."}.get(art.status, "?")
+            try:
+                ts = datetime.fromisoformat(art.created_at)
+                ts_str = ts.strftime("%m-%d %H:%M")
+            except Exception:
+                ts_str = ""
+
+            lineage = ""
+            if art.inputs:
+                lineage_parts = [f"{v}" for v in art.inputs.values() if v]
+                if lineage_parts:
+                    lineage = f"  <- {', '.join(lineage_parts[:3])}"
+
+            print(f"    {art.artifact_id}  [{status}]  {ts_str}{lineage}")
+
+    comps = list_compositions(ep.root)
+    if comps:
+        print("\n  Compositions:")
+        for c in comps:
+            mono_part = f" + {c.monologue}" if c.monologue else ""
+            print(f"    {c.name}: {c.storyboard}{mono_part}")
 
 
 def _manage_clips(name, meta, cfg):

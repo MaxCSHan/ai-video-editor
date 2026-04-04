@@ -635,9 +635,12 @@ def cmd_analyze(args, cfg: Config):
 
         style_preset = get_preset(preset_key)
 
+    track = getattr(args, "track", None)
     _header(f"Analyzing: {name} ({provider})")
     if style_preset:
         print(f"  Style preset: {style_preset.label}")
+    if track:
+        print(f"  Track: {track}")
 
     if meta["type"] == "editorial":
         from .editorial_agent import run_editorial_pipeline
@@ -897,10 +900,16 @@ def cmd_preview(args, cfg: Config):
 
     from .models import EditorialStoryboard
     from .render import render_html_preview
-    from .versioning import next_version, versioned_dir, update_latest_symlink
+    from .versioning import begin_version, commit_version, versioned_dir, update_latest_symlink
 
     sb = EditorialStoryboard.model_validate_json(json_path.read_text())
-    v = next_version(ep.root, "preview")
+    art_meta = begin_version(
+        ep.root,
+        phase="preview",
+        provider="render",
+        target_dir=ep.exports,
+    )
+    v = art_meta.version
     vdir = versioned_dir(ep.exports, v)
 
     # Find existing rough cut to embed (use latest if available)
@@ -919,6 +928,7 @@ def cmd_preview(args, cfg: Config):
     )
     preview_path = vdir / "preview.html"
     preview_path.write_text(html)
+    commit_version(ep.root, art_meta, output_paths=[preview_path], target_dir=ep.exports)
     update_latest_symlink(vdir)
 
     print(f"  {BOLD}Version:{RESET}    v{v}")
@@ -944,16 +954,60 @@ def cmd_cut(args, cfg: Config):
 
     ep = cfg.editorial_project(name)
 
-    json_path = _find_storyboard_json(ep)
+    # Check for composition-based cut
+    composition = None
+    if getattr(args, "composition", None):
+        from .versioning import get_composition
+
+        composition = get_composition(project_root, args.composition)
+        if not composition:
+            print(f"{RED}Error:{RESET} Composition '{args.composition}' not found.")
+            sys.exit(1)
+        print(f"  Using composition: {args.composition}")
+
+    # Resolve storyboard path (composition > --storyboard flag > latest)
+    if composition:
+        from .versioning import resolve_artifact_path
+
+        json_path = resolve_artifact_path(project_root, composition.storyboard)
+        if not json_path:
+            print(f"{RED}Error:{RESET} Could not resolve storyboard: {composition.storyboard}")
+            sys.exit(1)
+    elif getattr(args, "storyboard", None):
+        # --storyboard v3 → find editorial_*_v3.json
+        sv = args.storyboard.lstrip("v")
+        matches = list(ep.storyboard.glob(f"editorial_*_v{sv}.json"))
+        if not matches:
+            print(f"{RED}Error:{RESET} No storyboard v{sv} found.")
+            sys.exit(1)
+        json_path = matches[0]
+    else:
+        json_path = _find_storyboard_json(ep)
     if not json_path:
         print(
             f"{RED}Error:{RESET} No structured storyboard JSON found. Run {BOLD}vx analyze {name}{RESET} first."
         )
         sys.exit(1)
 
-    # Load monologue plan if --overlays requested
+    # Load monologue plan if --overlays requested or composition has monologue
     monologue = None
-    if getattr(args, "overlays", False):
+    if composition and composition.monologue:
+        from .versioning import resolve_artifact_path as _rap
+        from .models import MonologuePlan
+
+        mono_path = _rap(project_root, composition.monologue)
+        if mono_path:
+            monologue = MonologuePlan.model_validate_json(mono_path.read_text())
+            print(f"  With monologue: {composition.monologue}")
+    elif getattr(args, "monologue_version", None):
+        mv = args.monologue_version.lstrip("v")
+        matches = list(ep.storyboard.glob(f"monologue_*_v{mv}.json"))
+        if matches:
+            from .models import MonologuePlan
+
+            monologue = MonologuePlan.model_validate_json(matches[0].read_text())
+            print(f"  With monologue: v{mv}")
+    elif getattr(args, "overlays", False):
         monologue_path = _find_monologue_json(ep)
         if not monologue_path:
             print(
@@ -976,6 +1030,7 @@ def cmd_cut(args, cfg: Config):
         storyboard_json_path=json_path,
         editorial_paths=ep,
         monologue=monologue,
+        composition=composition,
     )
 
     v = result.get("version", "?")
@@ -1036,6 +1091,224 @@ def cmd_config(args, cfg: Config):
     )
     print(f"  Frames:    every {pc.frame_interval_sec}s @ {pc.frame_width}x{pc.frame_height}")
     print(f"  Scene:     threshold {pc.scene_threshold}")
+
+
+# ---------------------------------------------------------------------------
+# Versioning commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_versions(args, cfg: Config):
+    """List all artifact versions with lineage."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    from .versioning import list_artifacts, list_compositions, current_version
+
+    _header(f"Versions: {name}")
+
+    include_failed = getattr(args, "all", False)
+    artifacts = list_artifacts(project_root, include_failed=include_failed)
+
+    if not artifacts:
+        # Fall back to showing version counters from project.json
+        versions = meta.get("versions", {})
+        if versions:
+            print(f"  {DIM}(Legacy versioning — no artifact metadata){RESET}")
+            for phase, v in sorted(versions.items()):
+                print(f"    {phase}: v{v}")
+        else:
+            print(f"  {DIM}No versions found. Run {BOLD}vx analyze {name}{RESET} first.{RESET}")
+        return
+
+    # Group by phase
+    phases = {}
+    for art in artifacts:
+        phases.setdefault(art.phase, []).append(art)
+
+    phase_labels = {
+        "review": "Phase 1 Reviews",
+        "storyboard": "Storyboards (Phase 2)",
+        "monologue": "Monologues (Phase 3)",
+        "cut": "Rough Cuts",
+        "preview": "Previews",
+    }
+
+    for phase, arts in phases.items():
+        label = phase_labels.get(phase, phase.title())
+        print(f"\n  {BOLD}{label}:{RESET}")
+        latest_v = current_version(project_root, phase)
+        for art in arts:
+            status_icon = {
+                "complete": f"{GREEN}OK{RESET}",
+                "failed": f"{RED}FAIL{RESET}",
+                "pending": f"{YELLOW}...{RESET}",
+            }.get(art.status, "?")
+
+            # Format timestamp
+            try:
+                ts = datetime.fromisoformat(art.created_at)
+                ts_str = ts.strftime("%m-%d %H:%M")
+            except Exception:
+                ts_str = ""
+
+            latest_tag = f"  {GREEN}[latest]{RESET}" if art.version == latest_v else ""
+
+            # Lineage
+            lineage = ""
+            if art.inputs:
+                lineage_parts = [f"{v}" for v in art.inputs.values() if v]
+                if lineage_parts:
+                    lineage = f"  {DIM}<- {', '.join(lineage_parts[:3])}{RESET}"
+
+            print(f"    {art.artifact_id}  [{status_icon}]  {ts_str}{lineage}{latest_tag}")
+
+    # Show compositions
+    comps = list_compositions(project_root)
+    if comps:
+        print(f"\n  {BOLD}Compositions:{RESET}")
+        for c in comps:
+            mono_part = f" + {c.monologue}" if c.monologue else ""
+            print(f"    {c.name}: {c.storyboard}{mono_part}")
+
+
+def cmd_compose(args, cfg: Config):
+    """Create a named composition of artifact versions."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    from .versioning import list_artifacts, save_composition, list_compositions
+    from .models import Composition
+
+    # List available storyboards
+    storyboards = [a for a in list_artifacts(project_root) if a.phase == "storyboard"]
+    if not storyboards:
+        print(f"{RED}Error:{RESET} No storyboards found. Run {BOLD}vx analyze {name}{RESET} first.")
+        sys.exit(1)
+
+    print(f"\n  {BOLD}Available storyboards:{RESET}")
+    for i, sb in enumerate(storyboards, 1):
+        print(f"    {i}. {sb.artifact_id}  ({sb.provider}, v{sb.version})")
+
+    sb_choice = input(f"\n  Select storyboard [1-{len(storyboards)}]: ").strip()
+    try:
+        sb_idx = int(sb_choice) - 1
+        selected_sb = storyboards[sb_idx]
+    except (ValueError, IndexError):
+        print(f"{RED}Error:{RESET} Invalid selection.")
+        return
+
+    # List available monologues
+    monologues = [a for a in list_artifacts(project_root) if a.phase == "monologue"]
+    selected_mono = None
+    if monologues:
+        print(f"\n  {BOLD}Available monologues:{RESET}")
+        for i, m in enumerate(monologues, 1):
+            print(f"    {i}. {m.artifact_id}  ({m.provider}, v{m.version})")
+        print("    0. None (no text overlays)")
+
+        mono_choice = input(f"\n  Select monologue [0-{len(monologues)}]: ").strip()
+        try:
+            mono_idx = int(mono_choice)
+            if mono_idx > 0:
+                selected_mono = monologues[mono_idx - 1]
+        except (ValueError, IndexError):
+            pass
+
+    # Name the composition
+    comp_name = args.name if hasattr(args, "name") and args.name else None
+    if not comp_name:
+        comp_name = input("  Composition name: ").strip()
+    if not comp_name:
+        comp_name = f"comp-{len(list_compositions(project_root)) + 1}"
+
+    comp = Composition(
+        name=comp_name,
+        storyboard=selected_sb.artifact_id,
+        monologue=selected_mono.artifact_id if selected_mono else None,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    save_composition(project_root, comp)
+
+    mono_str = f" + {selected_mono.artifact_id}" if selected_mono else ""
+    print(f"\n  {GREEN}Composition '{comp_name}' saved:{RESET}")
+    print(f"    {selected_sb.artifact_id}{mono_str}")
+    print(f"\n  Use it: {DIM}vx cut {name} --composition {comp_name}{RESET}")
+
+
+def cmd_track(args, cfg: Config):
+    """Manage experiment tracks."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    from .versioning import write_project_meta
+
+    sub_action = args.track_action
+
+    if sub_action == "list":
+        tracks = meta.get("tracks", {"main": {}})
+        _header(f"Tracks: {name}")
+        for track_name, track_meta in tracks.items():
+            desc = track_meta.get("description", "")
+            desc_str = f"  {DIM}— {desc}{RESET}" if desc else ""
+            print(f"    {BOLD}{track_name}{RESET}{desc_str}")
+
+    elif sub_action == "create":
+        track_name = args.track_name
+        if not track_name:
+            print(f"{RED}Error:{RESET} Specify a track name.")
+            sys.exit(1)
+        tracks = meta.setdefault("tracks", {"main": {}})
+        if track_name in tracks:
+            print(f"{YELLOW}Track '{track_name}' already exists.{RESET}")
+            return
+        description = getattr(args, "description", "") or ""
+        tracks[track_name] = {
+            "description": description,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_project_meta(project_root, meta)
+        print(f"  {GREEN}Track '{track_name}' created.{RESET}")
+
+    elif sub_action == "delete":
+        track_name = args.track_name
+        if track_name == "main":
+            print(f"{RED}Error:{RESET} Cannot delete the main track.")
+            sys.exit(1)
+        tracks = meta.get("tracks", {})
+        if track_name not in tracks:
+            print(f"{RED}Error:{RESET} Track '{track_name}' not found.")
+            sys.exit(1)
+        del tracks[track_name]
+        write_project_meta(project_root, meta)
+        print(f"  {GREEN}Track '{track_name}' deleted.{RESET}")
+
+    else:
+        print("  Use: vx track {list|create|delete} [project]")
 
 
 # ---------------------------------------------------------------------------
@@ -1151,6 +1424,11 @@ def main():
         metavar="USD",
         help="Abort if cumulative LLM cost exceeds this amount (e.g., 0.50)",
     )
+    p_analyze.add_argument(
+        "--track",
+        metavar="NAME",
+        help="Run analysis on an experiment track (outputs to track subdirectory)",
+    )
 
     # --- monologue ---
     p_monologue = sub.add_parser(
@@ -1165,6 +1443,11 @@ def main():
     p_monologue.add_argument("--force", action="store_true", help="Re-generate even if cached")
     p_monologue.add_argument(
         "--provider", choices=["gemini", "claude"], help="Override AI provider"
+    )
+    p_monologue.add_argument(
+        "--storyboard",
+        metavar="VERSION",
+        help="Use a specific storyboard version (e.g., v2) instead of latest",
     )
 
     # --- brief ---
@@ -1192,6 +1475,46 @@ def main():
         action="store_true",
         help="Burn visual monologue text overlays into the video",
     )
+    p_cut.add_argument(
+        "--composition",
+        metavar="NAME",
+        help="Use a named composition (storyboard + monologue combination)",
+    )
+    p_cut.add_argument(
+        "--storyboard",
+        metavar="VERSION",
+        help="Use a specific storyboard version (e.g., v3)",
+    )
+    p_cut.add_argument(
+        "--monologue-version",
+        metavar="VERSION",
+        help="Use a specific monologue version (e.g., v1)",
+    )
+
+    # --- versions ---
+    p_versions = sub.add_parser(
+        "versions", aliases=["ver"], help="List artifact versions with lineage"
+    )
+    p_versions.add_argument("project", nargs="?", help="Project name")
+    p_versions.add_argument("--all", action="store_true", help="Include failed/pending versions")
+
+    # --- compose ---
+    p_compose = sub.add_parser(
+        "compose", help="Create a named composition (storyboard + monologue combination)"
+    )
+    p_compose.add_argument("project", nargs="?", help="Project name")
+    p_compose.add_argument("--name", help="Composition name")
+
+    # --- track ---
+    p_track = sub.add_parser("track", help="Manage experiment tracks")
+    p_track.add_argument(
+        "track_action",
+        choices=["list", "create", "delete"],
+        help="Track action",
+    )
+    p_track.add_argument("track_name", nargs="?", help="Track name (for create/delete)")
+    p_track.add_argument("--project", dest="project", help="Project name")
+    p_track.add_argument("--description", help="Track description (for create)")
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
@@ -1222,6 +1545,10 @@ def main():
         "brief": cmd_brief,
         "preview": cmd_preview,
         "cut": cmd_cut,
+        "versions": cmd_versions,
+        "ver": cmd_versions,
+        "compose": cmd_compose,
+        "track": cmd_track,
         "config": cmd_config,
     }
 

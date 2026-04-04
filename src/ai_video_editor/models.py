@@ -184,3 +184,43 @@ class MonologuePlan(BaseModel):
     total_text_time_sec: float  # sum of overlay durations
     pacing_notes: list[str] = []
     music_sync_notes: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# Versioning: artifact metadata and composition
+# ---------------------------------------------------------------------------
+
+
+class ArtifactMeta(BaseModel):
+    """Sidecar metadata for every versioned output.
+
+    Lives next to the versioned file: editorial_gemini_v4.json → editorial_gemini_v4.meta.json
+    Tracks lineage (which inputs produced this output), status, and config snapshot.
+    """
+
+    artifact_id: str  # "storyboard:gemini:v3" or "review:gemini:C0073:v2"
+    phase: str  # "review", "storyboard", "monologue", "cut", "preview"
+    provider: str  # "gemini", "claude"
+    version: int
+    status: str = "pending"  # "pending" | "complete" | "failed"
+    created_at: str  # ISO timestamp
+    completed_at: str | None = None
+    inputs: dict[str, str] = {}  # role → artifact_id (lineage tracking)
+    clip_id: str | None = None  # set for per-clip Phase 1 reviews
+    track: str = "main"  # experiment track namespace
+    config_snapshot: dict = {}  # model, temperature, style used for this run
+    output_files: list[str] = []  # relative paths of outputs produced
+    error: str | None = None  # failure reason if status="failed"
+
+
+class Composition(BaseModel):
+    """A named combination of artifact versions for rendering a rough cut.
+
+    Allows mixing storyboard v2 + monologue v1 instead of always using _latest.
+    """
+
+    name: str  # "default", "narrative-first-take1"
+    storyboard: str  # artifact_id, e.g. "storyboard:gemini:v3"
+    monologue: str | None = None  # artifact_id, optional
+    created_at: str  # ISO timestamp
+    notes: str = ""

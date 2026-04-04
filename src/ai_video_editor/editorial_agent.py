@@ -22,7 +22,8 @@ from .editorial_prompts import (
     parse_clip_review,
 )
 from .versioning import (
-    next_version,
+    begin_version,
+    commit_version,
     versioned_path,
     versioned_dir,
     update_latest_symlink,
@@ -539,11 +540,18 @@ def _review_single_clip_gemini(
         if tracer and tracer.traces:
             tracer.traces[-1].validation_retried = True
 
-    v = next_version(clip_paths.root, "review_gemini")
-    vpath = versioned_path(clip_paths.review / "review_gemini.json", v)
+    meta = begin_version(
+        clip_paths.root,
+        phase="review",
+        provider="gemini",
+        clip_id=clip_id,
+        config_snapshot={"model": cfg.model, "temperature": cfg.temperature},
+        target_dir=clip_paths.review,
+    )
+    vpath = versioned_path(clip_paths.review / "review_gemini.json", meta.version)
     vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
-    update_latest_symlink(vpath)
-    print(f"  {label}: review complete (v{v})")
+    commit_version(clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review)
+    print(f"  {label}: review complete (v{meta.version})")
     return review
 
 
@@ -728,10 +736,19 @@ def run_phase1_claude(
 
             review = parse_clip_review(response.content[0].text)
 
-            v = next_version(clip_paths.root, "review_claude")
-            vpath = versioned_path(clip_paths.review / "review_claude.json", v)
+            meta = begin_version(
+                clip_paths.root,
+                phase="review",
+                provider="claude",
+                clip_id=clip_id,
+                config_snapshot={"model": cfg.model, "temperature": cfg.temperature},
+                target_dir=clip_paths.review,
+            )
+            vpath = versioned_path(clip_paths.review / "review_claude.json", meta.version)
             vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
-            update_latest_symlink(vpath)
+            commit_version(
+                clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review
+            )
             reviews.append(review)
         except Exception as e:
             print(f"  ERROR reviewing {clip_id}: {e}")
@@ -992,7 +1009,27 @@ def run_phase2(
 
     # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
-    v = next_version(editorial_paths.root, "analyze")
+
+    # Build lineage: record which review versions were used
+    review_inputs = {}
+    for r in clip_reviews:
+        cid = r.get("clip_id", "")
+        review_inputs[f"review:{cid}"] = cid
+    cfg_snap = {}
+    if gemini_cfg:
+        cfg_snap = {"model": gemini_cfg.phase2, "temperature": gemini_cfg.temperature}
+    elif claude_cfg:
+        cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
+
+    art_meta = begin_version(
+        editorial_paths.root,
+        phase="storyboard",
+        provider=provider,
+        inputs=review_inputs,
+        config_snapshot=cfg_snap,
+        target_dir=editorial_paths.storyboard,
+    )
+    v = art_meta.version
     base = f"editorial_{provider}"
 
     # 1. Primary: structured JSON
@@ -1015,6 +1052,13 @@ def run_phase2(
     preview_path = export_dir / "preview.html"
     preview_path.write_text(html)
     update_latest_symlink(export_dir)
+
+    commit_version(
+        editorial_paths.root,
+        art_meta,
+        output_paths=[json_path, md_path, preview_path],
+        target_dir=editorial_paths.storyboard,
+    )
 
     print(f"  v{v} outputs:")
     print(f"    JSON:    {json_path}")
@@ -1139,12 +1183,43 @@ def run_monologue(
 
     # Version and save
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
-    v = next_version(editorial_paths.root, "monologue")
+
+    # Build lineage: which storyboard was this monologue derived from
+    storyboard_input = {}
+    storyboard_latest = editorial_paths.storyboard / f"editorial_{provider}_latest.json"
+    if storyboard_latest.exists():
+        import re as _re
+
+        resolved = storyboard_latest.resolve()
+        vm = _re.search(r"_v(\d+)\.json$", resolved.name)
+        if vm:
+            storyboard_input["storyboard"] = f"storyboard:{provider}:v{vm.group(1)}"
+
+    cfg_snap = {}
+    if gemini_cfg:
+        cfg_snap = {"model": gemini_cfg.model, "temperature": gemini_cfg.temperature}
+    elif claude_cfg:
+        cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
+
+    art_meta = begin_version(
+        editorial_paths.root,
+        phase="monologue",
+        provider=provider,
+        inputs=storyboard_input,
+        config_snapshot=cfg_snap,
+        target_dir=editorial_paths.storyboard,
+    )
+    v = art_meta.version
     base = f"monologue_{provider}"
 
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
     json_path.write_text(monologue.model_dump_json(indent=2))
-    update_latest_symlink(json_path)
+    commit_version(
+        editorial_paths.root,
+        art_meta,
+        output_paths=[json_path],
+        target_dir=editorial_paths.storyboard,
+    )
 
     overlay_count = len(monologue.overlays)
     text_time = monologue.total_text_time_sec
