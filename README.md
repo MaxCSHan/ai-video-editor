@@ -295,7 +295,9 @@ The trace file `traces.jsonl` contains one JSON object per LLM call with fields:
 
 VX includes an optional integration with [Arize Phoenix](https://github.com/Arize-AI/phoenix) for visual trace inspection and debugging. **End users do not need this** — it's a developer tool for diagnosing LLM quality issues.
 
-#### Step 1: Install tracing dependencies
+The tracing server runs as a **standalone process** — start it once and all VX commands (CLI and TUI) automatically connect to it. Like LangGraph Studio, you can review past and current traces at any time.
+
+#### Step 1: Install tracing dependencies (one-time)
 
 ```bash
 uv pip install -e ".[tracing]"
@@ -303,35 +305,65 @@ uv pip install -e ".[tracing]"
 
 This installs `arize-phoenix` and the OpenInference auto-instrumentor for Google GenAI. It does not affect normal `vx` usage.
 
-#### Step 2: Run the pipeline with tracing enabled
+#### Step 2: Start the tracing server
+
+In a separate terminal:
 
 ```bash
-VX_TRACING=1 vx analyze my-trip
+vx trace
 ```
 
 You'll see:
 
 ```
-  [Tracing] Phoenix enabled — http://localhost:6006
+VX Tracing Server
+  Phoenix UI: http://localhost:6006
+  Storage:    /Users/you/.vx/phoenix
+  Press Ctrl+C to stop.
 ```
 
-Phoenix starts in the background. Every Gemini API call is automatically captured with full prompt, response, token counts, and timing.
+The server persists trace data to `~/.vx/phoenix/` — traces survive restarts.
 
-#### Step 3: Open the Phoenix UI
+#### Step 3: Use VX normally — tracing auto-connects
+
+```bash
+vx analyze my-trip                # Traces sent automatically
+vx transcribe my-trip             # Also traced
+vx                                # TUI mode — also traced
+```
+
+When a command connects to the tracing server, you'll see a status line:
+
+```
+  Tracing: connected (http://localhost:6006)
+```
+
+If the server isn't running, VX works normally with no tracing overhead — the connection check takes <200ms and silently skips.
+
+#### Step 4: Open the Phoenix UI
 
 Open http://localhost:6006 in your browser. You'll see a timeline of all LLM calls with:
 - Full input prompt (what was sent to the model)
 - Full output response (what the model returned)
 - Token counts and latency
 - Hierarchical span view (which phase each call belongs to)
+- Past traces from previous runs (persisted in SQLite)
 
-#### Step 4: Investigate a specific call
+#### Step 5: Investigate a specific call
 
 1. **Find the call**: Filter by span name (e.g., `generate_content`) or look at the timeline
 2. **Read the prompt**: Click a span to see the full input — the prompt text, attached video URIs, and config (temperature, response_schema)
 3. **Read the response**: See the full LLM output — the raw JSON before parsing
 4. **Check tokens**: Compare actual token usage with the estimate from `--dry-run`
 5. **Check for retries**: If a call was retried (transient error), you'll see multiple spans for the same phase/clip
+
+#### Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `vx trace --port 9999` | `6006` | Custom server port |
+| `vx trace --storage /path/to/dir` | `~/.vx/phoenix` | Custom storage directory |
+| `VX_TRACE_URL=http://host:port` | `http://localhost:6006` | Connect to a remote/custom server |
 
 ### Reviewing a bad storyboard
 
@@ -408,7 +440,7 @@ for phase, cost in sorted(phases.items()):
 ```python
 import phoenix as px
 
-# Connect to local Phoenix (must have been started with VX_TRACING=1)
+# Connect to local Phoenix (must have `vx trace` running in another terminal)
 client = px.Client()
 
 # Get all LLM spans as a DataFrame

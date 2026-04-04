@@ -285,32 +285,77 @@ class LLMSpinner:
 
 
 # ---------------------------------------------------------------------------
-# Phoenix observability (dev-only, optional)
+# Phoenix observability (standalone server, dev-only, optional)
+#
+# Usage:
+#   Terminal 1: vx trace              (starts Phoenix server, stays running)
+#   Terminal 2: vx analyze my-trip    (auto-connects if server is reachable)
 # ---------------------------------------------------------------------------
 
-_phoenix_initialized = False
+DEFAULT_TRACE_URL = "http://localhost:6006"
+
+_phoenix_connected = False
+_phoenix_url: str | None = None
 
 
-def _init_phoenix():
-    """Start Phoenix tracing if VX_TRACING=1 and deps installed. No-op otherwise."""
+def _probe_phoenix(url: str, timeout: float = 0.15) -> bool:
+    """Check if a Phoenix server is reachable. Uses stdlib only (no extra deps)."""
+    import urllib.request
+
+    try:
+        urllib.request.urlopen(url, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def connect_phoenix(url: str | None = None) -> bool:
+    """Connect to a running Phoenix server and auto-instrument the Gemini SDK.
+
+    Returns True if connected, False if server unreachable or deps not installed.
+    Safe to call multiple times (idempotent).
+    """
     import os
 
-    global _phoenix_initialized
-    if _phoenix_initialized or os.environ.get("VX_TRACING") != "1":
-        return
+    global _phoenix_connected, _phoenix_url
+    if _phoenix_connected:
+        return True
+
+    url = url or os.environ.get("VX_TRACE_URL", DEFAULT_TRACE_URL)
+
+    if not _probe_phoenix(url):
+        return False
+
     try:
-        import phoenix as px
         from phoenix.otel import register
 
-        px.launch_app(run_in_thread=True)
-        register(project_name="vx-pipeline")
+        register(project_name="vx-pipeline", endpoint=f"{url}/v1/traces")
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
         GoogleGenAIInstrumentor().instrument()
-        _phoenix_initialized = True
-        print("  [Tracing] Phoenix enabled — http://localhost:6006")
+        _phoenix_connected = True
+        _phoenix_url = url
+        return True
     except ImportError:
-        pass
+        return False
+
+
+def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> None:
+    """Start Phoenix as a blocking foreground server. Used by `vx trace`."""
+    import os
+
+    import phoenix as px
+
+    storage = storage_dir or Path.home() / ".vx" / "phoenix"
+    storage.mkdir(parents=True, exist_ok=True)
+    os.environ["PHOENIX_WORKING_DIR"] = str(storage)
+
+    px.launch_app(host="0.0.0.0", port=port)
+
+
+def get_phoenix_status() -> tuple[bool, str | None]:
+    """Return (connected, url) for display in CLI/TUI status lines."""
+    return _phoenix_connected, _phoenix_url
 
 
 # ---------------------------------------------------------------------------

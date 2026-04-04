@@ -56,39 +56,29 @@ Tracing is a dev/debugging tool. The integration must be:
 # pyproject.toml
 [project.optional-dependencies]
 tracing = [
-    "arize-phoenix>=8.0",
+    "arize-phoenix",
     "openinference-instrumentation-google-genai",
-    "openinference-instrumentation-anthropic",
 ]
-dev = ["ruff", "pytest", "arize-phoenix", "openinference-instrumentation-google-genai", "openinference-instrumentation-anthropic"]
 ```
 
-```python
-# tracing.py — initialization (dev-only, no-op for users)
-_phoenix_initialized = False
+**Standalone server model (implemented):**
 
-def _init_phoenix():
-    """Start Phoenix tracing if installed. No-op otherwise."""
-    global _phoenix_initialized
-    if _phoenix_initialized:
-        return
-    _phoenix_initialized = True
-    try:
-        import phoenix as px
-        from phoenix.otel import register
-        px.launch_app(run_in_thread=True)  # background, non-blocking
-        register(project_name="vx-pipeline")
+```bash
+# Terminal 1: start the tracing server (persistent, survives restarts)
+vx trace
 
-        # Auto-instrument Gemini
-        from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
-        GoogleGenAIInstrumentor().instrument()
+# Terminal 2: use VX normally — auto-connects to Phoenix
+vx analyze my-trip              # "Tracing: connected (http://localhost:6006)"
+vx transcribe my-trip           # Also traced
+vx                              # TUI mode — also traced
 
-        # Auto-instrument Claude
-        from openinference.instrumentation.anthropic import AnthropicInstrumentor
-        AnthropicInstrumentor().instrument()
-    except ImportError:
-        pass  # Phoenix not installed — user mode, skip silently
+# Browser: review traces at any time
+open http://localhost:6006
 ```
+
+The server stores traces in `~/.vx/phoenix/` (SQLite). Every `vx` command that does LLM work probes the server at startup (<200ms). If reachable, Gemini SDK is auto-instrumented. If not, silently skips with zero degradation.
+
+Configuration: `VX_TRACE_URL` env var overrides the default `http://localhost:6006` for remote servers.
 
 ### CLI Debuggability — How Claude Code Uses Traces
 
@@ -180,13 +170,13 @@ If we later adopt a framework (LangGraph, Instructor, etc.), it plugs into the s
 
 ## Task List
 
-### Phase A: Phoenix Integration (Dev-Only)
+### Phase A: Phoenix Integration (Dev-Only) — COMPLETE
 
-- [ ] **A.1** Add `arize-phoenix` + OpenInference instrumentors to `[project.optional-dependencies]` in `pyproject.toml`
-- [ ] **A.2** Add `_init_phoenix()` to `tracing.py` — lazy init, graceful ImportError fallback
-- [ ] **A.3** Call `_init_phoenix()` at pipeline start (`run_editorial_pipeline()`) — only when `VX_TRACING=1` env var is set
-- [ ] **A.4** Add `traced_claude_generate()` wrapper (currently Claude calls are untraced)
-- [ ] **A.5** Keep `traces.jsonl` + `ProjectTracer` as always-on local fallback — Phoenix supplements, doesn't replace
+- [x] **A.1** Add `arize-phoenix` + OpenInference instrumentor to `[project.optional-dependencies]`
+- [x] **A.2** Standalone server: `vx trace` command starts Phoenix as foreground process with persistent storage
+- [x] **A.3** Auto-connect: every LLM command probes server at startup, instruments SDK if reachable
+- [x] **A.4** TUI integration: banner shows tracing status on connect
+- [x] **A.5** `traces.jsonl` + `ProjectTracer` remain always-on local fallback
 - [ ] **A.6** Add `vx debug-traces` CLI command — thin wrapper around `px.Client().get_spans()` for quick terminal inspection
 
 ### Phase B: Retry & Resilience
@@ -236,42 +226,40 @@ editorial_agent.py ──→ traced_gemini_generate() ──→ traces.jsonl (ap
 Claude calls ──→ untraced
 ```
 
-#### Target architecture
+#### Target architecture (implemented)
 
 ```
-tracing.py: _init_phoenix()  ←── only when VX_TRACING=1
-    │
-    ├── GoogleGenAIInstrumentor()  ←── auto-traces all Gemini calls
-    └── AnthropicInstrumentor()    ←── auto-traces all Claude calls
-                │
-                ▼
-editorial_agent.py ──→ traced_gemini_generate() ──→ traces.jsonl (always, unchanged)
-                   │                             ──→ ProjectTracer (always, unchanged)
-                   │                             ──→ Phoenix (when available)
-                   │
-                   ──→ traced_claude_generate()  ──→ same three backends
-                   │
-                   ──→ OTel spans for pipeline   ──→ Phoenix (hierarchical view)
-                       stages (preprocess,
-                       Phase 1, Phase 2, etc.)
+Terminal 1:  vx trace  ──→  Phoenix server (foreground, persistent SQLite at ~/.vx/phoenix/)
+                            └── http://localhost:6006 (UI + OTLP endpoint)
 
-vx debug-traces ──→ px.Client().get_spans() ──→ terminal output (DataFrame)
+Terminal 2:  vx analyze / vx transcribe / vx (TUI)
+    │
+    ├── cli.py main() / interactive.py ──→ connect_phoenix()
+    │       └── _probe_phoenix(url) ──→ server reachable? (<200ms check)
+    │       └── GoogleGenAIInstrumentor().instrument() ──→ auto-traces all Gemini calls
+    │
+    ├── traced_gemini_generate() ──→ traces.jsonl (always, unchanged)
+    │                             ──→ ProjectTracer (always, unchanged)
+    │                             ──→ Phoenix via OTel (when connected)
+    │
+    └── Future: OTel spans for agent loops ──→ nested in Phoenix traces
 ```
 
 **Key design decisions:**
-- `traces.jsonl` + `ProjectTracer` remain **always-on** — they work without Phoenix for end users
-- Phoenix auto-instrumentors handle Gemini/Claude tracing transparently — no changes to existing `generate_content()` calls
-- `VX_TRACING=1` env var gates Phoenix initialization — off by default
-- `vx debug-traces` is a dev CLI command for terminal-based trace inspection
-- Future agent spans use OTel `tracer.start_as_current_span()` — nests under Phoenix traces automatically
+- **Standalone server**: Phoenix runs as its own process via `vx trace`, not embedded in pipeline
+- **Auto-connect**: every LLM command probes the server at startup — if reachable, instruments SDK
+- **Zero config for users**: no env vars needed for default setup. `VX_TRACE_URL` only for custom servers
+- **Persistent traces**: SQLite storage survives server restarts — review past traces anytime
+- `traces.jsonl` + `ProjectTracer` remain **always-on** — work without Phoenix for end users
 
 #### Activation flow
 
 ```
-User (normal):     vx analyze my-trip          → no Phoenix, traces.jsonl only
-Dev (debugging):   VX_TRACING=1 vx analyze ... → Phoenix starts, full tracing
-Dev (reviewing):   vx debug-traces my-trip     → fetch traces from Phoenix
-Claude Code:       python -c "import phoenix..." → programmatic trace access
+User (normal):     vx analyze my-trip          → traces.jsonl only (no Phoenix overhead)
+Dev (setup):       vx trace                    → starts Phoenix server (one-time, stays running)
+Dev (working):     vx analyze my-trip          → auto-connects, sends traces to Phoenix
+Dev (reviewing):   http://localhost:6006       → browse all past and current traces
+Code agent:        python -c "import phoenix..." → programmatic trace access via DataFrames
 ```
 
 ### Phase B: Retry with Exponential Backoff

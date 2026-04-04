@@ -38,6 +38,13 @@ def run_interactive():
     print(BANNER)
     cfg = DEFAULT_CONFIG
 
+    # Auto-connect to Phoenix tracing server if running
+    from .tracing import connect_phoenix, get_phoenix_status
+
+    if connect_phoenix():
+        _, trace_url = get_phoenix_status()
+        print(f"  \033[2mTracing: connected ({trace_url})\033[0m\n")
+
     while True:
         action = questionary.select(
             "What would you like to do?",

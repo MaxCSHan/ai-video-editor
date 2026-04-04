@@ -1094,6 +1094,36 @@ def cmd_config(args, cfg: Config):
 
 
 # ---------------------------------------------------------------------------
+# Tracing command
+# ---------------------------------------------------------------------------
+
+
+def cmd_trace(args, cfg: Config):
+    """Start the Phoenix tracing server as a foreground process."""
+    try:
+        from .tracing import start_phoenix_server
+    except ImportError:
+        print(f"{RED}Error:{RESET} Tracing dependencies not installed.")
+        print("  Install with: uv pip install -e '.[tracing]'")
+        sys.exit(1)
+
+    port = args.port
+    storage = Path(args.storage) if getattr(args, "storage", None) else None
+    storage_display = storage or Path.home() / ".vx" / "phoenix"
+    url = f"http://localhost:{port}"
+
+    _header("VX Tracing Server")
+    print(f"  Phoenix UI: {url}")
+    print(f"  Storage:    {storage_display}")
+    print("  Press Ctrl+C to stop.\n")
+
+    try:
+        start_phoenix_server(port=port, storage_dir=storage)
+    except KeyboardInterrupt:
+        print("\n  Tracing server stopped.")
+
+
+# ---------------------------------------------------------------------------
 # Versioning commands
 # ---------------------------------------------------------------------------
 
@@ -1521,6 +1551,10 @@ def main():
     p_config.add_argument("--provider", choices=["gemini", "claude"], help="Default AI provider")
     p_config.add_argument("--style", help="Default video style")
 
+    p_trace = sub.add_parser("trace", help="Start Phoenix tracing server (dev tool)")
+    p_trace.add_argument("--port", type=int, default=6006, help="Server port (default: 6006)")
+    p_trace.add_argument("--storage", type=str, help="Storage directory (default: ~/.vx/phoenix)")
+
     args = parser.parse_args()
     cfg = DEFAULT_CONFIG
 
@@ -1530,6 +1564,15 @@ def main():
 
         run_interactive()
         sys.exit(0)
+
+    # Auto-connect to Phoenix tracing server if running (non-blocking, <200ms)
+    _llm_commands = {"analyze", "run", "transcribe", "brief", "monologue"}
+    if args.command in _llm_commands:
+        from .tracing import connect_phoenix, get_phoenix_status
+
+        if connect_phoenix():
+            _, trace_url = get_phoenix_status()
+            print(f"  {DIM}Tracing: connected ({trace_url}){RESET}")
 
     commands = {
         "new": cmd_new,
@@ -1550,6 +1593,7 @@ def main():
         "compose": cmd_compose,
         "track": cmd_track,
         "config": cmd_config,
+        "trace": cmd_trace,
     }
 
     handler = commands.get(args.command)

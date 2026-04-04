@@ -1367,13 +1367,12 @@ def run_editorial_pipeline(
     max_cost: float | None = None,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2 → optional Phase 3."""
-    from .tracing import ProjectTracer, _init_phoenix
+    from .tracing import ProjectTracer
 
     cfg = cfg or DEFAULT_CONFIG
     editorial_paths = cfg.editorial_project(project_name)
     editorial_paths.ensure_dirs()
 
-    _init_phoenix()
     tracer = ProjectTracer(editorial_paths.root, max_cost_usd=max_cost)
 
     # Resolve style supplements from preset
