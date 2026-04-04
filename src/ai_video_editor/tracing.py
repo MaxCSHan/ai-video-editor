@@ -352,7 +352,9 @@ def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> N
     os.environ["PHOENIX_HOST"] = "0.0.0.0"
     os.environ["PHOENIX_PORT"] = str(port)
 
-    px.launch_app()
+    # run_in_thread=False blocks so the server stays alive until Ctrl+C.
+    # use_temp_dir=False respects PHOENIX_WORKING_DIR for persistent storage.
+    px.launch_app(run_in_thread=False, use_temp_dir=False)
 
 
 def get_phoenix_status() -> tuple[bool, str | None]:
