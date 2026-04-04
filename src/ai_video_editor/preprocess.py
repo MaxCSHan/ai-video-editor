@@ -158,6 +158,47 @@ def get_hwenc_codec(sw_codec: str = "libx264") -> str:
     return _hwenc_codecs.get(vt_codec, sw_codec)
 
 
+def _detect_device(format_tags: dict) -> str:
+    """Identify the source device family from container-level format tags.
+
+    Returns a device family string:
+      "iphone"       — Apple iPhone (any model)
+      "sony_alpha"   — Sony Alpha mirrorless (XAVC container)
+      "insta360"     — Insta360 cameras
+      "gopro"        — GoPro cameras
+      "dji"          — DJI drones/cameras
+      "unknown"      — unrecognized device
+    """
+    make = format_tags.get("com.apple.quicktime.make", "").lower()
+    model = format_tags.get("com.apple.quicktime.model", "").lower()
+    major_brand = format_tags.get("major_brand", "").upper()
+    # Some cameras embed make/model in standard tags
+    encoder = format_tags.get("encoder", "").lower()
+    handler_name = format_tags.get("handler_name", "").lower()
+
+    # Apple iPhone / iPad
+    if make == "apple" or "iphone" in model or "ipad" in model:
+        return "iphone"
+
+    # Sony Alpha — XAVC is Sony's professional/prosumer format
+    if major_brand == "XAVC" or "sony" in make:
+        return "sony_alpha"
+
+    # Insta360
+    if "insta360" in make or "insta360" in encoder or "insta360" in handler_name:
+        return "insta360"
+
+    # GoPro
+    if "gopro" in make or "gopro" in major_brand.lower():
+        return "gopro"
+
+    # DJI
+    if "dji" in make or "dji" in encoder:
+        return "dji"
+
+    return "unknown"
+
+
 def get_video_info(video_path: Path) -> dict:
     """Get video metadata (duration, resolution, codec, rotation, orientation) via ffprobe."""
     result = subprocess.run(
@@ -203,9 +244,17 @@ def get_video_info(video_path: Path) -> dict:
     aspect_ratio = _compute_aspect_ratio(display_width, display_height)
     resolution_class = _classify_resolution(display_width, display_height)
 
-    # Color info for HDR detection
+    # Color info for HDR detection and colorspace conversion
     color_transfer = video_stream.get("color_transfer", "")
+    color_space = video_stream.get("color_space", "")
+    color_primaries = video_stream.get("color_primaries", "")
+    color_range = video_stream.get("color_range", "")
     is_hdr = color_transfer in ("smpte2084", "arib-std-b67")
+
+    # Device identification from container-level tags
+    format_tags = data.get("format", {}).get("tags", {})
+    device = _detect_device(format_tags)
+    device_model = format_tags.get("com.apple.quicktime.model", "")
 
     return {
         # Original keys (backward compat)
@@ -226,8 +275,13 @@ def get_video_info(video_path: Path) -> dict:
         "bitrate": int(video_stream.get("bit_rate", 0) or 0),
         "pix_fmt": video_stream.get("pix_fmt", "unknown"),
         "color_transfer": color_transfer,
+        "color_space": color_space,
+        "color_primaries": color_primaries,
+        "color_range": color_range,
         "is_hdr": is_hdr,
-        "creation_time": data.get("format", {}).get("tags", {}).get("creation_time"),
+        "device": device,
+        "device_model": device_model,
+        "creation_time": format_tags.get("creation_time"),
     }
 
 

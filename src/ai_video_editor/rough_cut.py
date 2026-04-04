@@ -466,13 +466,72 @@ def _verify_rough_cut(
 # ---------------------------------------------------------------------------
 
 
+def _get_clip_color_profile(clip_info: dict | None, source_path: Path | None = None):
+    """Get the device color profile for a clip.
+
+    Probes the source file when clip_info lacks color/device fields (old manifests).
+    Returns a DeviceColorProfile from format_analyzer.
+    """
+    from .format_analyzer import identify_color_profile
+
+    info = dict(clip_info) if clip_info else {}
+
+    # If device or color fields are missing, probe the source directly
+    has_color = info.get("color_transfer") or info.get("color_primaries")
+    has_device = info.get("device") and info["device"] != "unknown"
+    if source_path and not (has_color and has_device):
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_streams",
+                    "-select_streams",
+                    "v:0",
+                    "-show_format",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                stream = data.get("streams", [{}])[0]
+                if not has_color:
+                    info["color_transfer"] = stream.get("color_transfer", "")
+                    info["color_primaries"] = stream.get("color_primaries", "")
+                    info["color_space"] = stream.get("color_space", "")
+                    info["color_range"] = stream.get("color_range", "")
+                    info["is_hdr"] = info["color_transfer"] in ("smpte2084", "arib-std-b67")
+                if not has_device:
+                    from .preprocess import _detect_device
+
+                    fmt_tags = data.get("format", {}).get("tags", {})
+                    info["device"] = _detect_device(fmt_tags)
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, IndexError):
+            pass
+
+    return identify_color_profile(info)
+
+
 def _build_segment_vf(
     clip_info: dict | None,
     output_format: OutputFormat | None,
+    color_vf: list[str] | None = None,
 ) -> str | None:
     """Build the -vf filter chain for a segment, or None if no filtering needed.
 
-    Handles rotation, scaling, padding/cropping, and fps normalization.
+    Handles colorspace conversion, rotation, scaling, padding/cropping, and fps
+    normalization. Colorspace conversion is applied first (before scaling) to
+    preserve color accuracy at the source's native resolution.
+
+    *color_vf* is the list of ffmpeg filter strings for color conversion,
+    provided by the device profile system. None means no conversion needed
+    (passthrough — source color matches output target).
     """
     if not output_format or not clip_info:
         return None
@@ -492,7 +551,11 @@ def _build_segment_vf(
 
     filters = []
 
-    # 1. Rotation correction
+    # 1. Colorspace conversion (before scaling for best quality)
+    if color_vf:
+        filters.extend(color_vf)
+
+    # 2. Rotation correction
     if rotation == 90:
         filters.append("transpose=1")
     elif rotation == 180:
@@ -500,7 +563,7 @@ def _build_segment_vf(
     elif rotation == 270:
         filters.append("transpose=2")
 
-    # 2. Determine scaling strategy
+    # 3. Determine scaling strategy
     src_orientation = "landscape" if src_w >= src_h else "portrait"
     target_orientation = output_format.orientation
 
@@ -528,7 +591,7 @@ def _build_segment_vf(
             filters.append(f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease")
             filters.append(f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black")
 
-    # 3. FPS normalization — always apply to ensure uniform timebase across segments,
+    # 4. FPS normalization — always apply to ensure uniform timebase across segments,
     # even when source FPS matches target (VFR sources, different timebases)
     filters.append(f"fps={target_fps}")
 
@@ -849,13 +912,21 @@ def _extract_segment(
     clip_info: dict | None = None,
     overlays: list | None = None,
     caption_segments: list | None = None,
+    color_vf: list[str] | None = None,
+    color_target: str = "sdr",
 ) -> bool:
-    """Extract a single segment with optional format normalization, text overlays, and captions."""
+    """Extract a single segment with optional format normalization, text overlays, and captions.
+
+    *color_vf*: ffmpeg filter chain for color conversion (from device profile).
+        None means no conversion — source color matches the output target.
+    *color_target*: "sdr" (BT.709) or "hlg" (HLG/BT.2020) — determines output
+        pixel format and color metadata tagging.
+    """
     duration = out_sec - in_sec
     if duration <= 0:
         return False
 
-    vf = _build_segment_vf(clip_info, output_format)
+    vf = _build_segment_vf(clip_info, output_format, color_vf=color_vf)
 
     # Collect all drawtext filters (monologue overlays + speech captions)
     extra_filters = []
@@ -896,7 +967,7 @@ def _extract_segment(
     if vf:
         cmd.extend(["-vf", vf])
 
-    # Codec selection — resolve "auto" to HW encoder, force yuv420p for iPhone compat
+    # Codec selection — resolve "auto" to HW encoder
     sw_codec = output_format.codec if output_format else "libx264"
     if sw_codec == "auto":
         sw_codec = "libx264"
@@ -917,7 +988,41 @@ def _extract_segment(
             cmd.extend(["-profile:v", "high", "-level", "4.2"])
     # Guarantee first frame is an IDR keyframe — required for concat -c:v copy
     cmd.extend(["-force_key_frames", "expr:eq(n,0)"])
-    cmd.extend(["-pix_fmt", "yuv420p"])
+
+    # Pixel format and color metadata — determined by the output color target.
+    # All segments MUST have consistent color tagging to prevent misinterpretation
+    # when concatenated (e.g., HLG metadata on a BT.709 segment → oversaturation).
+    if color_target == "hlg":
+        # Preserve 10-bit for HLG output
+        cmd.extend(["-pix_fmt", "yuv420p10le"])
+        cmd.extend(
+            [
+                "-colorspace",
+                "bt2020nc",
+                "-color_trc",
+                "arib-std-b67",
+                "-color_primaries",
+                "bt2020",
+                "-color_range",
+                "tv",
+            ]
+        )
+    else:
+        # SDR: 8-bit yuv420p with BT.709 tagging
+        cmd.extend(["-pix_fmt", "yuv420p"])
+        cmd.extend(
+            [
+                "-colorspace",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_range",
+                "tv",
+            ]
+        )
+
     cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2"])
     cmd.extend(["-movflags", "+faststart", str(output_path)])
 
@@ -984,6 +1089,48 @@ def assemble_rough_cut(
     transcript_cache: dict[str, list | None] = {}
     has_text = monologue is not None or burn_captions
 
+    # -----------------------------------------------------------------------
+    # Resolve color target — device-aware color normalization
+    # -----------------------------------------------------------------------
+    color_target = "sdr"  # default
+    if output_format:
+        color_target = output_format.color_target
+
+    # "auto" → resolve based on actual device profiles in this storyboard
+    if color_target == "auto":
+        from .format_analyzer import resolve_color_target
+
+        clip_infos_for_color = []
+        for seg in storyboard.segments:
+            ci = clip_format_map.get(seg.clip_id) if clip_format_map else None
+            if ci:
+                clip_infos_for_color.append(ci)
+        if clip_infos_for_color:
+            color_target = resolve_color_target(clip_infos_for_color)
+        else:
+            color_target = "sdr"
+
+    # Pre-resolve device color profiles per clip (cached per clip_id)
+    color_profile_cache: dict[str, object] = {}
+
+    def _get_color_vf_for_clip(clip_id: str, source: Path) -> list[str] | None:
+        """Get the color conversion filters needed for this clip, or None for passthrough."""
+        if clip_id not in color_profile_cache:
+            ci = clip_format_map.get(clip_id) if clip_format_map else None
+            profile = _get_clip_color_profile(ci, source)
+            color_profile_cache[clip_id] = profile
+        profile = color_profile_cache[clip_id]
+        if color_target == "hlg":
+            vf = profile.to_hlg_vf
+        else:
+            vf = profile.to_sdr_vf
+        return list(vf) if vf else None
+
+    # Log color decision
+    print(
+        f"  Color target: {color_target.upper()}{' (passthrough)' if color_target != 'sdr' else ''}"
+    )
+
     segment_files = []
     warnings = []
 
@@ -1031,6 +1178,7 @@ def assemble_rough_cut(
             continue
 
         clip_info = clip_format_map.get(seg.clip_id) if clip_format_map else None
+        color_vf = _get_color_vf_for_clip(seg.clip_id, source)
         ok = _extract_segment(
             source,
             seg.in_sec,
@@ -1040,6 +1188,8 @@ def assemble_rough_cut(
             clip_info=clip_info,
             overlays=seg_overlays,
             caption_segments=caption_segments,
+            color_vf=color_vf,
+            color_target=color_target,
         )
         if ok and seg_path.exists():
             segment_files.append(seg_path)

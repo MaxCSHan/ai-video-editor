@@ -45,6 +45,9 @@ class OutputFormat:
     codec: str = "auto"  # "auto" | "libx264" | "libx265"
     fit_mode: str = "pad"  # "pad" (black bars) | "crop" (fill frame)
     label: str = "FHD 1080p"
+    # Color target: "auto" picks based on device mix, "sdr" forces BT.709,
+    # "hlg" preserves/converts to HLG/BT.2020
+    color_target: str = "auto"
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +58,7 @@ class OutputFormat:
             "codec": self.codec,
             "fit_mode": self.fit_mode,
             "label": self.label,
+            "color_target": self.color_target,
         }
 
     @classmethod
