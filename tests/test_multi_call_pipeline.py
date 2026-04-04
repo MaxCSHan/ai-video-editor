@@ -923,3 +923,172 @@ class TestFewShotExample:
         assert "hook" in example
         assert "climax" in example
         assert "DISCARDED" in example
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Evaluation harness
+# ---------------------------------------------------------------------------
+
+
+class TestEvalScoring:
+    """Test the evaluation scoring module against real storyboard data."""
+
+    def test_score_storyboard_produces_report(self, storyboard, clip_reviews, user_context):
+        from ai_video_editor.eval import score_storyboard
+
+        report = score_storyboard(storyboard, clip_reviews, user_context)
+
+        assert report.total_segments > 0
+        assert report.total_clips_available == len(clip_reviews)
+        assert report.clips_used > 0
+        assert report.has_editorial_reasoning
+        print(f"\n{report.summary()}")
+
+    def test_constraint_satisfaction_scoring(self, storyboard, user_context):
+        from ai_video_editor.eval import score_constraint_satisfaction
+
+        results = score_constraint_satisfaction(storyboard, user_context)
+
+        # Should have parsed multiple constraint phrases from highlights
+        assert len(results) > 0
+        for r in results:
+            assert r.constraint_type == "must_include"  # this project has no "avoid"
+            assert r.text
+            assert r.evidence
+
+        sat_count = sum(1 for r in results if r.satisfied)
+        total = len(results)
+        print(f"\n  Constraint satisfaction: {sat_count}/{total}")
+        for r in results:
+            status = "PASS" if r.satisfied else "FAIL"
+            print(f"    [{status}] {r.text[:50]}... → {r.evidence[:60]}")
+
+    def test_timestamp_precision_scoring(self, storyboard, clip_reviews):
+        from ai_video_editor.eval import score_timestamp_precision
+
+        total, valid, clamped, invalid = score_timestamp_precision(storyboard, clip_reviews)
+
+        assert total > 0
+        assert valid + clamped + invalid <= total
+        assert invalid == 0, f"Found {invalid} segments with unknown clip IDs"
+
+        print(f"\n  Timestamps: {valid}/{total} valid, {clamped} need clamping")
+
+    def test_report_summary_is_printable(self, storyboard, clip_reviews, user_context):
+        from ai_video_editor.eval import score_storyboard
+
+        report = score_storyboard(storyboard, clip_reviews, user_context)
+        summary = report.summary()
+
+        assert "Storyboard Evaluation Report" in summary
+        assert "Constraints:" in summary
+        assert "Timestamps:" in summary
+        assert "Structure:" in summary
+        assert "Coverage:" in summary
+
+    def test_eval_without_user_context(self, storyboard, clip_reviews):
+        from ai_video_editor.eval import score_storyboard
+
+        report = score_storyboard(storyboard, clip_reviews, user_context=None)
+
+        # Should still produce a valid report, just no constraint results
+        assert len(report.constraints) == 0
+        assert report.constraint_satisfaction_rate() == 1.0
+        assert report.total_segments > 0
+
+    def test_constraint_rates(self, storyboard, clip_reviews, user_context):
+        from ai_video_editor.eval import score_storyboard
+
+        report = score_storyboard(storyboard, clip_reviews, user_context)
+
+        sat_rate = report.constraint_satisfaction_rate()
+        ts_rate = report.timestamp_precision_rate()
+
+        assert 0.0 <= sat_rate <= 1.0
+        assert 0.0 <= ts_rate <= 1.0
+
+        print(f"\n  Constraint satisfaction rate: {sat_rate:.0%}")
+        print(f"  Timestamp precision rate: {ts_rate:.0%}")
+
+
+class TestEvalEdgeCases:
+    def test_empty_storyboard(self, clip_reviews):
+        from ai_video_editor.eval import score_storyboard
+        from ai_video_editor.models import EditorialStoryboard
+
+        empty = EditorialStoryboard(
+            editorial_reasoning="",
+            title="Empty",
+            estimated_duration_sec=0,
+            style="vlog",
+            story_concept="Nothing",
+            segments=[],
+        )
+        report = score_storyboard(empty, clip_reviews)
+
+        assert report.total_segments == 0
+        assert report.timestamp_precision_rate() == 1.0  # 0/0 = 1.0 by convention
+        assert not report.has_editorial_reasoning
+
+    def test_constraint_with_avoid(self):
+        from ai_video_editor.eval import score_constraint_satisfaction
+        from ai_video_editor.models import EditorialStoryboard, Segment
+
+        sb = EditorialStoryboard(
+            editorial_reasoning="test",
+            title="Test",
+            estimated_duration_sec=60,
+            style="vlog",
+            story_concept="test",
+            segments=[
+                Segment(
+                    index=0,
+                    clip_id="clip_001",
+                    in_sec=0,
+                    out_sec=10,
+                    purpose="hook",
+                    description="Walking on the bus ride through town",
+                    transition="cut",
+                ),
+            ],
+        )
+        ctx = {"avoid": "bus ride footage"}
+
+        results = score_constraint_satisfaction(sb, ctx)
+
+        assert len(results) == 1
+        assert results[0].constraint_type == "must_exclude"
+        assert not results[0].satisfied  # "bus ride" appears in segment description
+
+    def test_fuzzy_matching_quality(self):
+        from ai_video_editor.eval import _fuzzy_match
+
+        # Should match on keyword overlap
+        assert _fuzzy_match("sunset at the temple", "golden sunset over the ancient temple")
+        assert _fuzzy_match("climbing shot trail", "rock climbing section on the trail")
+
+        # Should not match on single common word
+        assert not _fuzzy_match("the view", "walking through the park")
+
+        # Should handle short queries gracefully
+        assert not _fuzzy_match("a", "something completely different")
+
+
+class TestEvalComparison:
+    """Test comparing two storyboard variants — the core evaluation use case."""
+
+    def test_compare_reports(self, storyboard, clip_reviews, user_context):
+        """Simulate comparing baseline vs improved pipeline."""
+        from ai_video_editor.eval import score_storyboard
+
+        # Score the existing (baseline) storyboard
+        baseline = score_storyboard(storyboard, clip_reviews, user_context)
+
+        # Compare key metrics (in a real evaluation, we'd have two different storyboards)
+        print("\n  Pipeline Comparison (baseline only — split pipeline requires API call):")
+        print(f"    Constraint satisfaction: {baseline.constraint_satisfaction_rate():.0%}")
+        print(f"    Timestamp precision:     {baseline.timestamp_precision_rate():.0%}")
+        print(f"    Segments:                {baseline.total_segments}")
+        print(f"    Clips used:              {baseline.clips_used}/{baseline.total_clips_available}")
+        print(f"    Reasoning quality:       {'mentions constraints' if baseline.reasoning_mentions_constraints else 'does NOT mention constraints'}")
+        print(f"    Duration:                {baseline.estimated_duration_sec:.0f}s")
