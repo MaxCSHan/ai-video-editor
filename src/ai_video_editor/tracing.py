@@ -341,20 +341,29 @@ def connect_phoenix(url: str | None = None) -> bool:
 
 
 def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> None:
-    """Start Phoenix as a blocking foreground server. Used by `vx trace`."""
+    """Start Phoenix as a foreground server. Used by `vx trace`. Blocks until Ctrl+C."""
     import os
+    import signal
+    import threading
 
     import phoenix as px
 
     storage = storage_dir or Path.home() / ".vx" / "phoenix"
     storage.mkdir(parents=True, exist_ok=True)
     os.environ["PHOENIX_WORKING_DIR"] = str(storage)
-    os.environ["PHOENIX_HOST"] = "0.0.0.0"
     os.environ["PHOENIX_PORT"] = str(port)
 
-    # run_in_thread=False blocks so the server stays alive until Ctrl+C.
-    # use_temp_dir=False respects PHOENIX_WORKING_DIR for persistent storage.
-    px.launch_app(run_in_thread=False, use_temp_dir=False)
+    # Launch in background thread, then block the main thread until interrupted.
+    # use_temp_dir=False ensures Phoenix uses PHOENIX_WORKING_DIR for persistent SQLite.
+    session = px.launch_app(run_in_thread=True, use_temp_dir=False)
+    if not session:
+        raise RuntimeError("Phoenix failed to start")
+
+    # Block until SIGINT (Ctrl+C) or SIGTERM
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    stop.wait()
 
 
 def get_phoenix_status() -> tuple[bool, str | None]:
