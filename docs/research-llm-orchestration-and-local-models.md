@@ -23,24 +23,33 @@ mazsola2k runs its entire AI stack on a desktop NVIDIA GPU:
 
 Key insight: **the LLM is the bottleneck** (~1.2 frames/sec for captioning). CLIP and ResNet are fast batch operations.
 
+### Critical Difference: VX vs mazsola2k Task Requirements
+
+Before evaluating any local model, we must acknowledge a fundamental gap in what these two projects demand from AI:
+
+**mazsola2k's task:** "Is this segment boring or interesting?" → assign a speed multiplier. This is a **low-precision classification** problem. All footage is kept; the AI only decides how fast to play it. A wrong classification means a boring segment plays at 1x instead of 4x — suboptimal but not broken.
+
+**VX's task:** "Which 5-second subclip from this 3-minute clip best serves the narrative?" → precise timestamp selection for cut-and-recompose editing. This is a **high-precision editorial judgment**. A wrong selection means the wrong moment appears in the final video. Temporal continuity is not preserved — segments are rearranged for narrative arc.
+
+This means: **local models cannot simply replace cloud APIs for VX's editorial reasoning.** The quality bar is fundamentally higher. Local models are valuable as a **metadata enrichment layer** — giving the cloud LLM better information to reason with, not making the editorial decisions themselves.
+
 ### Realistic Local Model Candidates for M4 Pro
 
 #### Tier 1: Already proven feasible
 
 | Model | Task | Memory | Speed (M4 Pro) | Notes |
 |-------|------|--------|-----------------|-------|
-| **mlx-whisper** (small/medium) | Transcription | 1-3GB | ~10x real-time | Already in VX. Works well. |
-| **CLIP ViT-B/32** (MLX) | Semantic scoring | ~350MB | Fast (batch) | Pre-filter frames before cloud API. No quality concern. |
+| **mlx-whisper** (small/medium) | Transcription | 1-3GB | ~10x real-time | In VX codebase but **untested in practice**. See transcription section below. |
+| **CLIP ViT-B/32** (MLX) | Semantic embeddings | ~350MB | Fast (batch) | Well-understood, deterministic. See VX-specific use cases below. |
 | **SigLIP** (MLX) | Better CLIP | ~400MB | Fast (batch) | Google's improved CLIP. Better zero-shot accuracy. |
 
 #### Tier 2: Worth testing, likely feasible
 
 | Model | Task | Memory | Speed (M4 Pro) | Notes |
 |-------|------|--------|-----------------|-------|
-| **Qwen2.5-VL-3B** (4-bit MLX) | Frame captioning | ~2GB | ~15-25 tok/s | Smaller than mazsola2k's 7B. Keyword captioning at 40 tokens should be fast enough. |
-| **SmolVLM-500M** (MLX) | Frame description | ~500MB | ~40+ tok/s | HuggingFace's tiny VLM. Very fast but less capable. |
-| **MobileVLM v2** | Frame triage | ~1.5GB | ~30 tok/s | Designed for mobile. Good for binary "interesting/boring" classification. |
-| **Florence-2** (MLX) | Object detection + captioning | ~500MB | Fast | Microsoft's efficient vision model. Good for structured extraction (bounding boxes, captions). |
+| **Qwen2.5-VL-3B** (4-bit MLX) | Frame captioning | ~2GB | ~15-25 tok/s | See "withdrawn" note below — limited value for VX. |
+| **Florence-2** (MLX) | Object detection + captioning | ~500MB | Fast | Microsoft's efficient vision model. Structured extraction. |
+| **pyannote** (CPU) | Speaker diarization | ~500MB | ~real-time | Pairs with whisper for speaker-attributed transcripts. |
 
 #### Tier 3: Possible but risky on base configs
 
@@ -49,47 +58,80 @@ Key insight: **the LLM is the bottleneck** (~1.2 frames/sec for captioning). CLI
 | **Qwen2.5-VL-7B** (4-bit MLX) | Full vision-language | ~5GB | ~8-12 tok/s | Usable on 36GB configs. Tight on 18GB alongside other processes. |
 | **Llama 3.2 11B Vision** (4-bit) | Vision-language | ~7GB | ~6-10 tok/s | Apple Silicon MLX support exists. Memory-hungry. |
 
-### Where Local Models Add Value in VX (Without Replacing Cloud)
+### Local Transcription: An Untested Alternative
 
-The key insight from mazsola2k's two-pass design: **use local models as a pre-processing layer, not as the primary reasoning engine.** VX's strength is Gemini/Claude for deep editorial reasoning. Local models should handle tasks where:
-1. The task is simple and well-defined (classification, not creativity)
-2. Volume is high (per-frame, not per-clip)
-3. Errors are tolerable (pre-filtering, not final decisions)
-4. Privacy/cost matters (no API call needed)
+The mlx-whisper path exists in VX's codebase but has **never been tested end-to-end**. The Gemini transcription path was chosen initially because it provides speaker diarization for free — knowing WHO is speaking drives segment selection in Phase 2.
 
-#### Concrete opportunities:
+However, the Gemini transcription path has known issues (timestamp drift on long clips, chunk boundary artifacts). Local transcription deserves evaluation as an alternative.
 
-**1. CLIP/SigLIP as a pre-filter before Phase 1**
-- Score every frame against semantic prompts (like mazsola2k's 9-prompt approach)
-- Use scores to identify boring/duplicate segments before sending to Gemini
-- Potential savings: skip 30-50% of footage from Phase 1 analysis, reducing API cost and context size
-- Implementation: run during preprocessing, store scores in clip metadata
-- Risk: almost zero. CLIP is well-understood, fast, and deterministic.
+**A viable local transcription stack:**
+- **mlx-whisper** (medium or large-v3) — word-level transcription with timestamps
+- **whisperX** — wraps whisper with forced alignment for precise word-level timestamps
+- **pyannote** — speaker diarization (runs on CPU, pairs with any whisper variant)
 
-**2. Local VLM for quick frame captions (pre-Phase 1 metadata)**
-- Caption frames at 2-5 second intervals using Qwen2.5-VL-3B or SmolVLM
-- Output: keyword tags per frame (like mazsola2k: "hands, blue paint, brush, detail work")
-- Feed these as structured metadata into Phase 1 prompts, giving Gemini a head start
-- Benefit: Gemini can spend its tokens on editorial judgment, not basic scene description
-- Risk: moderate. Caption quality from 3B models can be inconsistent. Needs testing with actual trip footage (not just workshop/craft content).
+The combination of whisperX + pyannote could produce speaker-attributed, word-level timestamped transcripts locally. The open question is quality — see Part 4 (Evaluation Framework) for how to test this.
 
-**3. Local duplicate detection (ResNet or CLIP embeddings)**
-- Compute frame embeddings locally during preprocessing
-- Detect near-duplicate segments within and across clips
-- Feed duplicate flags into Phase 2 so the LLM knows "segments X and Y show essentially the same thing"
-- Implementation: cosine similarity on CLIP embeddings, threshold-based flagging
-- Risk: low. This is a numerical comparison, not a generation task.
+**Key risk:** pyannote's speaker diarization requires a HuggingFace token and the model is ~500MB. It works on CPU but may be slow for long clips. Also, it identifies speakers as "SPEAKER_0", "SPEAKER_1" — it cannot name them like Gemini can when given user context. Speaker name resolution would need a post-processing step using briefing data.
 
-**4. Local scene energy scoring**
-- Motion estimation from frame differencing (no ML needed, pure OpenCV)
-- Audio energy from waveform RMS (no ML needed)
-- Combined "energy score" per segment: high-motion + loud audio = action, low-motion + silence = establishing shot
-- Feed into Phase 1/Phase 2 as metadata
-- Risk: zero. These are deterministic signal processing operations.
+### Where Local Models Add Value in VX (Re-evaluated for Cut-and-Recompose Editing)
 
-### Recommendation
+The key insight from mazsola2k's two-pass design: **use local models as a pre-processing layer, not as the primary reasoning engine.** But the specific use cases must be tailored to VX's higher-precision editorial task, not copied from mazsola2k's classification task.
 
-Start with **CLIP/SigLIP pre-filtering** (Tier 1, no risk) and **local energy scoring** (no ML needed). These provide immediate value — reducing context size and giving the LLM richer metadata — without any quality risk. Defer local VLM captioning until we can benchmark Qwen2.5-VL-3B on actual VX footage and confirm caption quality meets our threshold.
+#### Opportunities — re-evaluated for VX:
+
+**1. CLIP/SigLIP as editorial metadata (NOT as a pre-filter)**
+
+In mazsola2k, CLIP answers "is this boring?" — a binary gate. In VX, that question is too crude. VX needs to know **what is happening and how visually distinct each moment is**, so the editorial LLM can make better subclip selections.
+
+VX-specific use cases for CLIP embeddings:
+- **Cross-segment similarity detection:** "Segments C0012:45-60s and C0015:10-25s have 94% visual similarity — using both in the storyboard creates a jarring repeat." Currently Phase 2 relies on the LLM noticing this from text descriptions alone. Embedding similarity is objective and cheap.
+- **Visual diversity scoring per clip:** "This clip has high compositional variety at 45-60s (many distinct frames) vs static establishing shot at 0-15s." Helps Phase 2 pick the most visually dynamic subclips.
+- **Content clustering across clips:** "Your 17 clips contain 4 visual themes: beach (C0001-C0005), city (C0006-C0010), food (C0011-C0014), people (C0015-C0017)." This is useful structural metadata for Phase 2's story arc construction — the LLM can interleave themes intentionally.
+
+What this is NOT: a filter that decides which clips to skip. VX cannot afford to pre-exclude footage — a "boring" establishing shot might be exactly what the narrative needs as a breathing moment. The editorial LLM must see everything and decide.
+
+- Implementation: Run CLIP during preprocessing, store embeddings + derived metrics in clip metadata JSON
+- Risk: Low. We're adding metadata, not making editorial decisions. The LLM still decides.
+
+**2. ~~Local VLM for frame captions~~ — WITHDRAWN for VX**
+
+In mazsola2k, Qwen2.5-VL captions every frame because the LLM cannot see the video directly. The LLM reasons over text summaries instead of visual data.
+
+**VX already sends proxy videos to Gemini.** Gemini sees the actual footage. Adding local captions would be strictly less information than what Gemini already processes. At best redundant, at worst misleading (if the local model misidentifies something, it could bias Gemini's analysis).
+
+The one exception: if we ever want an **offline mode** or **budget mode** that avoids cloud APIs entirely, local captioning becomes the backbone. But that's a different product decision, not an incremental improvement to the current pipeline. Defer this entirely.
+
+**3. Cross-clip similarity detection (CLIP embeddings)**
+
+This is **more important for VX than for mazsola2k**, not less. VX recomposes footage across clips — if Phase 2 unknowingly selects two segments that show nearly identical content from different clips (same location, same angle, different take), the final video has a jarring repeat.
+
+Currently Phase 2 relies on the LLM noticing textual similarity in clip review descriptions. Local embeddings would give it hard data: "segment C0012:45-60s and C0015:10-25s have 94% visual similarity — consider using only one."
+
+- Implementation: Compute CLIP embeddings for usable_segment boundaries (not every frame — just the segments Phase 1 identified). Compare across clips. Inject similarity warnings into Phase 2 prompt.
+- Risk: Low. Numerical comparison, not generation.
+
+**4. Scene energy and cut-point scoring (no ML needed)**
+
+Valuable for VX but for different reasons than mazsola2k. mazsola2k uses energy for boring/interesting classification. VX would use it for:
+- **Cut-point detection:** Low-motion frames make natural edit points. Motion-free frames cut cleanly without visual jarring. This metadata helps Phase 2 select segment boundaries that align with natural pauses.
+- **Pacing profile per clip:** "This segment starts slow, peaks at 12.3s, then settles." Helps Phase 2 place segments in the narrative arc — high-energy segments for climax, low-energy for transitions.
+- **Audio energy mapping:** Speech vs silence vs ambient noise. Helps Phase 2 decide which segments need music overlay vs which have natural audio worth preserving. This partially overlaps with transcription but is complementary — transcription catches words, energy scoring catches non-verbal audio character.
+
+- Implementation: OpenCV frame differencing for motion, librosa/scipy for audio RMS. Pure signal processing, no ML. Run during preprocessing.
+- Risk: Zero. Deterministic operations.
+
+### Recommendation (Revised)
+
+**Start with:**
+1. **Local energy scoring** (zero risk, no ML, immediate value for cut-point metadata)
+2. **CLIP embedding computation** during preprocessing (low risk, enables similarity detection and content clustering)
+
+**Test separately:**
+3. **Local transcription stack** (mlx-whisper + pyannote) — must benchmark against Gemini transcription before committing. See Part 4 evaluation framework.
+
+**Defer:**
+4. Local VLM captioning — not needed while cloud APIs handle video understanding
+5. Local editorial reasoning — quality bar too high for current local models
 
 ---
 
@@ -361,7 +403,13 @@ Phase 2 (revision) → Storyboard v2
 
 ## Part 3: Synthesis — A Practical Improvement Roadmap
 
-### Phase A: Quick Wins (Low effort, high impact)
+### Phase 0: Foundation (Required before any comparison)
+
+0. **Build evaluation test fixture** — Select 8-12 clip test project, manually annotate transcription ground truth for 3-4 clips, write 2-3 test scenarios with filmmaker constraints. (~2-4 hours, one-time investment. See Part 4.)
+
+### Phase A: Quick Wins — Prompt Engineering (Low effort, high impact)
+
+These target the instruction-following problem directly. No infrastructure changes.
 
 1. **Constraint hierarchy in prompts** — Rewrite `format_context_for_prompt()` to separate MUST constraints from preferences. Add accountability clause. (~1 hour)
 
@@ -371,7 +419,9 @@ Phase 2 (revision) → Storyboard v2
 
 4. **Temperature tuning** — Lower Phase 2 temperature to 0.5-0.6 when hard constraints are present. (~30 min)
 
-### Phase B: Medium-Term (Moderate effort, significant impact)
+Validate Phase A improvements using Checkpoint 3 (Part 4) against the test fixture.
+
+### Phase B: Medium-Term — Context Quality (Moderate effort, significant impact)
 
 5. **Few-shot example** — Write 1-2 examples demonstrating constraint satisfaction in editorial reasoning + segments. Add to Phase 2 prompt. (~2-3 hours, mostly writing)
 
@@ -381,15 +431,208 @@ Phase 2 (revision) → Storyboard v2
 
 8. **Validation call** — Post-Phase 2 constraint checker using Gemini Flash. Auto-flag violations. (~4-6 hours)
 
-### Phase C: Longer-Term (Higher effort, highest quality ceiling)
+### Phase C: Local Metadata Pipeline (Moderate effort, requires evaluation)
 
-9. **Two-call decoupled reasoning** — Split Phase 2 into freeform reasoning + structured output. (~8-12 hours, needs testing)
+9. **Local energy scoring** — Motion (OpenCV frame diff) + audio energy (RMS). Pure signal processing, zero ML, zero risk. Run during preprocessing, store in clip metadata. (~4-6 hours)
 
-10. **CLIP/SigLIP pre-filtering** — Local semantic scoring during preprocessing. Feed as metadata into Phase 1. (~8-12 hours)
+10. **CLIP embedding computation** — Compute embeddings during preprocessing. Derive: cross-clip similarity warnings, visual diversity scores, content clusters. Inject as metadata into Phase 1/2 prompts. (~8-12 hours)
 
-11. **Iterative refinement loop** — User feedback → revision call. Integrate with existing versioning. (~16-24 hours, UX design needed)
+Validate Phase C using Checkpoint 2 (Part 4) — does local metadata actually improve Phase 1 review quality?
 
-12. **Local energy scoring** — Motion + audio energy computed during preprocessing. Zero ML, pure signal processing. (~4-6 hours)
+### Phase D: Local Transcription (High effort, must benchmark first)
+
+11. **Benchmark local transcription** — Test mlx-whisper + pyannote against Gemini using Checkpoint 1 (Part 4). Evaluate WER, speaker attribution, timestamp precision. (~4-6 hours for setup + evaluation)
+
+12. **Speaker name resolution** — If diarization passes, build post-processing to match anonymous SPEAKER_N labels to briefing-provided names. (~4-6 hours)
+
+Only proceed if Checkpoint 1 evaluation shows local stack meets quality thresholds.
+
+### Phase E: Advanced LLM Orchestration (Higher effort, highest quality ceiling)
+
+13. **Two-call decoupled reasoning** — Split Phase 2 into freeform reasoning + structured output. (~8-12 hours, needs testing)
+
+14. **Iterative refinement loop** — User feedback → revision call. Integrate with existing versioning. (~16-24 hours, UX design needed)
+
+---
+
+## Part 4: Evaluation Framework — Comparing Pipeline Variants
+
+### The Problem with Side-by-Side Comparison
+
+A local-model-enriched pipeline and the current cloud-only pipeline produce different intermediate artifacts. We can't simply diff JSON outputs. And watching two full rough cuts side-by-side for every experiment is impractical — it's slow, subjective, and doesn't tell you WHERE the quality difference originated.
+
+The evaluation framework must:
+1. Measure quality at **specific checkpoints**, not just end-to-end
+2. Distinguish **information quality** (does the output accurately describe the footage?) from **decision impact** (does better information lead to a better final video?)
+3. **Fail fast** — validate foundational checkpoints before investing in downstream ones
+
+### Checkpoint Architecture
+
+```
+Checkpoint 1: Transcription
+  "Can we hear what's said, by whom, and when?"
+  Objective metrics possible. Test FIRST — if this fails, the local stack is blocked.
+       │
+Checkpoint 2: Clip Understanding (Phase 1 output)
+  "Does the model correctly identify what's in each clip?"
+  Semi-objective. Human rating on specific dimensions.
+       │
+Checkpoint 3: Editorial Decisions (Phase 2 storyboard)
+  "Did the LLM follow constraints and make good narrative choices?"
+  Partially objective (constraint satisfaction), partially subjective (narrative quality).
+       │
+Checkpoint 4: Final Video (rough cut)
+  "Would you post this?"
+  Fully subjective. A/B blind review. Only run when Checkpoints 1-3 pass.
+```
+
+**Progressive evaluation:** Only advance to the next checkpoint when the current one passes. This prevents wasting time building a full parallel pipeline before validating the foundation.
+
+### Checkpoint 1: Transcription Quality
+
+**What to compare:** Gemini transcription vs mlx-whisper + pyannote (local stack)
+
+**Test corpus:** Select 3-4 clips with varied audio conditions:
+- Clear single-speaker speech (easy baseline)
+- Multiple speakers with overlapping dialogue (stress test for diarization)
+- Background noise / outdoor ambient (stress test for word accuracy)
+- Mixed languages or accented speech (if applicable to your footage)
+
+Total test material: ~5 minutes across the clips. Small enough to manually annotate.
+
+**Ground truth:** Manually transcribe each test clip with speaker labels and word-level timestamps. This is tedious (~30 min per minute of audio) but only needs to be done once. The ground truth becomes a reusable test fixture.
+
+**Metrics:**
+
+| Metric | What it measures | How to compute |
+|--------|-----------------|----------------|
+| **WER** (Word Error Rate) | Transcription accuracy | `jiwer` Python library against ground truth |
+| **Speaker Attribution Accuracy** | Diarization quality | % of words assigned to the correct speaker |
+| **Timestamp Deviation** | Temporal precision | Mean absolute error of segment start/end times vs ground truth (in seconds) |
+| **Speaker Count Accuracy** | Can it detect how many speakers? | Correct count vs ground truth |
+| **Boundary Precision** | Speaker turn detection | % of speaker turns detected within ±1 second |
+
+**Pass criteria (proposed):**
+- WER < 15% (Gemini baseline is ~5-10% on clear speech; local can be looser)
+- Speaker attribution > 85% (critical for Phase 2 to know WHO said what)
+- Timestamp deviation < 1.5 seconds per segment boundary
+- If local stack fails on speaker attribution, it's a blocker — VX's editorial decisions depend on knowing who is speaking
+
+**Important nuance:** Gemini transcription gets speaker NAMES from user context (briefing). The local stack only produces SPEAKER_0, SPEAKER_1. We'd need a post-processing step to match anonymous speakers to named people (using voice clustering + briefing data). This additional complexity is part of the evaluation — not just "does whisper work" but "does the full local transcription pipeline produce usable editorial input?"
+
+### Checkpoint 2: Clip Understanding (Phase 1 Quality)
+
+**What to compare:** Phase 1 output quality under two conditions:
+- **Condition A:** Current pipeline (Gemini sees proxy video, no local metadata)
+- **Condition B:** Current pipeline + local metadata injected (CLIP similarity scores, energy profile, content clusters)
+
+**Test corpus:** Select 5-6 clips with varied content (action, dialogue, establishing, B-roll, mixed).
+
+**Evaluation method:** Human preference scoring. For each clip, the filmmaker rates both Phase 1 reviews (blinded) on:
+
+| Dimension | Question | Scale |
+|-----------|----------|-------|
+| **Segment Boundaries** | Did it find the right start/end points for usable segments? | 1-5 |
+| **Completeness** | Did it catch all important moments? Any missed? | 1-5 |
+| **People ID** | Did it correctly identify and describe people consistently? | 1-5 |
+| **Actionability** | Could you build an edit from this review alone, without watching the clip? | 1-5 |
+| **Redundancy Awareness** | (Condition B only) Did the similarity/cluster data help identify redundant content? | 1-5 |
+
+**Pass criteria:** Condition B should score >= Condition A on average. If local metadata doesn't improve or slightly degrades Phase 1 quality, the metadata pipeline isn't worth the complexity.
+
+**What this reveals:** Whether Gemini already captures everything from the video (making local metadata redundant) or whether the local metadata fills real gaps in Gemini's perception. If Gemini consistently misses duplicate content across clips but CLIP embeddings catch it, that's a clear win even if other dimensions are equal.
+
+### Checkpoint 3: Editorial Decision Quality (Phase 2 Storyboard)
+
+**What to compare:** Phase 2 storyboard quality under different pipeline configurations. This checkpoint tests both the local metadata AND the prompt engineering techniques from Part 2.
+
+**Test scenarios:** Design 2-3 scenarios with explicit filmmaker constraints:
+- Scenario A: "Must include the sunset. Must exclude the bus footage. Tone: contemplative. Duration: 5-8 min."
+- Scenario B: "Focus on the food experiences. Upbeat. Keep it under 5 minutes."
+- Scenario C: (Open-ended, minimal constraints) "Make the best vlog you can from this footage."
+
+**Evaluation dimensions:**
+
+| Dimension | Objective? | How to score |
+|-----------|-----------|--------------|
+| **Constraint satisfaction** | Yes | Binary per constraint: did the MUST-INCLUDE appear? Was the MUST-EXCLUDE absent? |
+| **Segment selection** | Semi | For each segment, rate: "Is this the best available moment for this narrative slot?" (1-5) |
+| **Narrative arc** | No | Does the segment sequence tell a coherent story with beginning/middle/end? (1-5) |
+| **Timestamp precision** | Yes | Spot-check 5 segments: do in_sec/out_sec cut at natural boundaries (not mid-sentence, not mid-action)? |
+| **Pacing** | No | Does the edit breathe? Or is it all the same energy level? (1-5) |
+| **Redundancy** | Yes | Count segments with >80% visual similarity to another segment (should be 0) |
+
+**Pass criteria:**
+- Constraint satisfaction: 100% on MUST constraints (non-negotiable)
+- Segment selection: average >= 3.5
+- Narrative arc: >= 3.0
+- Timestamp precision: >= 4 out of 5 spot-checks land on natural boundaries
+- Redundancy: 0 near-duplicate segments
+
+**Comparing pipeline variants at this checkpoint:**
+
+| Variant | What changes |
+|---------|-------------|
+| Baseline | Current VX pipeline, no changes |
+| +Prompt hardening | Part 2 techniques (constraint hierarchy, instruction anchoring, reasoning checkpoints) |
+| +Local metadata | CLIP embeddings, energy scoring, similarity flags injected into Phase 1/2 |
+| +Prompt + metadata | Both prompt hardening and local metadata |
+| +Two-call decoupled | Split Phase 2 into reasoning + structuring (Part 2, Technique 3) |
+
+Run each variant on the same test scenarios. Compare scores. This tells you which improvements actually move the needle.
+
+### Checkpoint 4: Final Video (Rough Cut)
+
+**When to run:** Only after Checkpoints 1-3 show clear improvements. This is expensive (time to watch) and subjective.
+
+**Method:** A/B blind review. Generate two rough cuts from the same footage under different pipeline configurations. Watch both without knowing which is which.
+
+**Scoring:**
+
+| Question | Type |
+|----------|------|
+| Would you post this? | Yes/No |
+| Overall quality | 1-10 |
+| Pacing quality | 1-5 |
+| Story coherence | 1-5 |
+| Worst moment (timestamp + why) | Open text |
+| Best moment (timestamp + why) | Open text |
+| What would you change? | Open text |
+
+The **"worst moment"** metric is the most diagnostic. It reveals where the pipeline fails, not just its average quality. A rough cut with one terrible segment is worse than one that's consistently mediocre — it breaks viewer trust.
+
+### Building the Test Fixture
+
+All checkpoints share one prerequisite: **a reusable test project.** This should be:
+
+- A real project with 8-12 clips of varied content (not synthetic data)
+- Manually annotated ground truth transcription for 3-4 clips
+- Pre-written filmmaker constraints for 2-3 test scenarios
+- Phase 1 reviews from the current pipeline (baseline to compare against)
+- Stored as a fixture in the repo (clip metadata + ground truth, not the video files themselves)
+
+This test fixture is the foundation for all evaluation. Building it is the first investment — ~2-4 hours of manual annotation — but it pays off across every experiment.
+
+### Evaluation Sequence
+
+```
+Step 1: Build test fixture                        (~2-4 hours, one-time)
+Step 2: Checkpoint 1 — transcription comparison    (~2-3 hours)
+  → If local transcription fails: STOP, stay with Gemini
+  → If local transcription passes: continue
+Step 3: Checkpoint 2 — Phase 1 with local metadata (~4-6 hours)
+  → If no improvement: local metadata has limited value, focus on Part 2 prompt techniques
+  → If improvement: continue, integrate local metadata
+Step 4: Checkpoint 3 — Phase 2 variant comparison  (~4-6 hours)
+  → Test prompt hardening variants independently of local metadata
+  → Test combined variants
+  → Identify which changes actually improve constraint satisfaction and narrative quality
+Step 5: Checkpoint 4 — rough cut A/B review        (~2-3 hours)
+  → Only for the winning variant(s) from Step 4
+  → Final validation before committing to a pipeline change
+```
+
+Total evaluation investment: ~15-22 hours across all steps, but spread over time and with early exit points.
 
 ---
 
