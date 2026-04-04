@@ -52,11 +52,13 @@ def transcribe_clip(
 ) -> dict | None:
     """Transcribe a single clip's audio. Returns transcript dict or None if unavailable.
 
-    Results are cached to clip_paths.audio / "transcript.json".
+    Results are versioned to clip_paths.audio / "transcript_mlx_v{N}.json".
     """
-    transcript_path = clip_paths.audio / "transcript.json"
-    if transcript_path.exists():
-        return json.loads(transcript_path.read_text())
+    from .versioning import resolve_transcript_path
+
+    cached = resolve_transcript_path(clip_paths.root)
+    if cached:
+        return json.loads(cached.read_text())
 
     try:
         import mlx_whisper
@@ -73,7 +75,21 @@ def transcribe_clip(
     result = mlx_whisper.transcribe(str(audio_path), **kwargs)
 
     transcript = _build_transcript(result, audio_path.name, cfg.model)
-    transcript_path.write_text(json.dumps(transcript, indent=2, ensure_ascii=False))
+
+    from .versioning import begin_version, commit_version, versioned_path, update_latest_symlink
+
+    clip_paths.audio.mkdir(parents=True, exist_ok=True)
+    meta = begin_version(
+        clip_paths.root,
+        phase="transcript",
+        provider="mlx",
+        config_snapshot={"model": cfg.model},
+        target_dir=clip_paths.audio,
+    )
+    out = versioned_path(clip_paths.audio / "transcript_mlx.json", meta.version)
+    out.write_text(json.dumps(transcript, indent=2, ensure_ascii=False))
+    update_latest_symlink(out, link_name="transcript_latest.json")
+    commit_version(clip_paths.root, meta, output_paths=[out], target_dir=clip_paths.audio)
     return transcript
 
 
@@ -401,9 +417,11 @@ def transcribe_clip_gemini(
     Results are cached to clip_paths.audio / "transcript.json".
     If editorial_paths is provided, reuses/populates the shared Gemini File API cache.
     """
-    transcript_path = clip_paths.audio / "transcript.json"
-    if transcript_path.exists():
-        return json.loads(transcript_path.read_text())
+    from .versioning import resolve_transcript_path
+
+    cached = resolve_transcript_path(clip_paths.root)
+    if cached:
+        return json.loads(cached.read_text())
 
     from .preprocess import get_video_duration
 
@@ -452,9 +470,22 @@ def transcribe_clip_gemini(
     # Transform lean Gemini response into canonical transcript.json format
     result = _gemini_to_canonical(gemini_result, cfg.gemini_model)
 
-    # Ensure audio dir exists and cache
+    # Save with versioning
+    from .versioning import begin_version, commit_version, versioned_path, update_latest_symlink
+
     clip_paths.audio.mkdir(parents=True, exist_ok=True)
-    transcript_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    meta = begin_version(
+        clip_paths.root,
+        phase="transcript",
+        provider="gemini",
+        clip_id=clip_id,
+        config_snapshot={"model": cfg.gemini_model},
+        target_dir=clip_paths.audio,
+    )
+    out = versioned_path(clip_paths.audio / "transcript_gemini.json", meta.version)
+    out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    update_latest_symlink(out, link_name="transcript_latest.json")
+    commit_version(clip_paths.root, meta, output_paths=[out], target_dir=clip_paths.audio)
 
     # Generate VTT + preview HTML alongside the transcript
     vtt_path = clip_paths.audio / "transcript.vtt"

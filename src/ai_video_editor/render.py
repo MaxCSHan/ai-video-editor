@@ -262,9 +262,11 @@ def render_html_preview(
                     rel = str(proxy)
                 clip_info[cid] = {"proxy": rel, "duration": dur}
 
-            # Load transcript if available
-            transcript_path = clips_dir / cid / "audio" / "transcript.json"
-            if transcript_path.exists():
+            # Load transcript if available (versioned → _latest → bare)
+            from .versioning import resolve_transcript_path
+
+            transcript_path = resolve_transcript_path(clips_dir / cid)
+            if transcript_path:
                 import json as _json2
 
                 t = _json2.loads(transcript_path.read_text())

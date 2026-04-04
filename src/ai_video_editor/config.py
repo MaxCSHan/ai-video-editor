@@ -73,7 +73,7 @@ class ClaudeConfig:
 @dataclass
 class GeminiConfig:
     model: str = "gemini-3-flash-preview"
-    phase2_model: str | None = "gemini-3.1-pro-preview"
+    phase2_model: str | None = "gemini-3-flash-preview"
     temperature: float = 0.2
 
     @property
@@ -157,7 +157,9 @@ class ProjectPaths:
         return (self.review / f"review_{provider}.json").exists()
 
     def has_transcript(self) -> bool:
-        return (self.audio / "transcript.json").exists()
+        return (self.audio / "transcript_latest.json").exists() or (
+            self.audio / "transcript.json"
+        ).exists()
 
     def cache_status(self) -> dict[str, bool]:
         return {

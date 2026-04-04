@@ -74,10 +74,12 @@ def generate_questions(reviews: list[dict], style: str) -> list[dict]:
 
 def run_briefing(reviews: list[dict], style: str, project_root: Path) -> dict | None:
     """Run the interactive editorial briefing. Returns user context dict."""
-    context_path = project_root / "user_context.json"
+    from .versioning import resolve_user_context_path
+
+    context_path = resolve_user_context_path(project_root)
 
     # Reuse existing context
-    if context_path.exists():
+    if context_path:
         existing = json.loads(context_path.read_text())
         print("\n  Existing user context found:")
         for k, v in existing.items():
@@ -97,13 +99,13 @@ def run_briefing(reviews: list[dict], style: str, project_root: Path) -> dict | 
         if action == "Start fresh":
             pass  # continue to fresh questions
         if action == "Edit it":
-            return _edit_existing(existing, context_path)
+            return _edit_existing(existing, project_root)
 
     info = generate_questions(reviews, style)
-    return _ask_questions(info, context_path)
+    return _ask_questions(info, project_root)
 
 
-def _ask_questions(info: dict, context_path: Path) -> dict | None:
+def _ask_questions(info: dict, project_root: Path) -> dict | None:
     """Ask the editorial briefing questions interactively."""
     print("\n  Editorial Briefing")
     print("  Help the AI editor make better decisions. Press Esc to skip any question.\n")
@@ -190,12 +192,12 @@ def _ask_questions(info: dict, context_path: Path) -> dict | None:
         print("\n  No context provided — proceeding without briefing.")
         return None
 
-    context_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+    _save_user_context(project_root, answers)
     print(f"\n  Context saved ({len(answers)} fields)")
     return answers
 
 
-def _edit_existing(existing: dict, context_path: Path) -> dict:
+def _edit_existing(existing: dict, project_root: Path) -> dict:
     """Let user edit existing context fields."""
     updated = {}
     for k, v in existing.items():
@@ -206,9 +208,25 @@ def _edit_existing(existing: dict, context_path: Path) -> dict:
         ).ask()
         updated[k] = new_val if new_val else v
 
-    context_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False))
+    _save_user_context(project_root, updated)
     print(f"\n  Context updated ({len(updated)} fields)")
     return updated
+
+
+def _save_user_context(project_root: Path, answers: dict):
+    """Save user context with versioning."""
+    from .versioning import begin_version, commit_version, versioned_path, update_latest_symlink
+
+    meta = begin_version(
+        project_root,
+        phase="user_context",
+        provider="user",
+        target_dir=project_root,
+    )
+    out = versioned_path(project_root / "user_context.json", meta.version)
+    out.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+    update_latest_symlink(out)
+    commit_version(project_root, meta, output_paths=[out], target_dir=project_root)
 
 
 # ---------------------------------------------------------------------------
@@ -259,10 +277,12 @@ def run_quick_scan(
     if not clip_ids:
         return None
 
-    # Check cache
-    scan_path = editorial_paths.root / "quick_scan.json"
-    if scan_path.exists():
-        return json.loads(scan_path.read_text())
+    # Check cache (versioned → _latest → bare file)
+    from .versioning import resolve_quick_scan_path
+
+    cached = resolve_quick_scan_path(editorial_paths.root)
+    if cached:
+        return json.loads(cached.read_text())
 
     from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
     from .preprocess import concat_proxies, format_concat_timeline
@@ -324,8 +344,20 @@ def run_quick_scan(
     scan = QuickScanResult.model_validate_json(response.text)
     result = scan.model_dump()
 
-    # Cache the scan
-    scan_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    # Save with versioning
+    from .versioning import begin_version, commit_version, versioned_path, update_latest_symlink
+
+    meta = begin_version(
+        editorial_paths.root,
+        phase="quick_scan",
+        provider="gemini",
+        config_snapshot={"model": gemini_model},
+        target_dir=editorial_paths.root,
+    )
+    out = versioned_path(editorial_paths.root / "quick_scan.json", meta.version)
+    out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    update_latest_symlink(out)
+    commit_version(editorial_paths.root, meta, output_paths=[out], target_dir=editorial_paths.root)
     return result
 
 
@@ -336,10 +368,12 @@ def run_smart_briefing(
     tracer=None,
 ) -> dict | None:
     """Run AI-guided briefing: quick scan → show observations → ask targeted questions."""
-    context_path = editorial_paths.root / "user_context.json"
+    from .versioning import resolve_user_context_path
+
+    context_path = resolve_user_context_path(editorial_paths.root)
 
     # Reuse existing context
-    if context_path.exists():
+    if context_path:
         existing = json.loads(context_path.read_text())
         print("\n  Existing user context found:")
         for k, v in existing.items():
@@ -357,12 +391,9 @@ def run_smart_briefing(
         if action == "Yes, use as-is":
             return existing
         if action == "Edit it":
-            return _edit_existing(existing, context_path)
+            return _edit_existing(existing, editorial_paths.root)
         if action == "Re-scan and start fresh":
-            # Delete cached scan to force re-run
-            scan_path = editorial_paths.root / "quick_scan.json"
-            if scan_path.exists():
-                scan_path.unlink()
+            pass  # Quick scan versioning handles this — new scan creates new version
 
     # Run quick scan
     print("\n  Running AI quick scan of all footage...")
@@ -372,7 +403,7 @@ def run_smart_briefing(
         print("  Quick scan unavailable — falling back to standard briefing.")
         return _ask_questions(
             {"people_detected": [], "highlights_detected": [], "total_minutes": 0, "style": style},
-            context_path,
+            editorial_paths.root,
         )
 
     # Show scan results
@@ -480,7 +511,7 @@ def run_smart_briefing(
         print("\n  No context provided — proceeding without briefing.")
         return None
 
-    context_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+    _save_user_context(editorial_paths.root, answers)
     print(f"\n  Context saved ({len(answers)} fields)")
     return answers
 

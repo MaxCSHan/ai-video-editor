@@ -362,7 +362,14 @@ def _project_actions(name, cfg):
             any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
         )
         has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
-        has_rough_cut = any(ep.exports.glob("*/rough_cut*.mp4")) if ep.exports.exists() else False
+        _cuts_dir = ep.exports / "cuts"
+        has_rough_cut = (
+            any(_cuts_dir.glob("*/rough_cut*.mp4"))
+            if _cuts_dir.exists()
+            else any(ep.exports.glob("*/rough_cut*.mp4"))
+            if ep.exports.exists()
+            else False
+        )
 
         has_monologue = (
             any(ep.storyboard.glob("monologue_*_latest.json")) if ep.storyboard.exists() else False
@@ -433,7 +440,10 @@ def _project_actions(name, cfg):
                 if preview.exists():
                     subprocess.run(["open", str(preview)])
         elif action == "Open rough cut video":
-            cuts = sorted(ep.exports.glob("*/rough_cut*.mp4"), reverse=True)
+            _cd = ep.exports / "cuts"
+            cuts = sorted(_cd.glob("*/rough_cut*.mp4"), reverse=True) if _cd.exists() else []
+            if not cuts:
+                cuts = sorted(ep.exports.glob("*/rough_cut*.mp4"), reverse=True)
             if cuts:
                 subprocess.run(["open", str(cuts[0])])
         elif action == "Regenerate preview":
@@ -457,13 +467,14 @@ def _project_actions(name, cfg):
                 )
                 v = art_meta.version
                 vdir = versioned_dir(ep.exports, v)
-                # Embed existing rough cut if available
+                # Embed existing rough cut if available (check cuts/latest first)
                 rough_cut_path = None
-                latest_export = ep.exports / "latest"
-                if latest_export.exists():
-                    rc = latest_export / "rough_cut.mp4"
-                    if rc.exists():
-                        rough_cut_path = rc.resolve()
+                for _rc_dir in [ep.exports / "cuts" / "latest", ep.exports / "latest"]:
+                    if _rc_dir.exists():
+                        rc = _rc_dir / "rough_cut.mp4"
+                        if rc.exists():
+                            rough_cut_path = rc.resolve()
+                            break
                 html = render_html_preview(
                     sb,
                     clips_dir=ep.clips_dir,
@@ -541,20 +552,14 @@ def _project_actions(name, cfg):
             style = meta.get("style", "vlog")
             from .briefing import run_smart_briefing
 
-            # Delete cached scan to force fresh scan
-            scan_path = ep.root / "quick_scan.json"
-            if scan_path.exists():
-                scan_path.unlink()
+            # Smart briefing versioning creates new versions instead of deleting
             run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
         elif action == "Edit briefing (manual)":
             reviews = _load_reviews(ep)
             style = meta.get("style", "vlog")
             from .briefing import run_briefing
 
-            # Delete existing context to force fresh questions
-            ctx_path = ep.root / "user_context.json"
-            if ctx_path.exists():
-                ctx_path.unlink()
+            # run_briefing handles versioning — new version instead of delete
             run_briefing(reviews, style, ep.root)
         elif action == "Set style preset":
             from .style_presets import list_presets as _list_presets, get_preset as _get_preset3
@@ -1291,10 +1296,12 @@ def _run_transcription(ep, clip_metadata, cfg):
         return
 
     # Load speaker context from briefing if available
+    from .versioning import resolve_user_context_path
+
     speaker_context = None
-    context_path = ep.root / "user_context.json"
-    if context_path.exists():
-        ctx = json.loads(context_path.read_text())
+    _uc_path = resolve_user_context_path(ep.root)
+    if _uc_path:
+        ctx = json.loads(_uc_path.read_text())
         speaker_context = ctx.get("people", "") or None
 
     print(f"\n  Transcribing audio ({t_provider})...\n")
@@ -1357,17 +1364,24 @@ def _run_transcription_interactive(name, cfg):
         else:
             for cid in cached:
                 audio_dir = ep.clip_paths(cid).audio
-                for f in ["transcript.json", "transcript.vtt", "transcript_preview.html"]:
+                for f in [
+                    "transcript.json",
+                    "transcript_latest.json",
+                    "transcript.vtt",
+                    "transcript_preview.html",
+                ]:
                     p = audio_dir / f
-                    if p.exists():
+                    if p.exists() or p.is_symlink():
                         p.unlink()
             print(f"  Cleared {len(cached)} cached transcripts.")
 
     # Load speaker context from briefing
+    from .versioning import resolve_user_context_path
+
     speaker_context = None
-    context_path = ep.root / "user_context.json"
-    if context_path.exists():
-        ctx = json.loads(context_path.read_text())
+    _uc_path = resolve_user_context_path(ep.root)
+    if _uc_path:
+        ctx = json.loads(_uc_path.read_text())
         speaker_context = ctx.get("people", "") or None
 
     print(f"\n  Transcribing {len(clips)} clips ({t_provider})...\n")

@@ -186,12 +186,17 @@ library/
     manifest.json                       # Aggregated clip metadata
     traces.jsonl                        # LLM call traces (tokens, cost, timing)
     file_api_cache.json                 # Gemini File API URI cache (for reuse)
+    quick_scan_v1.json                  # AI quick scan (versioned)
+    quick_scan_latest.json              # Symlink → latest version
+    user_context_v1.json                # Briefing answers (versioned)
+    user_context_latest.json            # Symlink → latest version
     clips/
       20260330_C0059/                   # Per-clip (parallel preprocessed, cached)
         source/  proxy/  frames/  scenes/
         audio/
           *.wav                         # Extracted audio (16kHz mono)
-          transcript.json               # Speech-to-text (mlx-whisper or Gemini)
+          transcript_gemini_v1.json     # Transcription (versioned, provider-tagged)
+          transcript_latest.json        # Symlink → latest transcript (any provider)
           transcript.vtt                # WebVTT subtitles
           transcript_preview.html       # Video + captions side-by-side viewer
         review/
@@ -205,10 +210,16 @@ library/
       monologue_gemini_v1.json          # Phase 3: text overlay plan
       monologue_gemini_v1.meta.json     # Artifact sidecar (storyboard lineage)
     exports/
-      v1/                               # Versioned rough cuts
-        rough_cut.mp4
-        preview.html                    # Interactive preview (with transcript overlay)
-        segments/  thumbnails/
+      v1/                               # Phase 2 storyboard preview (tied to storyboard version)
+        preview.html                    # Interactive preview
+        thumbnails/
+      cuts/                             # Rough cuts (own version sequence)
+        cut_001/
+          rough_cut.mp4
+          preview.html
+          composition.json              # Full provenance manifest
+          segments/
+        latest -> cut_001/
 ```
 
 ## Source Code
@@ -480,13 +491,21 @@ VX uses an artifact-centric versioning system where every LLM-generated output i
 
 ### How it works
 
-Every phase (clip review, storyboard, monologue, rough cut) produces versioned output files with `.meta.json` sidecar files that record:
+The pipeline is a DAG where every node's output is versioned with full lineage tracking:
 
-- **Lineage** — which inputs produced this output (e.g., storyboard v3 was built from review v1 reviews)
+```
+quick_scan → user_context → transcription (per-clip) → Phase 1 (per-clip) → Phase 2 → Phase 3 → cut
+```
+
+Every node produces versioned output files with `.meta.json` sidecar files that record:
+
+- **Lineage** — which upstream versions produced this output (e.g., storyboard v3 was built from review v1 reviews + user_context v2)
 - **Status** — `pending`, `complete`, or `failed`. Failed runs never become `_latest` or increment version counters
 - **Config snapshot** — which model, temperature, and style were used
 
 The versioning protocol is two-phase commit: `begin_version()` reserves a version number, and `commit_version()` finalizes it only on success. This prevents interrupted or failed runs from creating phantom versions.
+
+**Cuts are fully decoupled from storyboard versions.** Rough cuts live in `exports/cuts/cut_001/`, `cut_002/`, etc. — their own sequential numbering. Each cut directory contains a `composition.json` manifest recording the full provenance: which storyboard, monologue, transcription provider, briefing, and output format were used.
 
 ### Compositions
 

@@ -497,18 +497,25 @@ def cmd_transcribe(args, cfg: Config):
         if overwrite:
             for cid in cached:
                 audio_dir = ep.clip_paths(cid).audio
-                for f in ["transcript.json", "transcript.vtt", "transcript_preview.html"]:
+                for f in [
+                    "transcript.json",
+                    "transcript_latest.json",
+                    "transcript.vtt",
+                    "transcript_preview.html",
+                ]:
                     p = audio_dir / f
-                    if p.exists():
+                    if p.exists() or p.is_symlink():
                         p.unlink()
             print(f"  Cleared {len(cached)} cached transcripts.")
         else:
             print("  Keeping cached transcripts (only un-transcribed clips will be processed).")
 
     # Load speaker context from briefing if available
+    from .versioning import resolve_user_context_path
+
     speaker_context = None
-    context_path = project_root / "user_context.json"
-    if context_path.exists():
+    context_path = resolve_user_context_path(project_root)
+    if context_path:
         import json as _json
 
         ctx = _json.loads(context_path.read_text())
@@ -777,7 +784,6 @@ def cmd_brief(args, cfg: Config):
         sys.exit(1)
 
     ep = cfg.editorial_project(name)
-    context_path = project_root / "user_context.json"
 
     ws = _read_workspace_config()
     style = meta.get("style", ws.get("style", "vlog"))
@@ -787,10 +793,6 @@ def cmd_brief(args, cfg: Config):
         from .briefing import run_smart_briefing
 
         _header(f"Smart Briefing: {name}")
-        # Delete cached scan to force fresh scan
-        scan_path = project_root / "quick_scan.json"
-        if scan_path.exists():
-            scan_path.unlink()
 
         run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
         return
@@ -810,8 +812,11 @@ def cmd_brief(args, cfg: Config):
 
     # If context exists, pre-fill the template with existing answers
     template = generate_template(reviews, style)
-    if context_path.exists():
-        existing = json.loads(context_path.read_text())
+    from .versioning import resolve_user_context_path as _ruc
+
+    _ctx_path = _ruc(project_root)
+    if _ctx_path:
+        existing = json.loads(_ctx_path.read_text())
         # Inject existing answers into template
         for key, value in existing.items():
             template = template.replace(f"\n{key}:\n", f"\n{key}: {value}\n")
@@ -827,7 +832,9 @@ def cmd_brief(args, cfg: Config):
 
     answers = parse_template(edited)
     if answers:
-        context_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+        from .briefing import _save_user_context
+
+        _save_user_context(project_root, answers)
         print(f"  {GREEN}Context saved ({len(answers)} fields):{RESET}")
         for k, v in answers.items():
             print(f"    {CYAN}{k}{RESET}: {v[:80]}{'...' if len(v) > 80 else ''}")
@@ -839,7 +846,12 @@ def cmd_brief(args, cfg: Config):
 
 
 def _find_storyboard_json(ep) -> Path | None:
-    """Find the latest structured storyboard JSON for an editorial project."""
+    """Find the latest structured storyboard JSON for an editorial project.
+
+    Always returns the resolved versioned path (not the _latest symlink).
+    """
+    from .versioning import resolve_versioned_path
+
     storyboard_dir = ep.storyboard
     candidates = [
         storyboard_dir / "editorial_gemini_latest.json",
@@ -849,12 +861,17 @@ def _find_storyboard_json(ep) -> Path | None:
         candidates.extend(sorted(storyboard_dir.glob("editorial_*_v*.json"), reverse=True))
     for c in candidates:
         if c.exists():
-            return c
+            return resolve_versioned_path(c)
     return None
 
 
 def _find_monologue_json(ep) -> Path | None:
-    """Find the latest monologue plan JSON for an editorial project."""
+    """Find the latest monologue plan JSON for an editorial project.
+
+    Always returns the resolved versioned path (not the _latest symlink).
+    """
+    from .versioning import resolve_versioned_path
+
     storyboard_dir = ep.storyboard
     candidates = [
         storyboard_dir / "monologue_gemini_latest.json",
@@ -864,7 +881,7 @@ def _find_monologue_json(ep) -> Path | None:
         candidates.extend(sorted(storyboard_dir.glob("monologue_*_v*.json"), reverse=True))
     for c in candidates:
         if c.exists():
-            return c
+            return resolve_versioned_path(c)
     return None
 
 
@@ -912,13 +929,14 @@ def cmd_preview(args, cfg: Config):
     v = art_meta.version
     vdir = versioned_dir(ep.exports, v)
 
-    # Find existing rough cut to embed (use latest if available)
+    # Find existing rough cut to embed (check cuts/latest first, then legacy exports/latest)
     rough_cut_path = None
-    latest_export = ep.exports / "latest"
-    if latest_export.exists():
-        rc = latest_export / "rough_cut.mp4"
-        if rc.exists():
-            rough_cut_path = rc.resolve()
+    for rc_dir in [ep.exports / "cuts" / "latest", ep.exports / "latest"]:
+        if rc_dir.exists():
+            rc = rc_dir / "rough_cut.mp4"
+            if rc.exists():
+                rough_cut_path = rc.resolve()
+                break
 
     html = render_html_preview(
         sb,
@@ -1033,10 +1051,10 @@ def cmd_cut(args, cfg: Config):
         composition=composition,
     )
 
-    v = result.get("version", "?")
+    cut_id = result.get("cut_id", f"v{result.get('version', '?')}")
     warn_count = len(result.get("warnings", []))
     print()
-    print(f"  {BOLD}Version:{RESET}    v{v}")
+    print(f"  {BOLD}Cut:{RESET}        {cut_id}")
     if "rough_cut" in result:
         size_mb = result["rough_cut"].stat().st_size / 1024 / 1024
         print(f"  {GREEN}Rough cut:{RESET}  {result['rough_cut']} ({size_mb:.1f} MB)")

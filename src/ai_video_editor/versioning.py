@@ -312,6 +312,9 @@ def _compat_phase_key(phase: str, provider: str) -> str | None:
         "monologue": "monologue",
         "cut": "cut",
         "preview": "preview",
+        "quick_scan": "quick_scan",
+        "user_context": "user_context",
+        "transcript": f"transcript_{provider}",
     }
     return mapping.get(phase)
 
@@ -322,13 +325,98 @@ def _phase_dir(project_root: Path, phase: str, track: str = "main") -> Path:
         "review": project_root / "review",  # per-clip: project_root is clip root
         "storyboard": project_root / "storyboard",
         "monologue": project_root / "storyboard",
-        "cut": project_root / "exports",
+        "cut": project_root / "exports" / "cuts",
         "preview": project_root / "exports",
+        "quick_scan": project_root,
+        "user_context": project_root,
+        "transcript": project_root / "audio",  # per-clip: project_root is clip root
     }
     base = base_dirs.get(phase, project_root)
     if track != "main":
         return base / track
     return base
+
+
+# ---------------------------------------------------------------------------
+# Symlink resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_versioned_path(path: Path) -> Path:
+    """Resolve a _latest symlink to its actual versioned target.
+
+    editorial_gemini_latest.json → editorial_gemini_v4.json
+    If path is not a symlink, returns it unchanged.
+    """
+    if path.is_symlink():
+        return path.resolve()
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Path resolver helpers (encapsulate fallback chains for readers)
+# ---------------------------------------------------------------------------
+
+
+def resolve_quick_scan_path(project_root: Path) -> Path | None:
+    """Find the current quick_scan file. Versioned → _latest symlink → bare file."""
+    latest = project_root / "quick_scan_latest.json"
+    if latest.exists():
+        return resolve_versioned_path(latest)
+    bare = project_root / "quick_scan.json"
+    if bare.exists():
+        return bare
+    return None
+
+
+def resolve_user_context_path(project_root: Path) -> Path | None:
+    """Find the current user_context file. Versioned → _latest symlink → bare file."""
+    latest = project_root / "user_context_latest.json"
+    if latest.exists():
+        return resolve_versioned_path(latest)
+    bare = project_root / "user_context.json"
+    if bare.exists():
+        return bare
+    return None
+
+
+def resolve_transcript_path(clip_root: Path) -> Path | None:
+    """Find the current transcript for a clip. _latest symlink → bare file."""
+    audio_dir = clip_root / "audio" if not clip_root.name == "audio" else clip_root
+    latest = audio_dir / "transcript_latest.json"
+    if latest.exists():
+        return resolve_versioned_path(latest)
+    bare = audio_dir / "transcript.json"
+    if bare.exists():
+        return bare
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cut directory helpers
+# ---------------------------------------------------------------------------
+
+
+def next_cut_number(cuts_dir: Path) -> int:
+    """Scan exports/cuts/ for existing cut_NNN dirs and return next number."""
+    max_n = 0
+    if cuts_dir.exists():
+        for d in cuts_dir.iterdir():
+            if d.is_dir() and d.name.startswith("cut_"):
+                try:
+                    n = int(d.name.split("_")[1])
+                    max_n = max(max_n, n)
+                except (ValueError, IndexError):
+                    continue
+    return max_n + 1
+
+
+def cut_dir(exports_path: Path, cut_number: int) -> Path:
+    """Create and return exports/cuts/cut_NNN/ directory."""
+    cuts = exports_path / "cuts"
+    d = cuts / f"cut_{cut_number:03d}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -350,11 +438,13 @@ def list_artifacts(
 
     results = []
     search_dirs = [
+        project_root,  # quick_scan, user_context sidecars
         project_root / "storyboard",
         project_root / "exports",
+        project_root / "exports" / "cuts",
     ]
-    # Also search track subdirectories
-    for d in search_dirs:
+    # Also search track subdirectories and cut subdirectories
+    for d in list(search_dirs):
         if d.exists():
             for sub in d.iterdir():
                 if sub.is_dir() and sub.name not in ("latest",) and not sub.name.startswith("v"):
@@ -497,38 +587,23 @@ def _maybe_migrate_legacy(project_root: Path):
     """One-time migration: scan existing versioned files and create .meta.json sidecars.
 
     Called lazily on first list_artifacts() or begin_version() call.
-    Only runs if versioned files exist but no .meta.json sidecars are found.
+    Migrates: versioned storyboard/review files, bare quick_scan.json, bare user_context.json,
+    bare transcript.json per clip.
     """
     meta = read_project_meta(project_root)
-    if meta.get("versions_migrated"):
-        return
-
-    storyboard_dir = project_root / "storyboard"
-    has_versioned_files = False
-    has_meta_files = False
-
-    if storyboard_dir.exists():
-        for f in storyboard_dir.iterdir():
-            if f.suffix == ".json" and not f.name.endswith(".meta.json"):
-                if re.search(r"_v\d+\.json$", f.name):
-                    has_versioned_files = True
-            if f.name.endswith(".meta.json"):
-                has_meta_files = True
-
-    if not has_versioned_files or has_meta_files:
-        # Nothing to migrate, or already migrated
-        meta["versions_migrated"] = True
-        write_project_meta(project_root, meta)
+    if meta.get("versions_migrated_v2"):
         return
 
     _migrate_legacy_versions(project_root)
     meta = read_project_meta(project_root)
     meta["versions_migrated"] = True
+    meta["versions_migrated_v2"] = True
     write_project_meta(project_root, meta)
 
 
 def _migrate_legacy_versions(project_root: Path):
     """Scan existing versioned files and create .meta.json sidecars retroactively."""
+    import shutil
 
     # Migrate storyboard files (Phase 2 and Phase 3)
     storyboard_dir = project_root / "storyboard"
@@ -542,29 +617,76 @@ def _migrate_legacy_versions(project_root: Path):
                 continue
             _create_legacy_sidecar(f, "monologue")
 
-    # Migrate per-clip reviews (Phase 1)
+    # Migrate per-clip reviews (Phase 1) and transcripts
     clips_dir = project_root / "clips"
     if clips_dir.exists():
         for clip_dir in clips_dir.iterdir():
             if not clip_dir.is_dir():
                 continue
             review_dir = clip_dir / "review"
-            if not review_dir.exists():
-                continue
-            for f in review_dir.glob("review_*_v*.json"):
-                if f.name.endswith(".meta.json"):
-                    continue
-                _create_legacy_sidecar(f, "review", clip_id=clip_dir.name)
+            if review_dir.exists():
+                for f in review_dir.glob("review_*_v*.json"):
+                    if f.name.endswith(".meta.json"):
+                        continue
+                    _create_legacy_sidecar(f, "review", clip_id=clip_dir.name)
+
+            # Migrate bare transcript.json → transcript_{provider}_v1.json + symlink
+            audio_dir = clip_dir / "audio"
+            bare_transcript = audio_dir / "transcript.json"
+            latest_transcript = audio_dir / "transcript_latest.json"
+            if bare_transcript.exists() and not latest_transcript.exists():
+                try:
+                    data = json.loads(bare_transcript.read_text())
+                    provider = data.get("provider", "mlx")
+                    versioned = audio_dir / f"transcript_{provider}_v1.json"
+                    if not versioned.exists():
+                        shutil.copy2(bare_transcript, versioned)
+                        update_latest_symlink(versioned, link_name="transcript_latest.json")
+                        _create_legacy_sidecar(
+                            versioned,
+                            "transcript",
+                            clip_id=clip_dir.name,
+                            provider_override=provider,
+                        )
+                except Exception:
+                    pass
+
+    # Migrate bare quick_scan.json → quick_scan_v1.json + symlink
+    bare_scan = project_root / "quick_scan.json"
+    latest_scan = project_root / "quick_scan_latest.json"
+    if bare_scan.exists() and not latest_scan.exists():
+        versioned_scan = project_root / "quick_scan_v1.json"
+        if not versioned_scan.exists():
+            shutil.copy2(bare_scan, versioned_scan)
+            update_latest_symlink(versioned_scan)
+            _create_legacy_sidecar(versioned_scan, "quick_scan", provider_override="gemini")
+
+    # Migrate bare user_context.json → user_context_v1.json + symlink
+    bare_ctx = project_root / "user_context.json"
+    latest_ctx = project_root / "user_context_latest.json"
+    if bare_ctx.exists() and not latest_ctx.exists():
+        versioned_ctx = project_root / "user_context_v1.json"
+        if not versioned_ctx.exists():
+            shutil.copy2(bare_ctx, versioned_ctx)
+            update_latest_symlink(versioned_ctx)
+            _create_legacy_sidecar(versioned_ctx, "user_context", provider_override="user")
 
 
-def _create_legacy_sidecar(file_path: Path, phase: str, clip_id: str | None = None):
+def _create_legacy_sidecar(
+    file_path: Path, phase: str, clip_id: str | None = None, provider_override: str | None = None
+):
     """Create a .meta.json sidecar for an existing versioned file."""
-    m = re.search(r"_(\w+)_v(\d+)\.json$", file_path.name)
+    m = re.search(r"_v(\d+)\.json$", file_path.name)
     if not m:
         return
 
-    provider = m.group(1)
-    version = int(m.group(2))
+    version = int(m.group(1))
+    # Try to extract provider from filename (editorial_gemini_v4.json → gemini)
+    if provider_override:
+        provider = provider_override
+    else:
+        pm = re.search(r"_(\w+)_v\d+\.json$", file_path.name)
+        provider = pm.group(1) if pm else ""
     artifact_id = _build_artifact_id(phase, provider, version, clip_id)
 
     # Use file mtime as creation timestamp

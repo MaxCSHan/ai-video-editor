@@ -279,9 +279,12 @@ def _transcribe_single_clip(
     label = f"[{index}/{total}] {clip_id}"
 
     if clip_paths.has_transcript():
+        from .versioning import resolve_transcript_path
+
         print(f"  {label}: transcript cached")
-        transcript_path = clip_paths.audio / "transcript.json"
-        return clip_id, json.loads(transcript_path.read_text())
+        transcript_path = resolve_transcript_path(clip_paths.root)
+        if transcript_path:
+            return clip_id, json.loads(transcript_path.read_text())
 
     if provider == "gemini":
         from .transcribe import transcribe_clip_gemini
@@ -373,8 +376,10 @@ def transcribe_all_clips(
 
 def _load_transcript_for_prompt(clip_paths) -> str | None:
     """Load and format a clip's transcript for LLM prompt injection."""
-    transcript_path = clip_paths.audio / "transcript.json"
-    if not transcript_path.exists():
+    from .versioning import resolve_transcript_path
+
+    transcript_path = resolve_transcript_path(clip_paths.root)
+    if not transcript_path:
         return None
     from .transcribe import format_transcript_for_prompt
 
@@ -395,12 +400,14 @@ def _load_all_transcripts_for_prompt(
     """Load formatted transcripts for all clips. Returns {clip_id: text} or None."""
     from .transcribe import format_transcript_for_prompt
 
+    from .versioning import resolve_transcript_path
+
     transcripts = {}
     for review in clip_reviews:
         clip_id = review.get("clip_id", "")
         clip_paths = editorial_paths.clip_paths(clip_id)
-        transcript_path = clip_paths.audio / "transcript.json"
-        if transcript_path.exists():
+        transcript_path = resolve_transcript_path(clip_paths.root)
+        if transcript_path:
             try:
                 t = json.loads(transcript_path.read_text())
             except json.JSONDecodeError:
@@ -540,11 +547,30 @@ def _review_single_clip_gemini(
         if tracer and tracer.traces:
             tracer.traces[-1].validation_retried = True
 
+    # Build lineage inputs
+    review_lineage = {}
+    from .versioning import resolve_transcript_path as _rtp, resolve_user_context_path as _rucp
+
+    _tp = _rtp(clip_paths.root)
+    if _tp:
+        import re as _re2
+
+        _tm = _re2.search(r"_v(\d+)\.", _tp.name)
+        _prov = "gemini" if "gemini" in _tp.name else "mlx"
+        if _tm:
+            review_lineage["transcript"] = f"transcript:{_prov}:{clip_id}:v{_tm.group(1)}"
+    _ucp = _rucp(editorial_paths.root)
+    if _ucp:
+        _um = _re2.search(r"_v(\d+)\.", _ucp.name) if "_v" in _ucp.name else None
+        if _um:
+            review_lineage["user_context"] = f"user_context:user:v{_um.group(1)}"
+
     meta = begin_version(
         clip_paths.root,
         phase="review",
         provider="gemini",
         clip_id=clip_id,
+        inputs=review_lineage,
         config_snapshot={"model": cfg.model, "temperature": cfg.temperature},
         target_dir=clip_paths.review,
     )
@@ -741,6 +767,7 @@ def run_phase1_claude(
                 phase="review",
                 provider="claude",
                 clip_id=clip_id,
+                inputs={},  # Claude reviews don't have easy lineage access here
                 config_snapshot={"model": cfg.model, "temperature": cfg.temperature},
                 target_dir=clip_paths.review,
             )
@@ -1010,11 +1037,21 @@ def run_phase2(
     # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
 
-    # Build lineage: record which review versions were used
+    # Build lineage: record which review versions and user context were used
     review_inputs = {}
     for r in clip_reviews:
         cid = r.get("clip_id", "")
         review_inputs[f"review:{cid}"] = cid
+    # Add user_context lineage
+    from .versioning import resolve_user_context_path as _rucp2
+
+    _uc2 = _rucp2(editorial_paths.root)
+    if _uc2 and "_v" in _uc2.name:
+        import re as _re3
+
+        _um2 = _re3.search(r"_v(\d+)\.", _uc2.name)
+        if _um2:
+            review_inputs["user_context"] = f"user_context:user:v{_um2.group(1)}"
     cfg_snap = {}
     if gemini_cfg:
         cfg_snap = {"model": gemini_cfg.phase2, "temperature": gemini_cfg.temperature}
@@ -1106,8 +1143,10 @@ def run_monologue(
     if user_context:
         user_context_text = format_context_for_prompt(user_context)
     else:
-        context_path = editorial_paths.root / "user_context.json"
-        if context_path.exists():
+        from .versioning import resolve_user_context_path
+
+        context_path = resolve_user_context_path(editorial_paths.root)
+        if context_path:
             ctx = json.loads(context_path.read_text())
             user_context_text = format_context_for_prompt(ctx)
 
@@ -1230,15 +1269,20 @@ def run_monologue(
 
 
 def _find_latest_storyboard(editorial_paths: EditorialProjectPaths, provider: str) -> Path | None:
-    """Find the latest storyboard JSON for the given provider."""
+    """Find the latest storyboard JSON for the given provider.
+
+    Always returns the resolved versioned path (not the _latest symlink).
+    """
+    from .versioning import resolve_versioned_path
+
     latest = editorial_paths.storyboard / f"editorial_{provider}_latest.json"
     if latest.exists():
-        return latest
+        return resolve_versioned_path(latest)
     # Fallback: try any provider
     for p in ("gemini", "claude"):
         f = editorial_paths.storyboard / f"editorial_{p}_latest.json"
         if f.exists():
-            return f
+            return resolve_versioned_path(f)
     return None
 
 
@@ -1424,9 +1468,11 @@ def run_editorial_pipeline(
     t_provider = _resolve_transcribe_provider(cfg.transcribe)
     if t_provider:
         # Load speaker context from briefing if available
+        from .versioning import resolve_user_context_path
+
         speaker_context = None
-        context_path = editorial_paths.root / "user_context.json"
-        if context_path.exists():
+        context_path = resolve_user_context_path(editorial_paths.root)
+        if context_path:
             ctx = json.loads(context_path.read_text())
             speaker_context = ctx.get("people", "") or None
 

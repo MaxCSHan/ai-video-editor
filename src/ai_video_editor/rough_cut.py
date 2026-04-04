@@ -13,8 +13,9 @@ from .render import render_html_preview
 from .versioning import (
     begin_version,
     commit_version,
-    next_version,
-    versioned_dir,
+    cut_dir,
+    next_cut_number,
+    resolve_versioned_path,
     update_latest_symlink,
 )
 
@@ -945,8 +946,10 @@ def _extract_segment(
 
 def _load_clip_transcript(editorial_paths: EditorialProjectPaths, clip_id: str) -> list | None:
     """Load transcript segments for a clip, or None if unavailable."""
-    transcript_path = editorial_paths.clip_paths(clip_id).root / "audio" / "transcript.json"
-    if transcript_path.exists():
+    from .versioning import resolve_transcript_path
+
+    transcript_path = resolve_transcript_path(editorial_paths.clip_paths(clip_id).root)
+    if transcript_path:
         data = json.loads(transcript_path.read_text())
         return data.get("segments", [])
     return None
@@ -1222,38 +1225,32 @@ def run_rough_cut(
                 if "duration_sec" in clip
             }
 
-    # Derive version and build lineage
+    # Build lineage from resolved storyboard path
     import re
 
-    storyboard_input = {}
-    v_match = re.search(r"_v(\d+)\.", storyboard_json_path.name)
-    if v_match:
-        v = int(v_match.group(1))
-        # Extract provider from filename (editorial_gemini_v4.json → gemini)
-        p_match = re.search(r"editorial_(\w+)_v\d+", storyboard_json_path.name)
-        if p_match:
-            storyboard_input["storyboard"] = f"storyboard:{p_match.group(1)}:v{v}"
-    else:
-        v = next_version(editorial_paths.root, "cut")
-
-    monologue_input = {}
+    resolved_sb = resolve_versioned_path(storyboard_json_path)
+    inputs = {}
+    v_match = re.search(r"_v(\d+)\.", resolved_sb.name)
+    p_match = re.search(r"editorial_(\w+)_v\d+", resolved_sb.name)
+    if v_match and p_match:
+        inputs["storyboard"] = f"storyboard:{p_match.group(1)}:v{v_match.group(1)}"
     if monologue:
-        monologue_input["monologue"] = "monologue:latest"
+        inputs["monologue"] = "monologue:latest"
+
+    # Cuts have their own version sequence, independent of storyboard version
+    cuts_dir = editorial_paths.exports / "cuts"
+    cut_num = next_cut_number(cuts_dir)
+    vdir = cut_dir(editorial_paths.exports, cut_num)
 
     art_meta = begin_version(
         editorial_paths.root,
         phase="cut",
         provider="ffmpeg",
-        inputs={**storyboard_input, **monologue_input},
-        target_dir=editorial_paths.exports,
+        inputs=inputs,
+        target_dir=cuts_dir,
     )
-    # Use storyboard-derived version if available, otherwise use artifact version
-    if v_match:
-        art_meta.version = v
-    else:
-        v = art_meta.version
-    vdir = versioned_dir(editorial_paths.exports, v)
-    print(f"  Export version: v{v}")
+    art_meta.version = cut_num
+    print(f"  Cut: cut_{cut_num:03d}")
     if proxy_mode:
         print("  PROXY MODE: Using cached proxy files (source drive offline)")
     print(f"  Loaded storyboard: {storyboard.title} ({len(storyboard.segments)} segments)")
@@ -1318,17 +1315,53 @@ def run_rough_cut(
     preview_path = vdir / "preview.html"
     preview_path.write_text(html)
 
+    # Write composition.json (full provenance manifest)
+    from .models import CutComposition
+
+    comp_data = {
+        "artifact_id": inputs.get("storyboard", ""),
+        "file": resolved_sb.name,
+        "segments": len(storyboard.segments),
+        "duration_sec": storyboard.total_segments_duration,
+    }
+    mono_data = None
+    if monologue:
+        mono_data = {
+            "artifact_id": inputs.get("monologue", ""),
+            "overlays": len(monologue.overlays),
+        }
+    of_data = {}
+    if output_format:
+        of_data = {
+            "width": output_format.width,
+            "height": output_format.height,
+            "fps": output_format.fps,
+            "codec": output_format.codec,
+            "label": output_format.label,
+        }
+    cut_comp = CutComposition(
+        cut_id=f"cut_{cut_num:03d}",
+        created_at=art_meta.created_at,
+        storyboard=comp_data,
+        monologue=mono_data,
+        output_format=of_data,
+    )
+    comp_path = vdir / "composition.json"
+    comp_path.write_text(cut_comp.model_dump_json(indent=2))
+
     # Commit version and symlink latest
+    cuts_dir = editorial_paths.exports / "cuts"
     commit_version(
         editorial_paths.root,
         art_meta,
         output_paths=[rough_cut_path, preview_path],
-        target_dir=editorial_paths.exports,
+        target_dir=cuts_dir,
     )
     update_latest_symlink(vdir)
 
     return {
-        "version": v,
+        "version": cut_num,
+        "cut_id": f"cut_{cut_num:03d}",
         "rough_cut": rough_cut_path,
         "preview": preview_path,
         "warnings": all_warnings,

@@ -224,3 +224,20 @@ class Composition(BaseModel):
     monologue: str | None = None  # artifact_id, optional
     created_at: str  # ISO timestamp
     notes: str = ""
+
+
+class CutComposition(BaseModel):
+    """Full provenance manifest written to each cut directory as composition.json.
+
+    Records every upstream artifact that went into producing the video,
+    enabling full DAG lineage tracing from any rough cut back to its inputs.
+    """
+
+    cut_id: str  # "cut_001"
+    created_at: str
+    storyboard: dict  # {artifact_id, file, segments, duration_sec}
+    monologue: dict | None = None  # {artifact_id, file, overlays}
+    transcription_provider: str = ""
+    briefing: str = ""  # user_context artifact_id or filename
+    style_preset: str = ""
+    output_format: dict = {}  # {width, height, fps, codec, label}
