@@ -1058,6 +1058,14 @@ def run_phase2(
     elif claude_cfg:
         cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
 
+    # Determine parent_id from review version for lineage-prefixed versioning
+    from .versioning import current_version
+
+    rv_version = current_version(editorial_paths.root, f"review_{provider}")
+    if rv_version == 0:
+        rv_version = current_version(editorial_paths.root, "review")
+    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
     art_meta = begin_version(
         editorial_paths.root,
         phase="storyboard",
@@ -1065,6 +1073,7 @@ def run_phase2(
         inputs=review_inputs,
         config_snapshot=cfg_snap,
         target_dir=editorial_paths.storyboard,
+        parent_id=review_parent_id,
     )
     v = art_meta.version
     base = f"editorial_{provider}"
@@ -1118,8 +1127,14 @@ def run_monologue(
     user_context: dict | None = None,
     tracer=None,
     persona_hint: str | None = None,
+    storyboard_path: Path | None = None,
 ) -> Path:
-    """Phase 3: generate Visual Monologue text overlay plan from the editorial storyboard."""
+    """Phase 3: generate Visual Monologue text overlay plan from the editorial storyboard.
+
+    Args:
+        storyboard_path: Explicit storyboard JSON path for version switching.
+                         If None, uses the latest storyboard.
+    """
     from .models import EditorialStoryboard, MonologuePlan
     from .editorial_prompts import build_monologue_prompt
     from .briefing import format_context_for_prompt
@@ -1127,8 +1142,11 @@ def run_monologue(
     if not style_preset or not style_preset.has_phase3:
         raise ValueError("Phase 3 requires a style preset with has_phase3=True")
 
-    # Load the latest storyboard
-    storyboard_json = _find_latest_storyboard(editorial_paths, provider)
+    # Load storyboard — explicit path or latest
+    if storyboard_path:
+        storyboard_json = storyboard_path
+    else:
+        storyboard_json = _find_latest_storyboard(editorial_paths, provider)
     if not storyboard_json:
         raise FileNotFoundError(
             f"No storyboard found in {editorial_paths.storyboard}. Run Phase 2 first."
@@ -1240,6 +1258,12 @@ def run_monologue(
     elif claude_cfg:
         cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
 
+    # Determine storyboard parent_id for lineage-prefixed versioning
+    sb_parent_id = None
+    if vm:
+        sb_version = int(vm.group(1))
+        sb_parent_id = f"sb.{sb_version}"
+
     art_meta = begin_version(
         editorial_paths.root,
         phase="monologue",
@@ -1247,6 +1271,7 @@ def run_monologue(
         inputs=storyboard_input,
         config_snapshot=cfg_snap,
         target_dir=editorial_paths.storyboard,
+        parent_id=sb_parent_id,
     )
     v = art_meta.version
     base = f"monologue_{provider}"

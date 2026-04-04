@@ -17,6 +17,23 @@ from pathlib import Path
 
 from .models import ArtifactMeta, Composition
 
+# ---------------------------------------------------------------------------
+# Stage codes for lineage-prefixed version IDs
+# ---------------------------------------------------------------------------
+
+STAGE_CODES = {
+    "quick_scan": "sc",
+    "user_context": "br",
+    "transcript": "tr",
+    "review": "rv",
+    "storyboard": "sb",
+    "monologue": "mn",
+    "cut": "cut",
+    "preview": "pv",
+}
+
+STAGE_FROM_CODE = {v: k for k, v in STAGE_CODES.items()}
+
 
 # ---------------------------------------------------------------------------
 # Project metadata (project.json)
@@ -129,9 +146,10 @@ def _scan_meta_files(
 def _build_artifact_id(
     phase: str, provider: str, version: int, clip_id: str | None = None, track: str = "main"
 ) -> str:
-    """Build a human-readable artifact ID.
+    """Build a human-readable artifact ID (legacy format).
 
     Examples: "storyboard:gemini:v3", "review:gemini:C0073:v2"
+    DEPRECATED: Use build_lineage_id() for new code.
     """
     parts = [phase, provider]
     if clip_id:
@@ -140,6 +158,59 @@ def _build_artifact_id(
         parts.append(track)
     parts.append(f"v{version}")
     return ":".join(parts)
+
+
+def build_lineage_id(phase: str, iteration: int, parent_id: str | None = None) -> str:
+    """Build a lineage-prefixed artifact ID.
+
+    Format: stage_code:parent_ref.iteration (or stage_code.iteration for root nodes)
+
+    Examples:
+        sc.1              — scan iteration 1 (root node)
+        br.2              — briefing iteration 2 (root node)
+        rv.1              — review iteration 1
+        sb:rv1.3          — storyboard iteration 3, from review v1
+        mn:sb3.1          — monologue iteration 1, from storyboard #3
+        cut:sb3+mn1       — cut from storyboard 3 + monologue 1
+    """
+    code = STAGE_CODES.get(phase, phase)
+    if parent_id:
+        # Extract the short reference from parent: "sb.3" → "sb3", "rv.1" → "rv1"
+        parent_ref = parent_id.replace(".", "")
+        return f"{code}:{parent_ref}.{iteration}"
+    return f"{code}.{iteration}"
+
+
+def next_iteration(target_dir: Path, phase: str, parent_id: str | None = None) -> int:
+    """Find the next iteration number for a phase within a parent scope.
+
+    Scans existing .meta.json sidecars to find the max iteration under
+    the same parent_id, then returns max + 1.
+    """
+    max_iter = 0
+    code = STAGE_CODES.get(phase, phase)
+
+    for meta in _scan_meta_files(target_dir, phase):
+        if meta.status == "failed":
+            continue
+        # Check if this artifact belongs to the same parent scope
+        if parent_id and meta.parent_id == parent_id:
+            max_iter = max(max_iter, meta.version)
+        elif not parent_id and not meta.parent_id:
+            max_iter = max(max_iter, meta.version)
+        # Also check legacy artifacts by parsing artifact_id
+        elif meta.artifact_id.startswith(f"{code}:") or meta.artifact_id.startswith(f"{code}."):
+            max_iter = max(max_iter, meta.version)
+
+    # Also check versioned files directly (legacy compat)
+    if target_dir.exists():
+        for f in target_dir.iterdir():
+            if f.suffix == ".json" and not f.name.endswith(".meta.json") and not f.is_symlink():
+                m = re.search(r"_v(\d+)\.json$", f.name)
+                if m:
+                    max_iter = max(max_iter, int(m.group(1)))
+
+    return max_iter + 1
 
 
 def _next_version_number(directory: Path, phase: str, provider: str) -> int:
@@ -176,6 +247,7 @@ def begin_version(
     track: str = "main",
     config_snapshot: dict | None = None,
     target_dir: Path | None = None,
+    parent_id: str | None = None,
 ) -> ArtifactMeta:
     """Reserve a version number and create a 'pending' artifact sidecar.
 
@@ -192,15 +264,20 @@ def begin_version(
         config_snapshot: Model/temperature/style settings used.
         target_dir: Directory where the sidecar will be written.
                     If None, inferred from phase and project_root.
+        parent_id: Direct parent artifact ID for lineage-prefixed versioning.
+                   E.g., "rv.1" when creating a storyboard from review v1.
     """
     if target_dir is None:
         target_dir = _phase_dir(project_root, phase, track)
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    v = _next_version_number(target_dir, phase, provider)
+    v = next_iteration(target_dir, phase, parent_id)
+
+    # Build lineage-prefixed artifact ID
+    artifact_id = build_lineage_id(phase, v, parent_id)
 
     meta = ArtifactMeta(
-        artifact_id=_build_artifact_id(phase, provider, v, clip_id, track),
+        artifact_id=artifact_id,
         phase=phase,
         provider=provider,
         version=v,
@@ -210,6 +287,7 @@ def begin_version(
         clip_id=clip_id,
         track=track,
         config_snapshot=config_snapshot or {},
+        parent_id=parent_id,
     )
 
     # Write pending sidecar to reserve the version number
@@ -471,7 +549,14 @@ def list_artifacts(
             except Exception:
                 continue
 
-    return sorted(results, key=lambda m: (m.phase, m.version))
+    # Deduplicate by artifact_id (overlapping search dirs may find same sidecar)
+    seen = set()
+    deduped = []
+    for m in results:
+        if m.artifact_id not in seen:
+            seen.add(m.artifact_id)
+            deduped.append(m)
+    return sorted(deduped, key=lambda m: (m.phase, m.version))
 
 
 def list_clip_artifacts(

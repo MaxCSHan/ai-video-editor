@@ -1230,10 +1230,13 @@ def run_rough_cut(
 
     resolved_sb = resolve_versioned_path(storyboard_json_path)
     inputs = {}
+    sb_parent_id = None
     v_match = re.search(r"_v(\d+)\.", resolved_sb.name)
     p_match = re.search(r"editorial_(\w+)_v\d+", resolved_sb.name)
     if v_match and p_match:
-        inputs["storyboard"] = f"storyboard:{p_match.group(1)}:v{v_match.group(1)}"
+        sb_version = int(v_match.group(1))
+        inputs["storyboard"] = f"sb.{sb_version}"
+        sb_parent_id = f"sb.{sb_version}"
     if monologue:
         inputs["monologue"] = "monologue:latest"
 
@@ -1248,6 +1251,7 @@ def run_rough_cut(
         provider="ffmpeg",
         inputs=inputs,
         target_dir=cuts_dir,
+        parent_id=sb_parent_id,
     )
     art_meta.version = cut_num
     print(f"  Cut: cut_{cut_num:03d}")

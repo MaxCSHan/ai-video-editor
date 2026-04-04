@@ -34,23 +34,32 @@ _DIM = "\033[2m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
-# Pipeline node definitions
-PIPELINE_NODES = ["scan", "ctx", "transcript", "P1", "P2", "P3"]
+# Pipeline node definitions — semantic names (not Phase 1/2/3)
+PIPELINE_NODES = ["scan", "brief", "speech", "review", "story", "mono"]
 NODE_LABELS = {
     "scan": "Scan",
-    "ctx": "Ctx",
-    "transcript": "Transcript",
-    "P1": "P1",
-    "P2": "P2",
-    "P3": "P3",
+    "brief": "Brief",
+    "speech": "Speech",
+    "review": "Review",
+    "story": "Story",
+    "mono": "Mono",
 }
 NODE_FULL_NAMES = {
     "scan": "Quick Scan",
-    "ctx": "Briefing Context",
-    "transcript": "Transcription",
-    "P1": "Phase 1 — Clip Reviews",
-    "P2": "Phase 2 — Storyboard",
-    "P3": "Phase 3 — Monologue",
+    "brief": "Briefing Context",
+    "speech": "Transcription",
+    "review": "Clip Reviews",
+    "story": "Storyboard",
+    "mono": "Monologue",
+}
+# Map TUI node names to internal phase names used by versioning
+NODE_TO_PHASE = {
+    "scan": "quick_scan",
+    "brief": "user_context",
+    "speech": "transcript",
+    "review": "review",
+    "story": "storyboard",
+    "mono": "monologue",
 }
 
 
@@ -76,10 +85,11 @@ def _gather_pipeline_state(ep, meta) -> dict:
     scan_path = resolve_quick_scan_path(ep.root)
     scan_versions = []
     for f in sorted(ep.root.glob("quick_scan_v*.json")):
-        if not f.name.endswith(".meta.json"):
-            m = re.search(r"_v(\d+)\.", f.name)
-            if m:
-                scan_versions.append(int(m.group(1)))
+        if f.name.endswith(".meta.json") or f.is_symlink():
+            continue
+        m = re.search(r"_v(\d+)\.json$", f.name)
+        if m:
+            scan_versions.append(int(m.group(1)))
     state["scan"] = {
         "exists": scan_path is not None,
         "versions": scan_versions,
@@ -91,14 +101,15 @@ def _gather_pipeline_state(ep, meta) -> dict:
     ctx_path = resolve_user_context_path(ep.root)
     ctx_versions = []
     for f in sorted(ep.root.glob("user_context_v*.json")):
-        if not f.name.endswith(".meta.json"):
-            m = re.search(r"_v(\d+)\.", f.name)
-            if m:
-                ctx_versions.append(int(m.group(1)))
+        if f.name.endswith(".meta.json") or f.is_symlink():
+            continue
+        m = re.search(r"_v(\d+)\.json$", f.name)
+        if m:
+            ctx_versions.append(int(m.group(1)))
     # Fallback: bare file counts as v1
     if not ctx_versions and ctx_path and "user_context.json" == ctx_path.name:
         ctx_versions = [1]
-    state["ctx"] = {
+    state["brief"] = {
         "exists": ctx_path is not None,
         "versions": ctx_versions,
         "date": _file_date(ctx_path) if ctx_path else "",
@@ -119,7 +130,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                     t_provider = data.get("provider", "mlx") or "mlx"
                 except Exception:
                     t_provider = "?"
-    state["transcript"] = {
+    state["speech"] = {
         "exists": t_count > 0,
         "provider": t_provider,
         "clip_count": t_count,
@@ -138,7 +149,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                 m = re.search(r"_v(\d+)\.", f.name)
                 if m:
                     r_version = max(r_version, int(m.group(1)))
-    state["P1"] = {
+    state["review"] = {
         "exists": r_count > 0,
         "provider": provider,
         "clip_count": r_count,
@@ -167,7 +178,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                 sb_detail = f"{len(sb.segments)} seg, {format_duration(sb.total_segments_duration)}"
             except Exception:
                 pass
-    state["P2"] = {
+    state["story"] = {
         "exists": len(sb_versions) > 0,
         "versions": sb_versions,
         "provider": provider,
@@ -189,7 +200,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                 mono_detail = f"{len(mp.overlays)} overlays"
             except Exception:
                 pass
-    state["P3"] = {
+    state["mono"] = {
         "exists": len(mono_versions) > 0,
         "versions": mono_versions,
         "detail": mono_detail,
@@ -251,31 +262,25 @@ def _get_node_version_text(state: dict, node: str) -> str:
     if not s.get("exists"):
         return "--"
 
-    if node in ("scan",):
+    if node in ("scan", "brief"):
         versions = s.get("versions", [])
         if versions:
-            return f"v{max(versions)}"
-        return "v1"
+            return f".{max(versions)}"
+        return ".1"
 
-    if node == "ctx":
-        versions = s.get("versions", [])
-        if versions:
-            return f"v{max(versions)}"
-        return "v1"
-
-    if node == "transcript":
+    if node == "speech":
         prov = s.get("provider", "?")
-        return f"{prov}:v1"
+        return f"{prov}.1"
 
-    if node == "P1":
+    if node == "review":
         prov = s.get("provider", "?")
-        return f"{prov}:v{s.get('version', 1)}"
+        return f"{prov}.{s.get('version', 1)}"
 
-    if node in ("P2", "P3"):
+    if node in ("story", "mono"):
         versions = s.get("versions", [])
         if versions:
-            return f"v{max(versions)}"
-        return "v1"
+            return f".{max(versions)}"
+        return ".1"
 
     return "--"
 
@@ -345,33 +350,33 @@ def _render_node_detail(state: dict, active_node: str):
         if len(versions) > 1:
             print(f"   {_compact_version_chain(versions)}")
 
-    elif active_node == "ctx":
+    elif active_node == "brief":
         date = s.get("date", "")
         versions = s.get("versions", [1])
         chain = _compact_version_chain(versions)
         print(f"\n {_BOLD}{full_name}{_RESET} ({chain}, {date})")
 
-    elif active_node == "transcript":
+    elif active_node == "speech":
         prov = s.get("provider", "?")
         count = s.get("clip_count", 0)
         total = s.get("total_clips", 0)
         print(f"\n {_BOLD}{full_name}{_RESET} ({prov}, {count}/{total} clips)")
 
-    elif active_node == "P1":
+    elif active_node == "review":
         prov = s.get("provider", "?")
         count = s.get("clip_count", 0)
         total = s.get("total_clips", 0)
         v = s.get("version", 1)
-        print(f"\n {_BOLD}{full_name}{_RESET} ({prov}:v{v}, {count}/{total} clips)")
+        print(f"\n {_BOLD}{full_name}{_RESET} (rv.{v}, {prov}, {count}/{total} clips)")
 
-    elif active_node == "P2":
+    elif active_node == "story":
         versions = s.get("versions", [])
         chain = _compact_version_chain(versions)
         detail = s.get("detail", "")
         detail_str = f" — {detail}" if detail else ""
         print(f"\n {_BOLD}{full_name}{_RESET} ({chain}){detail_str}")
 
-    elif active_node == "P3":
+    elif active_node == "mono":
         versions = s.get("versions", [])
         chain = _compact_version_chain(versions)
         detail = s.get("detail", "")
@@ -382,6 +387,69 @@ def _render_node_detail(state: dict, active_node: str):
 # ---------------------------------------------------------------------------
 # Input confirmation for phase reruns
 # ---------------------------------------------------------------------------
+
+
+def _render_lineage_tree(ep, meta):
+    """Render the full lineage tree from artifact metadata."""
+    from .versioning import list_artifacts
+
+    artifacts = list_artifacts(ep.root, include_failed=False)
+    if not artifacts:
+        print(f"\n  {_DIM}No artifacts found. Run the pipeline to build lineage.{_RESET}")
+        return
+
+    # Build parent→children mapping
+    children = {}  # parent_id → list of artifacts
+    roots = []  # artifacts with no parent
+    for art in artifacts:
+        if art.parent_id:
+            children.setdefault(art.parent_id, []).append(art)
+        else:
+            roots.append(art)
+
+    def _print_node(art, prefix="", is_last=True):
+        connector = "└─ " if is_last else "├─ "
+        extension = "   " if is_last else "│  "
+        detail = ""
+        if art.phase == "storyboard":
+            detail = f" ({art.config_snapshot.get('model', '')})" if art.config_snapshot else ""
+        elif art.phase == "monologue":
+            detail = ""
+
+        print(f"  {prefix}{connector}{art.artifact_id}  {_DIM}[{art.status}]{_RESET}{detail}")
+
+        kids = children.get(art.artifact_id, [])
+        for i, child in enumerate(kids):
+            _print_node(child, prefix + extension, i == len(kids) - 1)
+
+    print(f"\n  {_BOLD}Lineage Tree:{_RESET}")
+    for i, root in enumerate(roots):
+        is_last = i == len(roots) - 1
+        connector = "└─ " if is_last else "├─ "
+        extension = "   " if is_last else "│  "
+        print(f"  {connector}{root.artifact_id}  {_DIM}[{root.status}]{_RESET}")
+        kids = children.get(root.artifact_id, [])
+        for j, child in enumerate(kids):
+            _print_node(child, extension, j == len(kids) - 1)
+
+    # Show cuts
+    cuts_dir = ep.exports / "cuts"
+    if cuts_dir.exists():
+        cut_dirs = sorted(d for d in cuts_dir.iterdir() if d.is_dir() and d.name.startswith("cut_"))
+        if cut_dirs:
+            print(f"\n  {_BOLD}Cuts:{_RESET}")
+            for d in cut_dirs:
+                comp = d / "composition.json"
+                ref = ""
+                if comp.exists():
+                    import json as _j
+
+                    data = _j.loads(comp.read_text())
+                    sb = data.get("storyboard", {}).get("artifact_id", "?")
+                    mn = data.get("monologue", {})
+                    mn_str = f" + {mn.get('artifact_id', '')}" if mn else ""
+                    ref = f" ← {sb}{mn_str}"
+                print(f"    {d.name}{ref}")
 
 
 def _confirm_phase_inputs(ep, meta, phase: str) -> dict | None:
@@ -473,7 +541,7 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
 
     choices = []
     node_exists = state.get(active_node, {}).get("exists", False)
-    has_storyboard = state.get("P2", {}).get("exists", False)
+    has_storyboard = state.get("story", {}).get("exists", False)
     has_rough_cut = len(state.get("cuts", [])) > 0
     has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
     preset_key = meta.get("style_preset")
@@ -494,29 +562,31 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
         if node_exists:
             choices.append(questionary.Choice("View scan results", value="view_scan"))
 
-    elif active_node == "ctx":
+    elif active_node == "brief":
         choices.append(questionary.Choice("Edit briefing (AI-guided)", value="edit_brief_ai"))
         choices.append(questionary.Choice("Edit briefing (manual)", value="edit_brief_manual"))
 
-    elif active_node == "transcript":
+    elif active_node == "speech":
         choices.append(questionary.Choice("Transcribe audio", value="transcribe"))
 
-    elif active_node == "P1":
-        choices.append(questionary.Choice("Rerun Phase 1 (clip reviews)", value="rerun_p1"))
+    elif active_node == "review":
+        choices.append(questionary.Choice("Rerun clip reviews", value="rerun_p1"))
 
-    elif active_node == "P2":
-        choices.append(questionary.Choice("Rerun Phase 2 (storyboard)", value="rerun_p2"))
+    elif active_node == "story":
+        choices.append(questionary.Choice("Rerun storyboard", value="rerun_p2"))
         if node_exists:
             choices.append(questionary.Choice("Compare storyboard versions", value="compare"))
         if has_preview:
             choices.append(questionary.Choice("Open preview", value="open_preview"))
 
-    elif active_node == "P3":
+    elif active_node == "mono":
         if has_phase3:
-            choices.append(questionary.Choice("Rerun Phase 3 (monologue)", value="rerun_p3"))
+            choices.append(questionary.Choice("Rerun monologue", value="rerun_p3"))
         elif not has_phase3:
             choices.append(
-                questionary.Choice("Set style preset (Phase 3 requires preset)", value="set_preset")
+                questionary.Choice(
+                    "Set style preset (monologue requires preset)", value="set_preset"
+                )
             )
 
     # --- Navigation ---
@@ -551,9 +621,10 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
         choices.append(questionary.Choice("Open rough cut video", value="open_cut"))
     if has_storyboard:
         choices.append(questionary.Choice("Regenerate preview", value="regen_preview"))
-    choices.append(questionary.Choice("Run full pipeline (P1+P2+P3)", value="run_full"))
+    choices.append(questionary.Choice("Run full pipeline", value="run_full"))
     if not offline:
         choices.append(questionary.Choice("Manage clips", value="manage_clips"))
+    choices.append(questionary.Choice("View lineage tree", value="lineage_tree"))
     choices.append(questionary.Choice("Version history", value="version_history"))
     choices.append(questionary.Choice("Show status", value="show_status"))
     choices.append(questionary.Choice("Set style preset", value="set_preset"))
@@ -899,7 +970,7 @@ def _project_actions(name, cfg):
     ep = cfg.editorial_project(name)
 
     # Determine initial active node (rightmost with data)
-    active_node = "P2"  # default
+    active_node = "story"  # default
     state = _gather_pipeline_state(ep, meta)
     for node in reversed(PIPELINE_NODES):
         if state.get(node, {}).get("exists"):
@@ -1099,6 +1170,10 @@ def _project_actions(name, cfg):
 
         elif action == "manage_clips":
             _manage_clips(name, meta, cfg)
+
+        elif action == "lineage_tree":
+            _render_lineage_tree(ep, meta)
+            questionary.press_any_key_to_continue(style=VX_STYLE).ask()
 
         elif action == "version_history":
             _version_history_flow(name, ep)

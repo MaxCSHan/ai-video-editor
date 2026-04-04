@@ -198,15 +198,16 @@ class ArtifactMeta(BaseModel):
     Tracks lineage (which inputs produced this output), status, and config snapshot.
     """
 
-    artifact_id: str  # "storyboard:gemini:v3" or "review:gemini:C0073:v2"
-    phase: str  # "review", "storyboard", "monologue", "cut", "preview"
-    provider: str  # "gemini", "claude"
-    version: int
+    artifact_id: str  # "sb:rv1.3" or "mn:sb3.1" (lineage-prefixed)
+    phase: str  # "review", "storyboard", "monologue", "cut", "preview", "quick_scan", "user_context", "transcript"
+    provider: str  # "gemini", "claude", "mlx", "user", "ffmpeg"
+    version: int  # iteration number within parent scope
     status: str = "pending"  # "pending" | "complete" | "failed"
     created_at: str  # ISO timestamp
     completed_at: str | None = None
-    inputs: dict[str, str] = {}  # role → artifact_id (lineage tracking)
-    clip_id: str | None = None  # set for per-clip Phase 1 reviews
+    parent_id: str | None = None  # direct parent artifact ID for lineage prefix
+    inputs: dict[str, str] = {}  # role → artifact_id (full lineage tracking)
+    clip_id: str | None = None  # set for per-clip artifacts (reviews, transcripts)
     track: str = "main"  # experiment track namespace
     config_snapshot: dict = {}  # model, temperature, style used for this run
     output_files: list[str] = []  # relative paths of outputs produced

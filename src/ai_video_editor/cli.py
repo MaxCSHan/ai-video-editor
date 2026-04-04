@@ -1183,9 +1183,12 @@ def cmd_versions(args, cfg: Config):
         phases.setdefault(art.phase, []).append(art)
 
     phase_labels = {
-        "review": "Phase 1 Reviews",
-        "storyboard": "Storyboards (Phase 2)",
-        "monologue": "Monologues (Phase 3)",
+        "quick_scan": "Scan",
+        "user_context": "Brief",
+        "transcript": "Speech",
+        "review": "Review",
+        "storyboard": "Story",
+        "monologue": "Mono",
         "cut": "Rough Cuts",
         "preview": "Previews",
     }
