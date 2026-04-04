@@ -322,9 +322,13 @@ def build_editorial_assembly_prompt(
         )
 
     prompt += (
-        "\n\nNow produce the EditorialStoryboard. "
-        "Use the editorial_reasoning field to think through your editorial decisions "
-        f"before filling in the segments for a compelling {style}."
+        "\n\nNow produce the EditorialStoryboard."
+        "\n\nBEFORE writing segments, use editorial_reasoning to:"
+        "\n1. State how you satisfy each filmmaker MUST-INCLUDE/MUST-EXCLUDE constraint"
+        "\n2. Explain your story arc and opening hook choice"
+        "\n3. Note any constraints you cannot satisfy and why"
+        "\n\nThen produce the segments. The filmmaker's MUST-INCLUDE and MUST-EXCLUDE "
+        "items are non-negotiable requirements, not suggestions."
     )
     return prompt
 

@@ -517,34 +517,63 @@ def run_smart_briefing(
 
 
 def format_context_for_prompt(user_context: dict) -> str:
-    """Format user context into a text block for LLM prompts (Phase 1, 2, 3)."""
+    """Format user context into a text block for LLM prompts (Phase 1, 2, 3).
+
+    Separates hard constraints (must-include, must-exclude) from soft preferences
+    (tone, duration, etc.) to improve LLM instruction-following.
+    """
     if not user_context:
         return ""
 
-    lines = ["The filmmaker provided the following context:"]
-    label_map = {
+    # Keys that become hard constraints vs soft preferences
+    constraint_keys = {"highlights", "avoid"}
+    constraint_labels = {
+        "highlights": "MUST INCLUDE",
+        "avoid": "MUST EXCLUDE",
+    }
+    preference_labels = {
         "people": "People in the footage",
         "activity": "Activity/occasion",
-        "highlights": "Must-include moments",
         "tone": "Desired tone",
-        "avoid": "Things to avoid/exclude",
         "duration": "Duration preference",
     }
-    for key, value in user_context.items():
-        if key == "context_qa":
-            # New format: list of {"question": ..., "answer": ...} pairs
-            for qa in value:
-                lines.append(f"- **Q: {qa['question']}** → {qa['answer']}")
-        elif key.startswith("context_"):
-            # Legacy format: truncated key = answer. Include as-is for backward compat.
-            lines.append(f"- **Additional context**: {value}")
-        else:
-            label = label_map.get(key, key)
-            lines.append(f"- **{label}**: {value}")
 
-    lines.append("")
-    lines.append(
-        "Use this context to make better editorial decisions. "
-        "Prioritize the filmmaker's stated preferences."
-    )
+    constraints = []
+    preferences = []
+    qa_items = []
+
+    for key, value in user_context.items():
+        if not value:
+            continue
+        if key == "context_qa":
+            for qa in value:
+                qa_items.append(f"- **Q: {qa['question']}** → {qa['answer']}")
+        elif key.startswith("context_"):
+            preferences.append(f"- **Additional context**: {value}")
+        elif key in constraint_keys:
+            label = constraint_labels[key]
+            constraints.append(f"- {label}: {value}")
+        else:
+            label = preference_labels.get(key, key)
+            preferences.append(f"- **{label}**: {value}")
+
+    lines = []
+
+    if constraints:
+        lines.append(
+            "FILMMAKER CONSTRAINTS (non-negotiable — violating these makes the edit unusable):"
+        )
+        lines.extend(constraints)
+        lines.append(
+            "- If you cannot satisfy a constraint, "
+            "you MUST explain why in editorial_reasoning."
+        )
+        lines.append("")
+
+    if preferences or qa_items:
+        lines.append("FILMMAKER PREFERENCES (guide your creative choices):")
+        lines.extend(preferences)
+        lines.extend(qa_items)
+        lines.append("")
+
     return "\n".join(lines)

@@ -274,10 +274,13 @@ class StoryArcSection(BaseModel):
 
 class EditorialStoryboard(BaseModel):
     editorial_reasoning: str = Field(
-        description="Think through the edit before producing the storyboard: "
-        "What story does this footage tell? What is the strongest opening hook? "
-        "How should the narrative flow chronologically? Which clips are redundant? "
-        "Where do speech and music carry the edit? How should pacing shift across sections?"
+        description="Your editorial thinking process. Address these in order: "
+        "1) CONSTRAINT CHECK — for each filmmaker MUST-INCLUDE/MUST-EXCLUDE, state which "
+        "clip and usable segment satisfies it. If a constraint cannot be satisfied, explain why. "
+        "2) Story concept — what story does this footage tell? "
+        "3) Opening hook — what is the strongest first 10 seconds? "
+        "4) Arc structure — beginning/middle/end with clip assignments. "
+        "5) Pacing plan — where is the edit fast vs slow, energetic vs contemplative?"
     )
     title: str = Field(description="Creative title for the final video")
     estimated_duration_sec: float = Field(
