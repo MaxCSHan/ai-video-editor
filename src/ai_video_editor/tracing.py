@@ -327,9 +327,22 @@ def connect_phoenix(url: str | None = None) -> bool:
         return False
 
     try:
+        import logging
+
+        # Suppress verbose OpenTelemetry registration logs
+        otel_logger = logging.getLogger("phoenix.otel")
+        prev_level = otel_logger.level
+        otel_logger.setLevel(logging.WARNING)
+
         from phoenix.otel import register
 
-        register(project_name="vx-pipeline", endpoint=f"{url}/v1/traces")
+        register(
+            project_name="vx-pipeline",
+            endpoint=f"{url}/v1/traces",
+            verbose=False,
+        )
+        otel_logger.setLevel(prev_level)
+
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
         GoogleGenAIInstrumentor().instrument()
