@@ -390,47 +390,94 @@ def _render_node_detail(state: dict, active_node: str):
 
 
 def _render_lineage_tree(ep, meta):
-    """Render the full lineage tree from artifact metadata."""
-    from .versioning import list_artifacts
+    """Render the full lineage tree showing pipeline flow with version branches.
 
+    Groups artifacts by pipeline phase in DAG order, then shows versions
+    within each phase with their upstream lineage references. Works with
+    both new (parent_id) and legacy (inputs dict) artifacts.
+    """
+    from .versioning import list_artifacts, resolve_quick_scan_path, resolve_user_context_path
+
+    # Gather all artifacts + non-artifact nodes
     artifacts = list_artifacts(ep.root, include_failed=False)
-    if not artifacts:
-        print(f"\n  {_DIM}No artifacts found. Run the pipeline to build lineage.{_RESET}")
-        return
 
-    # Build parent→children mapping
-    children = {}  # parent_id → list of artifacts
-    roots = []  # artifacts with no parent
+    # Phase ordering for the DAG
+    phase_order = [
+        "quick_scan",
+        "user_context",
+        "transcript",
+        "review",
+        "storyboard",
+        "monologue",
+    ]
+    phase_labels = {
+        "quick_scan": "Scan",
+        "user_context": "Brief",
+        "transcript": "Speech",
+        "review": "Review",
+        "storyboard": "Story",
+        "monologue": "Mono",
+    }
+
+    # Group artifacts by phase
+    by_phase = {}
     for art in artifacts:
-        if art.parent_id:
-            children.setdefault(art.parent_id, []).append(art)
-        else:
-            roots.append(art)
+        by_phase.setdefault(art.phase, []).append(art)
 
-    def _print_node(art, prefix="", is_last=True):
-        connector = "└─ " if is_last else "├─ "
-        extension = "   " if is_last else "│  "
-        detail = ""
-        if art.phase == "storyboard":
-            detail = f" ({art.config_snapshot.get('model', '')})" if art.config_snapshot else ""
-        elif art.phase == "monologue":
-            detail = ""
-
-        print(f"  {prefix}{connector}{art.artifact_id}  {_DIM}[{art.status}]{_RESET}{detail}")
-
-        kids = children.get(art.artifact_id, [])
-        for i, child in enumerate(kids):
-            _print_node(child, prefix + extension, i == len(kids) - 1)
+    # Also check for non-artifact nodes (bare files from before versioning)
+    scan_path = resolve_quick_scan_path(ep.root)
+    ctx_path = resolve_user_context_path(ep.root)
 
     print(f"\n  {_BOLD}Lineage Tree:{_RESET}")
-    for i, root in enumerate(roots):
-        is_last = i == len(roots) - 1
-        connector = "└─ " if is_last else "├─ "
-        extension = "   " if is_last else "│  "
-        print(f"  {connector}{root.artifact_id}  {_DIM}[{root.status}]{_RESET}")
-        kids = children.get(root.artifact_id, [])
-        for j, child in enumerate(kids):
-            _print_node(child, extension, j == len(kids) - 1)
+
+    # Render each phase level
+    has_content = False
+    for phase in phase_order:
+        label = phase_labels.get(phase, phase)
+        arts = by_phase.get(phase, [])
+
+        # For phases with no artifacts, check for bare files
+        if not arts:
+            if phase == "quick_scan" and scan_path:
+                print(f"  {label} ─── {_DIM}{scan_path.name}{_RESET}")
+                has_content = True
+            elif phase == "user_context" and ctx_path:
+                print(f"  {label} ─── {_DIM}{ctx_path.name}{_RESET}")
+                has_content = True
+            elif phase == "transcript":
+                clips = ep.discover_clips()
+                t_count = sum(1 for c in clips if ep.clip_paths(c).has_transcript())
+                if t_count > 0:
+                    print(f"  {label} ─── {_DIM}{t_count} clips transcribed{_RESET}")
+                    has_content = True
+            elif phase == "review":
+                clips = ep.discover_clips()
+                provider = meta.get("provider", "gemini")
+                r_count = sum(1 for c in clips if ep.clip_paths(c).has_review(provider))
+                if r_count > 0:
+                    print(f"  {label} ─── {_DIM}{r_count} clips reviewed{_RESET}")
+                    has_content = True
+            continue
+
+        has_content = True
+        # Sort by version
+        arts_sorted = sorted(arts, key=lambda a: a.version)
+
+        if len(arts_sorted) == 1:
+            art = arts_sorted[0]
+            lineage = _format_lineage_ref(art)
+            print(f"  {label} ─── {art.artifact_id}{lineage}")
+        else:
+            print(f"  {label}")
+            for i, art in enumerate(arts_sorted):
+                is_last = i == len(arts_sorted) - 1
+                connector = "└─" if is_last else "├─"
+                lineage = _format_lineage_ref(art)
+                print(f"    {connector} {art.artifact_id}{lineage}")
+
+    if not has_content:
+        print(f"  {_DIM}No pipeline data yet. Run the pipeline to build lineage.{_RESET}")
+        return
 
     # Show cuts
     cuts_dir = ep.exports / "cuts"
@@ -442,14 +489,28 @@ def _render_lineage_tree(ep, meta):
                 comp = d / "composition.json"
                 ref = ""
                 if comp.exists():
-                    import json as _j
-
-                    data = _j.loads(comp.read_text())
+                    data = json.loads(comp.read_text())
                     sb = data.get("storyboard", {}).get("artifact_id", "?")
                     mn = data.get("monologue", {})
                     mn_str = f" + {mn.get('artifact_id', '')}" if mn else ""
                     ref = f" ← {sb}{mn_str}"
                 print(f"    {d.name}{ref}")
+
+
+def _format_lineage_ref(art) -> str:
+    """Format the upstream lineage reference for display."""
+    # Try parent_id first (new format)
+    if art.parent_id:
+        return f"  {_DIM}← {art.parent_id}{_RESET}"
+    # Fall back to inputs dict (legacy)
+    if art.inputs:
+        refs = []
+        for key, val in art.inputs.items():
+            if val and key not in ("monologue",):  # skip self-references
+                refs.append(str(val))
+        if refs:
+            return f"  {_DIM}← {', '.join(refs[:3])}{_RESET}"
+    return ""
 
 
 def _confirm_phase_inputs(ep, meta, phase: str) -> dict | None:
@@ -462,9 +523,9 @@ def _confirm_phase_inputs(ep, meta, phase: str) -> dict | None:
 
     provider = meta.get("provider", "gemini")
     phase_labels = {
-        "review": "Phase 1 (Clip Reviews)",
-        "storyboard": "Phase 2 (Editorial Storyboard)",
-        "monologue": "Phase 3 (Visual Monologue)",
+        "review": "Clip Reviews",
+        "storyboard": "Storyboard",
+        "monologue": "Monologue",
         "transcript": "Transcription",
     }
     inputs = []  # (label, value) for display
@@ -588,6 +649,12 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
                     "Set style preset (monologue requires preset)", value="set_preset"
                 )
             )
+
+    # --- Version switching (when multiple versions exist) ---
+    node_state = state.get(active_node, {})
+    versions = node_state.get("versions", [])
+    if len(versions) > 1 and active_node in ("story", "mono", "scan", "brief"):
+        choices.append(questionary.Choice("Switch version...", value="switch_version"))
 
     # --- Navigation ---
     node_idx = PIPELINE_NODES.index(active_node)
@@ -971,6 +1038,7 @@ def _project_actions(name, cfg):
 
     # Determine initial active node (rightmost with data)
     active_node = "story"  # default
+    active_versions = {node: None for node in PIPELINE_NODES}  # None = latest
     state = _gather_pipeline_state(ep, meta)
     for node in reversed(PIPELINE_NODES):
         if state.get(node, {}).get("exists"):
@@ -1005,6 +1073,32 @@ def _project_actions(name, cfg):
         # --- Navigation ---
         elif action.startswith("nav_"):
             active_node = action[4:]
+
+        # --- Version switching ---
+        elif action == "switch_version":
+            node_state = state.get(active_node, {})
+            versions = node_state.get("versions", [])
+            if versions:
+                from .versioning import list_artifacts
+
+                phase_name = NODE_TO_PHASE.get(active_node, active_node)
+                arts = [
+                    a for a in list_artifacts(ep.root, phase=phase_name) if a.status == "complete"
+                ]
+                if arts:
+                    version_choices = []
+                    for art in sorted(arts, key=lambda a: a.version):
+                        lineage = _format_lineage_ref(art)
+                        label = f"{art.artifact_id}{lineage}"
+                        version_choices.append(questionary.Choice(label, value=art.version))
+                    selected = questionary.select(
+                        f"{NODE_FULL_NAMES[active_node]} versions:",
+                        choices=version_choices,
+                        style=VX_STYLE,
+                    ).ask()
+                    if selected is not None:
+                        active_versions[active_node] = selected
+                        print(f"\n  Switched {NODE_LABELS[active_node]} to v{selected}")
 
         # --- Node-specific actions ---
         elif action == "rescan":
