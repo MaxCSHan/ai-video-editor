@@ -565,8 +565,7 @@ def format_context_for_prompt(user_context: dict) -> str:
         )
         lines.extend(constraints)
         lines.append(
-            "- If you cannot satisfy a constraint, "
-            "you MUST explain why in editorial_reasoning."
+            "- If you cannot satisfy a constraint, you MUST explain why in editorial_reasoning."
         )
         lines.append("")
 

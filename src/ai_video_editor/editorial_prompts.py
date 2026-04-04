@@ -6,6 +6,361 @@ import re
 from .storyboard_format import format_duration
 
 
+# ---------------------------------------------------------------------------
+# Pre-processing helpers for multi-call Phase 2 pipeline
+# ---------------------------------------------------------------------------
+
+
+def extract_cast_from_reviews(clip_reviews: list[dict]) -> list[dict]:
+    """Deduplicate people across all clip reviews into a single cast list.
+
+    Groups by normalized label, merges descriptions, tracks which clips each
+    person appears/speaks in. Replaces the per-review people arrays with a
+    single cast reference to reduce prompt token usage.
+    """
+    cast_by_label: dict[str, dict] = {}
+    for review in clip_reviews:
+        clip_id = review.get("clip_id", "")
+        for person in review.get("people", []):
+            label = person.get("label", "unknown").strip().lower()
+            if label not in cast_by_label:
+                cast_by_label[label] = {
+                    "label": person.get("label", label),
+                    "description": person.get("description", ""),
+                    "role": person.get("role", ""),
+                    "appears_in": [],
+                    "speaking_in": [],
+                }
+            entry = cast_by_label[label]
+            if clip_id not in entry["appears_in"]:
+                entry["appears_in"].append(clip_id)
+            if person.get("speaking") and clip_id not in entry["speaking_in"]:
+                entry["speaking_in"].append(clip_id)
+            # Keep the longest description
+            desc = person.get("description", "")
+            if len(desc) > len(entry["description"]):
+                entry["description"] = desc
+    return list(cast_by_label.values())
+
+
+def condense_clip_for_planning(review: dict) -> dict:
+    """Reduce a clip review to planning-essential fields only.
+
+    Strips people arrays (replaced by cast reference), strips full editorial
+    notes, keeps: clip_id, duration, content_type, cast_present, speakers,
+    key_moments (compact), usable_segments (with index), audio_summary.
+    """
+    return {
+        "clip_id": review.get("clip_id"),
+        "total_usable_sec": sum(
+            s.get("duration_sec", 0) for s in review.get("usable_segments", [])
+        ),
+        "content_type": review.get("content_type", []),
+        "cast_present": [p.get("label") for p in review.get("people", [])],
+        "speakers": [p.get("label") for p in review.get("people", []) if p.get("speaking")],
+        "key_moments": [
+            {
+                "at": km.get("timestamp_sec"),
+                "value": km.get("editorial_value"),
+                "use": km.get("suggested_use"),
+                "what": km.get("description"),
+            }
+            for km in review.get("key_moments", [])
+        ],
+        "usable_segments": [
+            {
+                "index": i,
+                "in_sec": s.get("in_sec"),
+                "out_sec": s.get("out_sec"),
+                "duration_sec": s.get("duration_sec"),
+                "description": s.get("description"),
+            }
+            for i, s in enumerate(review.get("usable_segments", []))
+        ],
+        "audio_summary": review.get("audio", {}).get("speech_summary"),
+        "has_speech": review.get("audio", {}).get("has_speech", False),
+    }
+
+
+def trim_transcript_to_usable(
+    transcript_text: str,
+    usable_segments: list[dict],
+) -> str:
+    """Keep only transcript lines whose timestamps fall within usable segment ranges."""
+    if not transcript_text or not usable_segments:
+        return transcript_text or ""
+    usable_ranges = [(s.get("in_sec", 0), s.get("out_sec", 0)) for s in usable_segments]
+    kept = []
+    for line in transcript_text.split("\n"):
+        ts = _extract_transcript_timestamp(line)
+        if ts is None:
+            kept.append(line)  # header lines, non-timestamped lines
+        elif any(start - 1.0 <= ts <= end + 1.0 for start, end in usable_ranges):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _extract_transcript_timestamp(line: str) -> float | None:
+    """Extract seconds from a transcript line like '[0:35]' or '[1:02:15]'."""
+    m = re.match(r"\[(\d+):(\d+)(?::(\d+))?\]", line.strip())
+    if not m:
+        return None
+    if m.group(3):  # H:MM:SS
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def _format_condensed_clips(condensed_clips: list[dict]) -> str:
+    """Format condensed clip summaries into compact text for Call 2A."""
+    blocks = []
+    for c in condensed_clips:
+        lines = [f"## {c['clip_id']}"]
+        lines.append(
+            f"Usable: {c['total_usable_sec']:.0f}s | Content: {', '.join(c['content_type']) if c['content_type'] else 'unknown'}"
+        )
+        if c.get("cast_present"):
+            lines.append(f"Cast: {', '.join(c['cast_present'])}")
+        if c.get("speakers"):
+            lines.append(f"Speakers: {', '.join(c['speakers'])}")
+        if c.get("has_speech") and c.get("audio_summary"):
+            lines.append(f"Speech: {c['audio_summary']}")
+        for km in c.get("key_moments", []):
+            lines.append(f"  @{km['at']:.1f}s [{km['value']}] {km['what']} (use: {km['use']})")
+        segs = c.get("usable_segments", [])
+        if segs:
+            lines.append("Usable segments:")
+            for s in segs:
+                lines.append(
+                    f"  [{s['index']}] {s['in_sec']:.1f}s–{s['out_sec']:.1f}s "
+                    f"({s['duration_sec']:.1f}s): {s['description']}"
+                )
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _format_cast_list(cast: list[dict]) -> str:
+    """Format deduplicated cast into compact text."""
+    lines = []
+    for c in cast:
+        appears = len(c.get("appears_in", []))
+        speaks = len(c.get("speaking_in", []))
+        parts = [f"**{c['label']}** ({c['role']})"]
+        if c.get("description"):
+            parts.append(c["description"])
+        parts.append(f"Appears in {appears} clips")
+        if speaks:
+            parts.append(f"speaks in {speaks}")
+        lines.append("- " + " — ".join(parts))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Multi-call Phase 2 prompt builders
+# ---------------------------------------------------------------------------
+
+
+_PHASE2A_REASONING_PROMPT = """\
+You are a professional video editor who has watched all the dailies.
+Write an editorial plan for a {style} from {clip_count} clips ({total_duration} of raw footage).
+
+The available clip IDs are: {clip_ids}
+
+Your plan MUST address these points IN ORDER:
+
+1. CONSTRAINT CHECK: For each filmmaker MUST-INCLUDE and MUST-EXCLUDE item, \
+state which clip and usable segment satisfies it. If a constraint cannot be satisfied, \
+explain why.
+
+2. STORY CONCEPT: What narrative does this footage support? What is the editorial angle?
+
+3. OPENING HOOK: What are the strongest first 10 seconds? Which clip and segment?
+
+4. SEGMENT SEQUENCE: List each segment in output order:
+   - Clip ID (use FULL clip IDs from the list above — never abbreviate)
+   - Which usable segment (by [index] number from the clip data below)
+   - Purpose (hook, establishing, context, action, reaction, b_roll, climax, outro)
+   - Audio strategy (preserve_dialogue, music_bed, ambient_only)
+
+5. DISCARDED CLIPS: Which clips are you cutting and why?
+
+6. PACING: Where is the edit fast vs slow? Where does it breathe?
+
+7. MUSIC DIRECTION: What audio approach ties this together?
+
+Think freely. Write in natural language. Be specific about clip and segment references.
+"""
+
+
+def build_phase2a_reasoning_prompt(
+    clip_reviews: list[dict],
+    style: str,
+    total_duration_sec: float,
+    cast: list[dict],
+    condensed_clips: list[dict],
+    transcripts: dict[str, str] | None = None,
+    filming_timeline: str | None = None,
+    user_context_text: str | None = None,
+    style_supplement: str | None = None,
+) -> str:
+    """Build the freeform reasoning prompt for Call 2A (no structured output)."""
+    clip_ids = [c["clip_id"] for c in condensed_clips]
+    prompt = _PHASE2A_REASONING_PROMPT.format(
+        style=style,
+        clip_count=len(condensed_clips),
+        total_duration=format_duration(total_duration_sec),
+        clip_ids=", ".join(clip_ids),
+    )
+
+    if user_context_text:
+        prompt += "\n\n" + user_context_text
+
+    if style_supplement:
+        prompt += "\n\n" + style_supplement
+
+    if filming_timeline:
+        prompt += f"\n\nFilming Timeline (chronological shooting order):\n{filming_timeline}\n"
+
+    # Cast list
+    prompt += "\n\nCast (deduplicated across all clips):\n" + _format_cast_list(cast)
+
+    # Condensed clip data
+    prompt += "\n\n---\nClip Data:\n\n" + _format_condensed_clips(condensed_clips) + "\n---"
+
+    # Inline transcripts
+    if transcripts:
+        prompt += "\n\nTranscripts (trimmed to usable segments):"
+        for cid, text in transcripts.items():
+            if text.strip():
+                prompt += f"\n\n### {cid}\n{text}"
+
+    prompt += (
+        "\n\nNow write your editorial plan. Think freely — address every point above, "
+        "starting with the CONSTRAINT CHECK."
+    )
+    return prompt
+
+
+_PHASE2A_STRUCTURING_PROMPT = """\
+Convert the editorial plan below into a StoryPlan JSON. \
+Your job is faithful translation — do not add, remove, or change editorial decisions from the plan.
+
+If the plan references a clip ambiguously, resolve it to the closest matching full clip ID \
+from this list: {clip_ids}
+
+## Editorial Plan
+
+{editorial_plan}
+"""
+
+
+def build_phase2a_structuring_prompt(
+    editorial_plan_text: str,
+    clip_ids: list[str],
+) -> str:
+    """Build the structuring prompt for Call 2A.5 (converts freeform plan → StoryPlan JSON)."""
+    return _PHASE2A_STRUCTURING_PROMPT.format(
+        editorial_plan=editorial_plan_text,
+        clip_ids=", ".join(clip_ids),
+    )
+
+
+_PHASE2B_ASSEMBLY_PROMPT = """\
+You are assembling a video edit from a pre-approved editorial plan.
+
+For each planned segment below, select precise in_sec and out_sec timestamps \
+WITHIN the usable segment range shown. The creative decisions are already made — \
+your job is mechanical refinement: precise timestamp selection and detailed descriptions.
+
+HARD CONSTRAINTS:
+- in_sec and out_sec must fall within the "Usable range" shown for each segment
+- in_sec < out_sec
+- Timestamps are in seconds, relative to clip start (not global timeline)
+- Use the transcript to find natural cut points (sentence boundaries, pauses, scene transitions)
+- clip_id must be EXACT — copy it character-for-character from each segment header
+"""
+
+
+def build_phase2b_assembly_prompt(
+    story_plan,
+    clip_reviews: list[dict],
+    transcripts: dict[str, str] | None = None,
+    style: str = "vlog",
+) -> str:
+    """Build the precise assembly prompt for Call 2B (StoryPlan → EditorialStoryboard)."""
+    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
+    prompt = _PHASE2B_ASSEMBLY_PROMPT
+
+    # Story context from the plan
+    prompt += f"\n\nVideo title: {story_plan.title}"
+    prompt += f"\nStyle: {story_plan.style}"
+    prompt += f"\nStory concept: {story_plan.story_concept}"
+    if story_plan.pacing_notes:
+        prompt += f"\nPacing: {story_plan.pacing_notes}"
+    if story_plan.music_direction:
+        prompt += f"\nMusic: {story_plan.music_direction}"
+
+    # Cast reference
+    if story_plan.cast:
+        prompt += "\n\nCast:"
+        for c in story_plan.cast:
+            prompt += f"\n- {c.name} ({c.role}): {c.description}"
+
+    # Story arc
+    if story_plan.story_arc:
+        prompt += "\n\nStory arc:"
+        for arc in story_plan.story_arc:
+            prompt += f"\n- {arc.title}: {arc.description}"
+
+    # Per-segment assembly instructions with bounded windows
+    prompt += "\n\n---\nPlanned Segments:\n"
+    for i, ps in enumerate(story_plan.planned_segments):
+        review = reviews_by_id.get(ps.clip_id, {})
+        usable = review.get("usable_segments", [])
+        seg_data = (
+            usable[ps.usable_segment_index] if ps.usable_segment_index < len(usable) else None
+        )
+
+        prompt += f"\n## Segment {i}"
+        prompt += f"\nClip: {ps.clip_id}"
+        if seg_data:
+            in_s = seg_data.get("in_sec", 0)
+            out_s = seg_data.get("out_sec", 0)
+            dur = seg_data.get("duration_sec", out_s - in_s)
+            prompt += f"\nUsable range: {in_s:.1f}s – {out_s:.1f}s ({dur:.1f}s available)"
+            prompt += f"\nSegment content: {seg_data.get('description', '')}"
+        else:
+            prompt += "\nUsable range: (could not resolve segment index)"
+        prompt += f"\nPurpose: {ps.purpose}"
+        prompt += f"\nPlan: {ps.narrative_role}"
+        prompt += f"\nAudio: {ps.audio_strategy}"
+
+        # Inline transcript for this segment's time range
+        if transcripts and ps.clip_id in transcripts and seg_data:
+            trimmed = trim_transcript_to_usable(
+                transcripts[ps.clip_id],
+                [seg_data],
+            )
+            if trimmed.strip():
+                prompt += f"\nTranscript:\n{trimmed}"
+
+        prompt += "\n→ Select in_sec and out_sec. Write the segment description and audio_note.\n"
+
+    prompt += "---"
+
+    # Discarded clips for context
+    if story_plan.discarded:
+        prompt += "\n\nDiscarded clips:"
+        for d in story_plan.discarded:
+            prompt += f"\n- {d.clip_id}: {d.reason}"
+
+    prompt += (
+        f"\n\nNow produce the EditorialStoryboard with precise timestamps for a compelling {style}."
+        "\nUse editorial_reasoning to briefly confirm the plan is being followed, "
+        "then fill in every segment with exact in_sec/out_sec within the bounded ranges."
+    )
+    return prompt
+
+
 def _format_clip_reviews_text(
     clip_reviews: list[dict],
     transcripts: dict[str, str] | None = None,

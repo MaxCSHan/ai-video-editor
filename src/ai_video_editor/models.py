@@ -319,6 +319,58 @@ class EditorialStoryboard(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Story Plan models (intermediate output for multi-call Phase 2 pipeline)
+# ---------------------------------------------------------------------------
+
+
+class PlannedSegment(BaseModel):
+    """A segment in the editorial plan — references clips by usable_segment index, no timestamps."""
+
+    clip_id: str = Field(
+        description="Full clip ID from the available clips list — never abbreviated"
+    )
+    usable_segment_index: int = Field(
+        description="Index into the clip's usable_segments array from the Phase 1 review"
+    )
+    purpose: str = Field(
+        description="opening_hook, establishing, context, action, reaction, "
+        "b_roll, cutaway, climax, payoff, reflection, or outro"
+    )
+    arc_phase: str = Field(description="opening_context, experience, or closing_reflection")
+    narrative_role: str = Field(
+        description="What this segment contributes to the story — 1 sentence"
+    )
+    audio_strategy: str = Field(description="preserve_dialogue, music_bed, or ambient_only")
+    is_speech_segment: bool = Field(description="True if primary content is dialogue")
+
+
+class StoryPlan(BaseModel):
+    """Structured editorial plan produced by Call 2A.5 — no timestamps, only segment references."""
+
+    title: str = Field(description="Creative title for the final video")
+    style: str = Field(description="Video style: vlog, recap, highlight, etc.")
+    story_concept: str = Field(description="2-3 sentence narrative summary")
+    cast: list[CastMember] = Field(
+        default=[], description="People identified across clips with consistent identities"
+    )
+    story_arc: list[StoryArcSection] = Field(
+        default=[], description="Narrative structure dividing the edit into dramatic sections"
+    )
+    planned_segments: list[PlannedSegment] = Field(
+        description="Ordered list of segments in the planned edit"
+    )
+    discarded: list[DiscardedClip] = Field(
+        default=[], description="Clips intentionally excluded and why"
+    )
+    pacing_notes: str = Field(default="", description="Rhythm, energy shifts, and timing strategy")
+    music_direction: str = Field(default="", description="Overall music and audio strategy")
+    constraint_satisfaction: str = Field(
+        default="",
+        description="For each filmmaker constraint, how it was satisfied or why it could not be",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Visual Monologue models (text-driven narrative overlays for silent vlog style)
 # ---------------------------------------------------------------------------
 

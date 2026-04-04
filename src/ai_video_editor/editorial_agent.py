@@ -891,6 +891,372 @@ def validate_storyboard(storyboard, clip_reviews: list[dict]) -> tuple[list[str]
 # individual uploads. See run_phase2() below.
 
 
+def _run_phase2_split(
+    clip_reviews: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    project_name: str,
+    provider: str,
+    gemini_cfg: GeminiConfig | None = None,
+    claude_cfg: ClaudeConfig | None = None,
+    style: str = "vlog",
+    user_context: dict | None = None,
+    tracer=None,
+    visual: bool = False,
+    style_supplement: str | None = None,
+) -> Path:
+    """Multi-call Phase 2: Reasoning → Structuring → Assembly → Validation.
+
+    Call 2A:   Freeform editorial reasoning (no schema, high temp)
+    Call 2A.5: Faithful structuring into StoryPlan JSON (cheap model)
+    Call 2B:   Precise timestamp assembly within bounded windows (low temp)
+    """
+    from .models import EditorialStoryboard, StoryPlan
+    from .render import render_markdown, render_html_preview
+    from .briefing import format_context_for_prompt
+    from .editorial_prompts import (
+        extract_cast_from_reviews,
+        condense_clip_for_planning,
+        trim_transcript_to_usable,
+        build_phase2a_reasoning_prompt,
+        build_phase2a_structuring_prompt,
+        build_phase2b_assembly_prompt,
+    )
+    from .tracing import traced_gemini_generate, LLMSpinner
+
+    total_duration = sum(
+        sum(seg.get("duration_sec", 0) for seg in r.get("usable_segments", []))
+        for r in clip_reviews
+    )
+    if total_duration == 0:
+        total_duration = sum(r.get("duration_sec", 0) for r in clip_reviews if "duration_sec" in r)
+
+    # Sort clip reviews chronologically
+    filming_timeline = None
+    manifest_file = editorial_paths.master_manifest
+    if manifest_file.exists():
+        manifest_data = json.loads(manifest_file.read_text())
+        creation_times = {
+            c["clip_id"]: c.get("creation_time") for c in manifest_data.get("clips", [])
+        }
+        clip_reviews.sort(
+            key=lambda r: (creation_times.get(r.get("clip_id"), "") or "", r.get("clip_id", ""))
+        )
+        timeline_lines = []
+        for i, r in enumerate(clip_reviews, 1):
+            cid = r.get("clip_id", "unknown")
+            ct = creation_times.get(cid)
+            timeline_lines.append(f"  {i}. {cid} — filmed {ct}" if ct else f"  {i}. {cid}")
+        filming_timeline = "\n".join(timeline_lines)
+
+    # ── Pre-processing (deterministic) ──────────────────────────────────────
+    print("  [2A] Pre-processing: deduplicating cast, condensing clips...")
+    cast = extract_cast_from_reviews(clip_reviews)
+    condensed = [condense_clip_for_planning(r) for r in clip_reviews]
+
+    all_transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
+    trimmed_transcripts = None
+    if all_transcripts:
+        trimmed_transcripts = {}
+        for r in clip_reviews:
+            cid = r.get("clip_id", "")
+            if cid in all_transcripts:
+                trimmed_transcripts[cid] = trim_transcript_to_usable(
+                    all_transcripts[cid],
+                    r.get("usable_segments", []),
+                )
+
+    user_context_text = format_context_for_prompt(user_context) if user_context else None
+
+    # ── Call 2A: Freeform editorial reasoning ───────────────────────────────
+    reasoning_prompt = build_phase2a_reasoning_prompt(
+        clip_reviews=clip_reviews,
+        style=style,
+        total_duration_sec=total_duration,
+        cast=cast,
+        condensed_clips=condensed,
+        transcripts=trimmed_transcripts,
+        filming_timeline=filming_timeline,
+        user_context_text=user_context_text,
+        style_supplement=style_supplement,
+    )
+
+    clip_ids = [c["clip_id"] for c in condensed]
+
+    if provider == "gemini":
+        from google.genai import types
+
+        client = _get_gemini_client()
+
+        # Visual mode: attach proxy videos to Call 2A
+        video_parts = []
+        if visual:
+            from .preprocess import concat_proxies
+
+            bundles = concat_proxies(editorial_paths, clip_ids)
+            if bundles:
+                file_cache = load_file_api_cache(editorial_paths)
+                for i, bundle in enumerate(bundles):
+                    cache_key = f"_concat_bundle_{i}"
+                    cached_uri = get_cached_uri(file_cache, cache_key)
+                    if cached_uri:
+                        video_parts.append(
+                            types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4")
+                        )
+                        continue
+                    print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
+                    video_file = client.files.upload(file=str(bundle["path"]))
+                    video_file = _wait_for_gemini_file(video_file, client)
+                    if video_file.state.name == "FAILED":
+                        print(f"  WARNING: bundle {i + 1} upload failed")
+                        continue
+                    cache_file_uri(editorial_paths, cache_key, video_file.uri)
+                    video_parts.append(
+                        types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4")
+                    )
+
+        mode_label = "visual" if video_parts else "text-only"
+        print(f"  [2A] Generating editorial plan ({provider}, {mode_label}, freeform)...")
+
+        if video_parts:
+            contents_2a = [
+                types.Content(parts=[*video_parts, types.Part.from_text(text=reasoning_prompt)])
+            ]
+        else:
+            contents_2a = reasoning_prompt
+
+        with LLMSpinner("Editorial reasoning (Call 2A)", provider=provider):
+            response_2a = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2,
+                contents=contents_2a,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2_temperature,
+                    # No response_schema — freeform text output
+                ),
+                phase="phase2a_reasoning",
+                tracer=tracer,
+                prompt_chars=len(reasoning_prompt),
+                num_video_files=len(video_parts),
+            )
+        editorial_plan_text = response_2a.text
+        print(f"  [2A] Editorial plan: {len(editorial_plan_text)} chars")
+
+        # ── Call 2A.5: Structuring (cheap model) ───────────────────────────
+        print(f"  [2A.5] Structuring plan into StoryPlan JSON ({gemini_cfg.structuring_model})...")
+        structuring_prompt = build_phase2a_structuring_prompt(
+            editorial_plan_text=editorial_plan_text,
+            clip_ids=clip_ids,
+        )
+
+        with LLMSpinner("Plan structuring (Call 2A.5)", provider=provider):
+            response_2a5 = traced_gemini_generate(
+                client,
+                model=gemini_cfg.structuring_model,
+                contents=structuring_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=StoryPlan,
+                ),
+                phase="phase2a_structuring",
+                tracer=tracer,
+                prompt_chars=len(structuring_prompt),
+            )
+        story_plan = StoryPlan.model_validate_json(response_2a5.text)
+
+        # ── Checkpoint: validate plan ──────────────────────────────────────
+        plan_issues = []
+        known_ids = {r["clip_id"] for r in clip_reviews}
+        for ps in story_plan.planned_segments:
+            if ps.clip_id not in known_ids:
+                plan_issues.append(f"Unknown clip_id in plan: {ps.clip_id}")
+            else:
+                review = next((r for r in clip_reviews if r["clip_id"] == ps.clip_id), None)
+                if review:
+                    n_segs = len(review.get("usable_segments", []))
+                    if ps.usable_segment_index >= n_segs:
+                        plan_issues.append(
+                            f"Segment index {ps.usable_segment_index} out of range "
+                            f"for {ps.clip_id} (has {n_segs} usable segments)"
+                        )
+        if plan_issues:
+            for issue in plan_issues:
+                print(f"  PLAN WARN: {issue}")
+
+        # ── Call 2B: Precise assembly ──────────────────────────────────────
+        selected_ids = {ps.clip_id for ps in story_plan.planned_segments}
+        selected_reviews = [r for r in clip_reviews if r["clip_id"] in selected_ids]
+        selected_transcripts = (
+            {k: v for k, v in all_transcripts.items() if k in selected_ids}
+            if all_transcripts
+            else None
+        )
+
+        assembly_prompt = build_phase2b_assembly_prompt(
+            story_plan=story_plan,
+            clip_reviews=selected_reviews,
+            transcripts=selected_transcripts,
+            style=style,
+        )
+
+        print(
+            f"  [2B] Assembling storyboard ({len(selected_reviews)} clips, "
+            f"{len(story_plan.planned_segments)} segments)..."
+        )
+        with LLMSpinner("Precise assembly (Call 2B)", provider=provider):
+            response_2b = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2,
+                contents=assembly_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2b_temperature,
+                    response_mime_type="application/json",
+                    response_schema=EditorialStoryboard,
+                ),
+                phase="phase2b_assembly",
+                tracer=tracer,
+                prompt_chars=len(assembly_prompt),
+            )
+        storyboard = EditorialStoryboard.model_validate_json(response_2b.text)
+
+    else:
+        raise ValueError(
+            f"Split pipeline not yet implemented for provider: {provider}. "
+            "Use provider='gemini' or set use_split_pipeline=False."
+        )
+
+    # ── Validate & fix ─────────────────────────────────────────────────────
+    known_clip_ids = {r["clip_id"] for r in clip_reviews}
+    _resolve_clip_id_refs(storyboard, known_clip_ids)
+
+    # Enhanced validation: clamp timestamps to usable segment bounds
+    reviews_by_id = {r["clip_id"]: r for r in clip_reviews}
+    fix_log = []
+    for seg in storyboard.segments:
+        review = reviews_by_id.get(seg.clip_id)
+        if not review:
+            continue
+        usable = review.get("usable_segments", [])
+        # Find matching usable segment by best overlap
+        best = None
+        best_overlap = -1
+        for us in usable:
+            us_in = us.get("in_sec", 0)
+            us_out = us.get("out_sec", 0)
+            overlap = min(seg.out_sec, us_out) - max(seg.in_sec, us_in)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = us
+        if best:
+            if seg.in_sec < best.get("in_sec", 0):
+                fix_log.append(
+                    f"Seg {seg.index}: clamped in_sec {seg.in_sec:.1f} → {best['in_sec']:.1f}"
+                )
+                seg.in_sec = best["in_sec"]
+            if seg.out_sec > best.get("out_sec", 0):
+                fix_log.append(
+                    f"Seg {seg.index}: clamped out_sec {seg.out_sec:.1f} → {best['out_sec']:.1f}"
+                )
+                seg.out_sec = best["out_sec"]
+
+    val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
+    if fix_log:
+        print(f"  [Fix] Auto-clamped {len(fix_log)} timestamps:")
+        for f in fix_log[:5]:
+            print(f"    {f}")
+    if val_warnings:
+        for w in val_warnings[:5]:
+            print(f"  WARN: {w}")
+    if tracer and tracer.traces:
+        tracer.traces[-1].validation_warnings = val_warnings + fix_log
+
+    # ── Version and save outputs ───────────────────────────────────────────
+    editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
+
+    review_inputs = {}
+    for r in clip_reviews:
+        cid = r.get("clip_id", "")
+        review_inputs[f"review:{cid}"] = cid
+    from .versioning import resolve_user_context_path as _rucp2
+
+    _uc2 = _rucp2(editorial_paths.root)
+    if _uc2 and "_v" in _uc2.name:
+        import re as _re3
+
+        _um2 = _re3.search(r"_v(\d+)\.", _uc2.name)
+        if _um2:
+            review_inputs["user_context"] = f"user_context:user:v{_um2.group(1)}"
+    cfg_snap = {"model": gemini_cfg.phase2, "temperature": gemini_cfg.phase2_temperature}
+
+    from .versioning import current_version
+
+    rv_version = current_version(editorial_paths.root, f"review_{provider}")
+    if rv_version == 0:
+        rv_version = current_version(editorial_paths.root, "review")
+    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
+    art_meta = begin_version(
+        editorial_paths.root,
+        phase="storyboard",
+        provider=provider,
+        inputs=review_inputs,
+        config_snapshot=cfg_snap,
+        target_dir=editorial_paths.storyboard,
+        parent_id=review_parent_id,
+    )
+    v = art_meta.version
+    base = f"editorial_{provider}"
+
+    # Save Call 2A freeform plan (human-readable debug artifact)
+    plan_txt_path = editorial_paths.storyboard / f"editorial_plan_{provider}_v{v}.txt"
+    plan_txt_path.write_text(editorial_plan_text)
+
+    # Save StoryPlan intermediate
+    plan_json_path = editorial_paths.storyboard / f"storyplan_{provider}_v{v}.json"
+    plan_json_path.write_text(story_plan.model_dump_json(indent=2))
+
+    # Save fix log if any
+    if fix_log:
+        fix_path = editorial_paths.storyboard / f"fixlog_{provider}_v{v}.txt"
+        fix_path.write_text("\n".join(fix_log))
+
+    # Primary: structured JSON
+    json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
+    json_path.write_text(storyboard.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    # Rendered: markdown
+    md_path = versioned_path(editorial_paths.storyboard / f"{base}.md", v)
+    md_path.write_text(render_markdown(storyboard))
+    update_latest_symlink(md_path)
+
+    # Rendered: HTML preview
+    export_dir = versioned_dir(editorial_paths.exports, v)
+    html = render_html_preview(
+        storyboard,
+        clips_dir=editorial_paths.clips_dir,
+        output_dir=export_dir,
+    )
+    preview_path = export_dir / "preview.html"
+    preview_path.write_text(html)
+    update_latest_symlink(export_dir)
+
+    commit_version(
+        editorial_paths.root,
+        art_meta,
+        output_paths=[json_path, md_path, preview_path, plan_txt_path, plan_json_path],
+        target_dir=editorial_paths.storyboard,
+    )
+
+    print(f"  v{v} outputs (split pipeline):")
+    print(f"    Plan:      {plan_txt_path}")
+    print(f"    StoryPlan: {plan_json_path}")
+    print(f"    JSON:      {json_path}")
+    print(f"    MD:        {md_path}")
+    print(f"    Preview:   {preview_path}")
+    return json_path
+
+
 def run_phase2(
     clip_reviews: list[dict],
     editorial_paths: EditorialProjectPaths,
@@ -904,7 +1270,27 @@ def run_phase2(
     visual: bool = False,
     style_supplement: str | None = None,
 ) -> Path:
-    """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview."""
+    """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview.
+
+    If gemini_cfg.use_split_pipeline is True, delegates to the multi-call pipeline
+    (Call 2A reasoning → Call 2A.5 structuring → Call 2B assembly).
+    """
+    # Check for split pipeline mode
+    if gemini_cfg and gemini_cfg.use_split_pipeline and provider == "gemini":
+        return _run_phase2_split(
+            clip_reviews=clip_reviews,
+            editorial_paths=editorial_paths,
+            project_name=project_name,
+            provider=provider,
+            gemini_cfg=gemini_cfg,
+            claude_cfg=claude_cfg,
+            style=style,
+            user_context=user_context,
+            tracer=tracer,
+            visual=visual,
+            style_supplement=style_supplement,
+        )
+
     from .models import EditorialStoryboard
     from .render import render_markdown, render_html_preview
     from .briefing import format_context_for_prompt

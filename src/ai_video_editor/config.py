@@ -79,8 +79,11 @@ class ClaudeConfig:
 class GeminiConfig:
     model: str = "gemini-3-flash-preview"
     phase2_model: str | None = "gemini-3-flash-preview"
+    structuring_model: str = "gemini-2.5-flash-lite"  # cheap model for Call 2A.5
     temperature: float = 0.2
     phase2_temperature: float = 0.6
+    phase2b_temperature: float = 0.3  # assembly is mechanical, not creative
+    use_split_pipeline: bool = False  # migration toggle for multi-call Phase 2
 
     @property
     def phase2(self) -> str:
