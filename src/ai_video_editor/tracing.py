@@ -345,6 +345,10 @@ def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> N
     import os
     import signal
     import threading
+    import warnings
+
+    # Suppress SQLAlchemy SAWarning from Phoenix's internal DB schema reflection
+    warnings.filterwarnings("ignore", message=".*Skipped unsupported reflection.*")
 
     import phoenix as px
 
