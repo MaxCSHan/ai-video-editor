@@ -28,6 +28,539 @@ BANNER = """
 \033[2m  Turn raw footage into polished vlogs with AI\033[0m
 """
 
+# ANSI codes
+_GREEN = "\033[32m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
+# Pipeline node definitions
+PIPELINE_NODES = ["scan", "ctx", "transcript", "P1", "P2", "P3"]
+NODE_LABELS = {
+    "scan": "Scan",
+    "ctx": "Ctx",
+    "transcript": "Transcript",
+    "P1": "P1",
+    "P2": "P2",
+    "P3": "P3",
+}
+NODE_FULL_NAMES = {
+    "scan": "Quick Scan",
+    "ctx": "Briefing Context",
+    "transcript": "Transcription",
+    "P1": "Phase 1 — Clip Reviews",
+    "P2": "Phase 2 — Storyboard",
+    "P3": "Phase 3 — Monologue",
+}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline state gathering
+# ---------------------------------------------------------------------------
+
+
+def _gather_pipeline_state(ep, meta) -> dict:
+    """Collect version state for all pipeline nodes."""
+    from .versioning import (
+        list_artifacts,
+        resolve_quick_scan_path,
+        resolve_user_context_path,
+        resolve_transcript_path,
+    )
+    import re
+
+    provider = meta.get("provider", "gemini")
+    state = {}
+
+    # --- Scan ---
+    scan_path = resolve_quick_scan_path(ep.root)
+    scan_versions = []
+    for f in sorted(ep.root.glob("quick_scan_v*.json")):
+        if not f.name.endswith(".meta.json"):
+            m = re.search(r"_v(\d+)\.", f.name)
+            if m:
+                scan_versions.append(int(m.group(1)))
+    state["scan"] = {
+        "exists": scan_path is not None,
+        "versions": scan_versions,
+        "provider": "gemini",
+        "date": _file_date(scan_path) if scan_path else "",
+    }
+
+    # --- User Context ---
+    ctx_path = resolve_user_context_path(ep.root)
+    ctx_versions = []
+    for f in sorted(ep.root.glob("user_context_v*.json")):
+        if not f.name.endswith(".meta.json"):
+            m = re.search(r"_v(\d+)\.", f.name)
+            if m:
+                ctx_versions.append(int(m.group(1)))
+    # Fallback: bare file counts as v1
+    if not ctx_versions and ctx_path and "user_context.json" == ctx_path.name:
+        ctx_versions = [1]
+    state["ctx"] = {
+        "exists": ctx_path is not None,
+        "versions": ctx_versions,
+        "date": _file_date(ctx_path) if ctx_path else "",
+    }
+
+    # --- Transcript (per-clip aggregate) ---
+    clips = ep.discover_clips()
+    t_count = 0
+    t_provider = ""
+    for cid in clips:
+        cp = ep.clip_paths(cid)
+        tp = resolve_transcript_path(cp.root)
+        if tp:
+            t_count += 1
+            if not t_provider:
+                try:
+                    data = json.loads(tp.read_text())
+                    t_provider = data.get("provider", "mlx") or "mlx"
+                except Exception:
+                    t_provider = "?"
+    state["transcript"] = {
+        "exists": t_count > 0,
+        "provider": t_provider,
+        "clip_count": t_count,
+        "total_clips": len(clips),
+    }
+
+    # --- P1 Reviews (per-clip aggregate) ---
+    r_count = 0
+    r_version = 0
+    for cid in clips:
+        cp = ep.clip_paths(cid)
+        if cp.has_review(provider):
+            r_count += 1
+            # Get max version from latest review file
+            for f in cp.review.glob(f"review_{provider}_v*.json"):
+                m = re.search(r"_v(\d+)\.", f.name)
+                if m:
+                    r_version = max(r_version, int(m.group(1)))
+    state["P1"] = {
+        "exists": r_count > 0,
+        "provider": provider,
+        "clip_count": r_count,
+        "total_clips": len(clips),
+        "version": r_version if r_version > 0 else 1,
+    }
+
+    # --- P2 Storyboard ---
+    sb_artifacts = list_artifacts(ep.root, phase="storyboard")
+    sb_versions = [a.version for a in sb_artifacts if a.status == "complete"]
+    sb_detail = ""
+    if sb_versions:
+        latest_sb = ep.storyboard / f"editorial_{provider}_latest.json"
+        if not latest_sb.exists():
+            # Try any provider
+            for p in ("gemini", "claude"):
+                latest_sb = ep.storyboard / f"editorial_{p}_latest.json"
+                if latest_sb.exists():
+                    break
+        if latest_sb.exists():
+            try:
+                from .models import EditorialStoryboard
+                from .storyboard_format import format_duration
+
+                sb = EditorialStoryboard.model_validate_json(latest_sb.read_text())
+                sb_detail = f"{len(sb.segments)} seg, {format_duration(sb.total_segments_duration)}"
+            except Exception:
+                pass
+    state["P2"] = {
+        "exists": len(sb_versions) > 0,
+        "versions": sb_versions,
+        "provider": provider,
+        "detail": sb_detail,
+        "date": _file_date(sb_artifacts[-1]) if sb_artifacts else "",
+    }
+
+    # --- P3 Monologue ---
+    mono_artifacts = list_artifacts(ep.root, phase="monologue")
+    mono_versions = [a.version for a in mono_artifacts if a.status == "complete"]
+    mono_detail = ""
+    if mono_versions:
+        latest_mono = ep.storyboard / f"monologue_{provider}_latest.json"
+        if latest_mono.exists():
+            try:
+                from .models import MonologuePlan
+
+                mp = MonologuePlan.model_validate_json(latest_mono.read_text())
+                mono_detail = f"{len(mp.overlays)} overlays"
+            except Exception:
+                pass
+    state["P3"] = {
+        "exists": len(mono_versions) > 0,
+        "versions": mono_versions,
+        "detail": mono_detail,
+    }
+
+    # --- Cuts ---
+    cuts = []
+    cuts_dir = ep.exports / "cuts"
+    if cuts_dir.exists():
+        for d in sorted(cuts_dir.iterdir()):
+            if d.is_dir() and d.name.startswith("cut_"):
+                comp_file = d / "composition.json"
+                ref = ""
+                if comp_file.exists():
+                    try:
+                        comp = json.loads(comp_file.read_text())
+                        sb_ref = comp.get("storyboard", {}).get("artifact_id", "")
+                        mono_ref = comp.get("monologue", {})
+                        mono_str = ""
+                        if mono_ref:
+                            mono_str = f"+{mono_ref.get('artifact_id', '')}"
+                        ref = f"{sb_ref}{mono_str}"
+                    except Exception:
+                        pass
+                cuts.append({"cut_id": d.name, "ref": ref})
+    state["cuts"] = cuts
+
+    return state
+
+
+def _file_date(path_or_artifact) -> str:
+    """Extract a short date string from a file mtime or ArtifactMeta."""
+    try:
+        if hasattr(path_or_artifact, "created_at"):
+            from datetime import datetime
+
+            dt = datetime.fromisoformat(path_or_artifact.created_at)
+            return dt.strftime("%b %d")
+        if hasattr(path_or_artifact, "stat"):
+            from datetime import datetime, timezone
+
+            dt = datetime.fromtimestamp(path_or_artifact.stat().st_mtime, tz=timezone.utc)
+            return dt.strftime("%b %d")
+    except Exception:
+        pass
+    return ""
+
+
+def _compact_version_chain(versions: list[int]) -> str:
+    """Build 'v1 > v2 > v3' from a list of version numbers."""
+    if not versions:
+        return "--"
+    return " > ".join(f"v{v}" for v in sorted(versions))
+
+
+def _get_node_version_text(state: dict, node: str) -> str:
+    """Get the version display text for a pipeline node tab."""
+    s = state.get(node, {})
+    if not s.get("exists"):
+        return "--"
+
+    if node in ("scan",):
+        versions = s.get("versions", [])
+        if versions:
+            return f"v{max(versions)}"
+        return "v1"
+
+    if node == "ctx":
+        versions = s.get("versions", [])
+        if versions:
+            return f"v{max(versions)}"
+        return "v1"
+
+    if node == "transcript":
+        prov = s.get("provider", "?")
+        return f"{prov}:v1"
+
+    if node == "P1":
+        prov = s.get("provider", "?")
+        return f"{prov}:v{s.get('version', 1)}"
+
+    if node in ("P2", "P3"):
+        versions = s.get("versions", [])
+        if versions:
+            return f"v{max(versions)}"
+        return "v1"
+
+    return "--"
+
+
+# ---------------------------------------------------------------------------
+# Tab bar rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_tab_bar(state: dict, active_node: str):
+    """Render the pipeline tab bar with box-drawing characters."""
+    tabs = []
+    for node in PIPELINE_NODES:
+        label = NODE_LABELS[node]
+        version_text = _get_node_version_text(state, node)
+        is_active = node == active_node
+        exists = state.get(node, {}).get("exists", False)
+
+        width = max(len(label), len(version_text)) + 2
+
+        if is_active:
+            top = f"╭{'─' * width}╮"
+            mid1 = f"│{_GREEN}{label:^{width}}{_RESET}│"
+            mid2 = f"│{_GREEN}{version_text:^{width}}{_RESET}│"
+            bot = f"╰{'─' * width}╯"
+        elif exists:
+            top = f"┌{'─' * width}┐"
+            mid1 = f"│{label:^{width}}│"
+            mid2 = f"│{version_text:^{width}}│"
+            bot = f"└{'─' * width}┘"
+        else:
+            top = f"┌{'─' * width}┐"
+            mid1 = f"│{_DIM}{label:^{width}}{_RESET}│"
+            mid2 = f"│{_DIM}{version_text:^{width}}{_RESET}│"
+            bot = f"└{'─' * width}┘"
+
+        tabs.append((top, mid1, mid2, bot))
+
+    # Print rows
+    for row in range(4):
+        print(" " + " ".join(t[row] for t in tabs))
+
+    # Cuts line
+    cuts = state.get("cuts", [])
+    if cuts:
+        cut_parts = []
+        for c in cuts:
+            ref = c.get("ref", "")
+            ref_str = f" ({ref})" if ref else ""
+            cut_parts.append(f"{c['cut_id']}{ref_str}")
+        print(f" {_DIM}Cuts: {', '.join(cut_parts)}{_RESET}")
+
+
+def _render_node_detail(state: dict, active_node: str):
+    """Render detail line for the active node."""
+    s = state.get(active_node, {})
+    full_name = NODE_FULL_NAMES.get(active_node, active_node)
+
+    if not s.get("exists"):
+        print(f"\n {_DIM}{full_name} — not started{_RESET}")
+        return
+
+    if active_node == "scan":
+        date = s.get("date", "")
+        versions = s.get("versions", [1])
+        print(f"\n {_BOLD}{full_name}{_RESET} ({s.get('provider', 'gemini')}, {date})")
+        if len(versions) > 1:
+            print(f"   {_compact_version_chain(versions)}")
+
+    elif active_node == "ctx":
+        date = s.get("date", "")
+        versions = s.get("versions", [1])
+        chain = _compact_version_chain(versions)
+        print(f"\n {_BOLD}{full_name}{_RESET} ({chain}, {date})")
+
+    elif active_node == "transcript":
+        prov = s.get("provider", "?")
+        count = s.get("clip_count", 0)
+        total = s.get("total_clips", 0)
+        print(f"\n {_BOLD}{full_name}{_RESET} ({prov}, {count}/{total} clips)")
+
+    elif active_node == "P1":
+        prov = s.get("provider", "?")
+        count = s.get("clip_count", 0)
+        total = s.get("total_clips", 0)
+        v = s.get("version", 1)
+        print(f"\n {_BOLD}{full_name}{_RESET} ({prov}:v{v}, {count}/{total} clips)")
+
+    elif active_node == "P2":
+        versions = s.get("versions", [])
+        chain = _compact_version_chain(versions)
+        detail = s.get("detail", "")
+        detail_str = f" — {detail}" if detail else ""
+        print(f"\n {_BOLD}{full_name}{_RESET} ({chain}){detail_str}")
+
+    elif active_node == "P3":
+        versions = s.get("versions", [])
+        chain = _compact_version_chain(versions)
+        detail = s.get("detail", "")
+        detail_str = f" — {detail}" if detail else ""
+        print(f"\n {_BOLD}{full_name}{_RESET} ({chain}){detail_str}")
+
+
+# ---------------------------------------------------------------------------
+# Input confirmation for phase reruns
+# ---------------------------------------------------------------------------
+
+
+def _confirm_phase_inputs(ep, meta, phase: str) -> dict | None:
+    """Show inputs for a phase rerun and get confirmation. Returns lineage dict or None."""
+    from .versioning import (
+        resolve_user_context_path,
+        current_version,
+    )
+    import re
+
+    provider = meta.get("provider", "gemini")
+    phase_labels = {
+        "review": "Phase 1 (Clip Reviews)",
+        "storyboard": "Phase 2 (Editorial Storyboard)",
+        "monologue": "Phase 3 (Visual Monologue)",
+        "transcript": "Transcription",
+    }
+    inputs = []  # (label, value) for display
+    lineage = {}
+
+    # User context — used by P1, P2, P3, transcript
+    ctx_path = resolve_user_context_path(ep.root)
+    ctx_label = "--"
+    if ctx_path:
+        m = re.search(r"_v(\d+)\.", ctx_path.name)
+        if m:
+            ctx_label = f"ctx:v{m.group(1)} ({_file_date(ctx_path)})"
+            lineage["user_context"] = f"user_context:user:v{m.group(1)}"
+        else:
+            ctx_label = f"{ctx_path.name} ({_file_date(ctx_path)})"
+
+    clips = ep.discover_clips()
+
+    if phase == "review":
+        inputs.append(("Clips", f"{len(clips)} clips"))
+        inputs.append(("Briefing", ctx_label))
+        t_count = sum(1 for c in clips if ep.clip_paths(c).has_transcript())
+        inputs.append(("Transcripts", f"{t_count} clips"))
+        inputs.append(("Provider", provider))
+        preset = meta.get("style_preset", "")
+        if preset:
+            inputs.append(("Preset", preset))
+        next_v = current_version(ep.root, f"review_{provider}") + 1
+        inputs.append(("Will create", f"P1:v{next_v} reviews"))
+
+    elif phase == "storyboard":
+        r_count = sum(1 for c in clips if ep.clip_paths(c).has_review(provider))
+        inputs.append(("Reviews", f"{r_count} clips, {provider}"))
+        inputs.append(("Briefing", ctx_label))
+        t_count = sum(1 for c in clips if ep.clip_paths(c).has_transcript())
+        inputs.append(("Transcripts", f"{t_count} clips"))
+        inputs.append(("Style", meta.get("style", "vlog")))
+        preset = meta.get("style_preset", "")
+        if preset:
+            inputs.append(("Preset", preset))
+        next_v = current_version(ep.root, "analyze") + 1
+        inputs.append(("Will create", f"storyboard v{next_v}"))
+
+    elif phase == "monologue":
+        sb_v = current_version(ep.root, "analyze")
+        inputs.append(("Storyboard", f"v{sb_v}"))
+        inputs.append(("Briefing", ctx_label))
+        preset = meta.get("style_preset", "")
+        if preset:
+            inputs.append(("Preset", preset))
+        next_v = current_version(ep.root, "monologue") + 1
+        inputs.append(("Will create", f"monologue v{next_v}"))
+
+    elif phase == "transcript":
+        inputs.append(("Clips", f"{len(clips)} clips"))
+        inputs.append(("Briefing", ctx_label))
+        inputs.append(("Provider", provider))
+
+    print(f"\n  Rerun {phase_labels.get(phase, phase)}\n")
+    if inputs:
+        max_label = max(len(lab) for lab, _ in inputs)
+        for label, val in inputs:
+            print(f"    {label + ':':>{max_label + 1}}  {val}")
+    print()
+
+    if not questionary.confirm("Proceed?", default=True, style=VX_STYLE).ask():
+        return None
+    return lineage
+
+
+def _build_node_actions(active_node, state, ep, meta, offline) -> list:
+    """Build questionary choices for the active node + global actions."""
+    from questionary import Separator
+
+    choices = []
+    node_exists = state.get(active_node, {}).get("exists", False)
+    has_storyboard = state.get("P2", {}).get("exists", False)
+    has_rough_cut = len(state.get("cuts", [])) > 0
+    has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
+    preset_key = meta.get("style_preset")
+    has_phase3 = False
+    if preset_key:
+        try:
+            from .style_presets import get_preset as _gp
+
+            _sp = _gp(preset_key)
+            has_phase3 = _sp.has_phase3 if _sp else False
+        except Exception:
+            pass
+
+    # --- Node-specific actions ---
+    if active_node == "scan":
+        if not offline:
+            choices.append(questionary.Choice("Re-scan footage", value="rescan"))
+        if node_exists:
+            choices.append(questionary.Choice("View scan results", value="view_scan"))
+
+    elif active_node == "ctx":
+        choices.append(questionary.Choice("Edit briefing (AI-guided)", value="edit_brief_ai"))
+        choices.append(questionary.Choice("Edit briefing (manual)", value="edit_brief_manual"))
+
+    elif active_node == "transcript":
+        choices.append(questionary.Choice("Transcribe audio", value="transcribe"))
+
+    elif active_node == "P1":
+        choices.append(questionary.Choice("Rerun Phase 1 (clip reviews)", value="rerun_p1"))
+
+    elif active_node == "P2":
+        choices.append(questionary.Choice("Rerun Phase 2 (storyboard)", value="rerun_p2"))
+        if node_exists:
+            choices.append(questionary.Choice("Compare storyboard versions", value="compare"))
+        if has_preview:
+            choices.append(questionary.Choice("Open preview", value="open_preview"))
+
+    elif active_node == "P3":
+        if has_phase3:
+            choices.append(questionary.Choice("Rerun Phase 3 (monologue)", value="rerun_p3"))
+        elif not has_phase3:
+            choices.append(
+                questionary.Choice("Set style preset (Phase 3 requires preset)", value="set_preset")
+            )
+
+    # --- Navigation ---
+    node_idx = PIPELINE_NODES.index(active_node)
+    if node_idx < len(PIPELINE_NODES) - 1:
+        next_node = PIPELINE_NODES[node_idx + 1]
+        choices.append(
+            questionary.Choice(
+                f"→ Switch to {NODE_FULL_NAMES[next_node]}", value=f"nav_{next_node}"
+            )
+        )
+    if node_idx > 0:
+        prev_node = PIPELINE_NODES[node_idx - 1]
+        choices.append(
+            questionary.Choice(
+                f"← Switch to {NODE_FULL_NAMES[prev_node]}", value=f"nav_{prev_node}"
+            )
+        )
+
+    # --- Assembly (global) ---
+    if has_storyboard:
+        choices.append(Separator("── Assembly ──"))
+        choices.append(questionary.Choice("Compose a cut", value="compose_cut"))
+        if not offline:
+            choices.append(questionary.Choice("Assemble rough cut", value="assemble"))
+        else:
+            choices.append(questionary.Choice("Assemble rough cut (proxy)", value="assemble_proxy"))
+
+    # --- Project (global) ---
+    choices.append(Separator("── Project ──"))
+    if has_rough_cut:
+        choices.append(questionary.Choice("Open rough cut video", value="open_cut"))
+    if has_storyboard:
+        choices.append(questionary.Choice("Regenerate preview", value="regen_preview"))
+    choices.append(questionary.Choice("Run full pipeline (P1+P2+P3)", value="run_full"))
+    if not offline:
+        choices.append(questionary.Choice("Manage clips", value="manage_clips"))
+    choices.append(questionary.Choice("Version history", value="version_history"))
+    choices.append(questionary.Choice("Show status", value="show_status"))
+    choices.append(questionary.Choice("Set style preset", value="set_preset"))
+    choices.append(questionary.Choice("← Back", value="back"))
+
+    return choices
+
 
 def run_interactive():
     """Main interactive loop."""
@@ -215,6 +748,9 @@ def _new_project_flow(cfg):
 
     use_smart_briefing = bool(os.environ.get("GEMINI_API_KEY"))
 
+    # Show initial pipeline state
+    _render_tab_bar(_gather_pipeline_state(ep, meta), "ctx")
+
     # Smart briefing BEFORE transcription (Gemini path) — uploads proxies and
     # populates the shared File API cache, plus gathers user context (speaker names,
     # highlights) that improves transcription and Phase 1 quality.
@@ -228,6 +764,11 @@ def _new_project_flow(cfg):
 
     # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
     _run_transcription(ep, clip_metadata, cfg)
+
+    # Show progress after transcription
+    _pj = ep.root / "project.json"
+    meta = json.loads(_pj.read_text()) if _pj.exists() else meta
+    _render_tab_bar(_gather_pipeline_state(ep, meta), "P1")
 
     # Phase 1
     if not questionary.confirm("Run Phase 1 clip reviews?", default=True, style=VX_STYLE).ask():
@@ -271,6 +812,11 @@ def _new_project_flow(cfg):
         from .briefing import run_briefing
 
         user_context = run_briefing(reviews, style, ep.root)
+
+    # Show progress after Phase 1
+    _pj = ep.root / "project.json"
+    meta = json.loads(_pj.read_text()) if _pj.exists() else meta
+    _render_tab_bar(_gather_pipeline_state(ep, meta), "P2")
 
     # Phase 2
     if not questionary.confirm(
@@ -347,83 +893,35 @@ def _open_project_flow(cfg):
 
 
 def _project_actions(name, cfg):
-    """Show actions for an open project."""
+    """Show actions for an open project with pipeline tab bar navigation."""
     meta_path = cfg.library_dir / name / "project.json"
     meta = json.loads(meta_path.read_text())
     ep = cfg.editorial_project(name)
 
+    # Determine initial active node (rightmost with data)
+    active_node = "P2"  # default
+    state = _gather_pipeline_state(ep, meta)
+    for node in reversed(PIPELINE_NODES):
+        if state.get(node, {}).get("exists"):
+            active_node = node
+            break
+
     while True:
-        # Detect offline source drive
+        # Refresh state each loop
+        meta = json.loads(meta_path.read_text())
+        state = _gather_pipeline_state(ep, meta)
         source_dir = meta.get("source_dir", "")
         offline = bool(source_dir) and not Path(source_dir).is_dir()
 
-        # Check state
-        has_storyboard = (
-            any(ep.storyboard.glob("editorial_*_latest.json")) if ep.storyboard.exists() else False
-        )
-        has_preview = any(ep.exports.glob("*/preview.html")) if ep.exports.exists() else False
-        _cuts_dir = ep.exports / "cuts"
-        has_rough_cut = (
-            any(_cuts_dir.glob("*/rough_cut*.mp4"))
-            if _cuts_dir.exists()
-            else any(ep.exports.glob("*/rough_cut*.mp4"))
-            if ep.exports.exists()
-            else False
-        )
+        # Render tab bar + node detail
+        offline_tag = f"  {_DIM}[OFFLINE]{_RESET}" if offline else ""
+        print(f"\n  {_BOLD}Project: {name}{_RESET}{offline_tag}\n")
+        _render_tab_bar(state, active_node)
+        _render_node_detail(state, active_node)
 
-        has_monologue = (
-            any(ep.storyboard.glob("monologue_*_latest.json")) if ep.storyboard.exists() else False
-        )
-        has_preset_phase3 = False
-        preset_key = meta.get("style_preset")
-        if preset_key:
-            from .style_presets import get_preset as _get_preset
+        # Build node-scoped action menu
+        choices = _build_node_actions(active_node, state, ep, meta, offline)
 
-            _sp = _get_preset(preset_key)
-            has_preset_phase3 = _sp.has_phase3 if _sp else False
-
-        has_manifest = ep.master_manifest.exists()
-
-        choices = []
-        if has_preview:
-            choices.append("Open preview in browser")
-        if has_storyboard:
-            choices.append("Regenerate preview")
-            if offline:
-                choices.append("Assemble rough cut (proxy)")
-            else:
-                choices.append("Assemble rough cut")
-            if has_monologue:
-                if offline:
-                    choices.append("Assemble rough cut with text overlays (proxy)")
-                else:
-                    choices.append("Assemble rough cut with text overlays")
-        if has_storyboard and has_preset_phase3:
-            choices.append("Generate visual monologue")
-        if not offline:
-            choices.append("Manage clips")
-        choices.append("Transcribe audio")
-        if offline and has_manifest:
-            choices.append("Run analysis (Phase 1 + 2)")
-        elif not offline:
-            choices.append("Run analysis (Phase 1 + 2)")
-        choices.append("Edit briefing (AI-guided)")
-        choices.append("Edit briefing (manual)")
-        choices.append("Set style preset")
-        if has_storyboard:
-            choices.append("Compose a cut")
-            choices.append("Compare versions")
-        choices.append("Version history")
-        choices.append("Show status")
-        if has_rough_cut:
-            choices.append("Open rough cut video")
-        choices.append(questionary.Choice("← Back", value="back"))
-
-        if offline:
-            print(f"\n  Project: {name}  [OFFLINE]")
-            print(f"  Source offline: {source_dir}")
-        else:
-            print(f"\n  Project: {name}")
         action = questionary.select(
             "Action:",
             choices=choices,
@@ -432,21 +930,132 @@ def _project_actions(name, cfg):
 
         if action is None or action == "back":
             break
-        elif action == "Open preview in browser":
-            # Find latest preview in exports/
+
+        # --- Navigation ---
+        elif action.startswith("nav_"):
+            active_node = action[4:]
+
+        # --- Node-specific actions ---
+        elif action == "rescan":
+            from .briefing import run_quick_scan
+
+            print("\n  Re-scanning footage...")
+            run_quick_scan(ep, meta.get("provider", "gemini"))
+
+        elif action == "view_scan":
+            from .versioning import resolve_quick_scan_path
+
+            sp = resolve_quick_scan_path(ep.root)
+            if sp:
+                data = json.loads(sp.read_text())
+                print(f"\n  {data.get('overall_summary', 'No summary')}")
+                if data.get("people"):
+                    print("  People:")
+                    for p in data["people"]:
+                        print(f"    - {p.get('description', '?')}")
+                if data.get("activities"):
+                    print(f"  Activities: {', '.join(data['activities'])}")
+
+        elif action == "edit_brief_ai":
+            style = meta.get("style", "vlog")
+            from .briefing import run_smart_briefing
+
+            run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
+
+        elif action == "edit_brief_manual":
+            reviews = _load_reviews(ep)
+            style = meta.get("style", "vlog")
+            from .briefing import run_briefing
+
+            run_briefing(reviews, style, ep.root)
+
+        elif action == "transcribe":
+            _run_transcription_interactive(name, cfg)
+
+        elif action == "rerun_p1":
+            lineage = _confirm_phase_inputs(ep, meta, "review")
+            if lineage is not None:
+                _run_analyze(name, meta, cfg, phase1_only=True)
+
+        elif action == "rerun_p2":
+            lineage = _confirm_phase_inputs(ep, meta, "storyboard")
+            if lineage is not None:
+                _run_analyze(name, meta, cfg, phase2_only=True)
+
+        elif action == "rerun_p3":
+            lineage = _confirm_phase_inputs(ep, meta, "monologue")
+            if lineage is not None:
+                from .editorial_agent import run_monologue
+                from .style_presets import get_preset as _get_preset2
+                from .tracing import ProjectTracer
+
+                _sp2 = _get_preset2(meta.get("style_preset", ""))
+                if _sp2:
+                    provider = meta.get("provider", "gemini")
+                    tracer = ProjectTracer(ep.root)
+                    print(f"\n  Phase 3: Visual Monologue ({_sp2.label})")
+                    run_monologue(
+                        editorial_paths=ep,
+                        provider=provider,
+                        gemini_cfg=cfg.gemini,
+                        claude_cfg=cfg.claude,
+                        style_preset=_sp2,
+                        tracer=tracer,
+                    )
+                    tracer.print_summary("Monologue")
+
+        elif action == "run_full":
+            _run_analyze(name, meta, cfg)
+
+        elif action == "compare":
+            _compare_versions_flow(name, ep)
+
+        elif action == "open_preview":
             latest_export = ep.exports / "latest"
             if latest_export.exists():
                 preview = latest_export / "preview.html"
                 if preview.exists():
                     subprocess.run(["open", str(preview)])
-        elif action == "Open rough cut video":
+
+        elif action == "open_cut":
             _cd = ep.exports / "cuts"
             cuts = sorted(_cd.glob("*/rough_cut*.mp4"), reverse=True) if _cd.exists() else []
             if not cuts:
                 cuts = sorted(ep.exports.glob("*/rough_cut*.mp4"), reverse=True)
             if cuts:
                 subprocess.run(["open", str(cuts[0])])
-        elif action == "Regenerate preview":
+
+        elif action == "compose_cut":
+            _compose_cut_flow(name, ep)
+
+        elif action in ("assemble", "assemble_proxy"):
+            from .rough_cut import run_rough_cut
+            from .versioning import resolve_versioned_path
+
+            is_proxy = action == "assemble_proxy"
+            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
+            if json_files:
+                sb_path = resolve_versioned_path(json_files[0])
+                # Check for monologue
+                monologue = None
+                mono_files = sorted(ep.storyboard.glob("monologue_*_latest.json"))
+                if mono_files:
+                    from .models import MonologuePlan
+
+                    use_mono = questionary.confirm(
+                        "Include text overlays from monologue?", default=True, style=VX_STYLE
+                    ).ask()
+                    if use_mono:
+                        monologue = MonologuePlan.model_validate_json(
+                            resolve_versioned_path(mono_files[0]).read_text()
+                        )
+                print(f"\n  Assembling {'PROXY ' if is_proxy else ''}rough cut...\n")
+                result = run_rough_cut(sb_path, ep, monologue=monologue, proxy_mode=is_proxy)
+                print(f"\n  Done! {result.get('cut_id', '')}")
+                if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
+                    subprocess.run(["open", str(result["preview"])])
+
+        elif action == "regen_preview":
             from .models import EditorialStoryboard
             from .render import render_html_preview
             from .versioning import (
@@ -458,16 +1067,16 @@ def _project_actions(name, cfg):
 
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
             if json_files:
-                sb = EditorialStoryboard.model_validate_json(json_files[0].read_text())
+                from .versioning import resolve_versioned_path
+
+                sb = EditorialStoryboard.model_validate_json(
+                    resolve_versioned_path(json_files[0]).read_text()
+                )
                 art_meta = begin_version(
-                    ep.root,
-                    phase="preview",
-                    provider="render",
-                    target_dir=ep.exports,
+                    ep.root, phase="preview", provider="render", target_dir=ep.exports
                 )
                 v = art_meta.version
                 vdir = versioned_dir(ep.exports, v)
-                # Embed existing rough cut if available (check cuts/latest first)
                 rough_cut_path = None
                 for _rc_dir in [ep.exports / "cuts" / "latest", ep.exports / "latest"]:
                     if _rc_dir.exists():
@@ -476,10 +1085,7 @@ def _project_actions(name, cfg):
                             rough_cut_path = rc.resolve()
                             break
                 html = render_html_preview(
-                    sb,
-                    clips_dir=ep.clips_dir,
-                    output_dir=vdir,
-                    rough_cut_path=rough_cut_path,
+                    sb, clips_dir=ep.clips_dir, output_dir=vdir, rough_cut_path=rough_cut_path
                 )
                 preview_path = vdir / "preview.html"
                 preview_path.write_text(html)
@@ -487,81 +1093,20 @@ def _project_actions(name, cfg):
                     ep.root, art_meta, output_paths=[preview_path], target_dir=ep.exports
                 )
                 update_latest_symlink(vdir)
-                print(f"\n  Preview v{v} generated: {preview_path}")
+                print(f"\n  Preview v{v} generated")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(preview_path)])
-        elif action in ("Assemble rough cut", "Assemble rough cut (proxy)"):
-            from .rough_cut import run_rough_cut
 
-            is_proxy = action.endswith("(proxy)")
-            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
-            if json_files:
-                if is_proxy:
-                    print("\n  Assembling PROXY rough cut (source drive offline)...\n")
-                else:
-                    print("\n  Assembling rough cut...\n")
-                result = run_rough_cut(json_files[0], ep, proxy_mode=is_proxy)
-                print(f"\n  Done! v{result['version']}")
-                if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
-                    subprocess.run(["open", str(result["preview"])])
-        elif action in (
-            "Assemble rough cut with text overlays",
-            "Assemble rough cut with text overlays (proxy)",
-        ):
-            from .rough_cut import run_rough_cut
-            from .models import MonologuePlan
+        elif action == "manage_clips":
+            _manage_clips(name, meta, cfg)
 
-            is_proxy = action.endswith("(proxy)")
-            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
-            mono_files = sorted(ep.storyboard.glob("monologue_*_latest.json"))
-            if json_files and mono_files:
-                monologue = MonologuePlan.model_validate_json(mono_files[0].read_text())
-                label = f"with {len(monologue.overlays)} text overlays"
-                if is_proxy:
-                    print(f"\n  Assembling PROXY rough cut {label} (source drive offline)...\n")
-                else:
-                    print(f"\n  Assembling rough cut {label}...\n")
-                result = run_rough_cut(json_files[0], ep, monologue=monologue, proxy_mode=is_proxy)
-                print(f"\n  Done! v{result['version']}")
-                if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
-                    subprocess.run(["open", str(result["preview"])])
-        elif action == "Generate visual monologue":
-            from .editorial_agent import run_monologue
-            from .style_presets import get_preset as _get_preset2
-            from .tracing import ProjectTracer
+        elif action == "version_history":
+            _version_history_flow(name, ep)
 
-            _sp2 = _get_preset2(meta.get("style_preset", ""))
-            if _sp2:
-                provider = meta.get("provider", "gemini")
-                tracer = ProjectTracer(ep.root)
-                print(f"\n  Phase 3: Visual Monologue ({_sp2.label})")
-                run_monologue(
-                    editorial_paths=ep,
-                    provider=provider,
-                    gemini_cfg=cfg.gemini,
-                    claude_cfg=cfg.claude,
-                    style_preset=_sp2,
-                    tracer=tracer,
-                )
-                tracer.print_summary("Monologue")
-        elif action == "Transcribe audio":
-            _run_transcription_interactive(name, cfg)
-        elif action == "Run analysis (Phase 1 + 2)":
-            _run_analyze(name, meta, cfg)
-        elif action == "Edit briefing (AI-guided)":
-            style = meta.get("style", "vlog")
-            from .briefing import run_smart_briefing
+        elif action == "show_status":
+            _show_status(name, meta, cfg)
 
-            # Smart briefing versioning creates new versions instead of deleting
-            run_smart_briefing(ep, style, gemini_model=cfg.transcribe.gemini_model)
-        elif action == "Edit briefing (manual)":
-            reviews = _load_reviews(ep)
-            style = meta.get("style", "vlog")
-            from .briefing import run_briefing
-
-            # run_briefing handles versioning — new version instead of delete
-            run_briefing(reviews, style, ep.root)
-        elif action == "Set style preset":
+        elif action == "set_preset":
             from .style_presets import list_presets as _list_presets, get_preset as _get_preset3
 
             current_preset = meta.get("style_preset")
@@ -579,11 +1124,8 @@ def _project_actions(name, cfg):
                 preset_choices.append(questionary.Choice(label, value=p.key))
 
             new_key = questionary.select(
-                "Style preset:",
-                choices=preset_choices,
-                style=VX_STYLE,
+                "Style preset:", choices=preset_choices, style=VX_STYLE
             ).ask()
-
             if new_key != current_preset:
                 if new_key:
                     meta["style_preset"] = new_key
@@ -591,21 +1133,10 @@ def _project_actions(name, cfg):
                     print(f"\n  Set preset: {sp.label}")
                     if sp.has_phase3:
                         print("  This preset supports Visual Monologue (Phase 3)")
-                    print("  Re-run analysis to apply preset creative direction to all phases.")
                 else:
                     meta.pop("style_preset", None)
                     print("\n  Removed style preset.")
                 (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
-        elif action == "Manage clips":
-            _manage_clips(name, meta, cfg)
-        elif action == "Compose a cut":
-            _compose_cut_flow(name, ep)
-        elif action == "Compare versions":
-            _compare_versions_flow(name, ep)
-        elif action == "Version history":
-            _version_history_flow(name, ep)
-        elif action == "Show status":
-            _show_status(name, meta, cfg)
 
 
 def _compose_cut_flow(name, ep):
@@ -913,8 +1444,8 @@ def _manage_clips(name, meta, cfg):
         print("  Note: re-run analysis to update storyboard.\n")
 
 
-def _run_analyze(name, meta, cfg):
-    """Run the full analysis pipeline."""
+def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
+    """Run the analysis pipeline. Can run full, Phase 1 only, or Phase 2 only."""
     from .editorial_agent import (
         discover_source_clips,
         discover_clips_from_manifest,
