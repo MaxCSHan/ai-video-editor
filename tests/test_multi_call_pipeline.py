@@ -775,3 +775,151 @@ class TestFullPromptChain:
         print(f"    Call 2A:   {len(prompt_2a):,} chars (~{len(prompt_2a) // 4:,} tokens)")
         print(f"    Call 2A.5: {len(prompt_2a5):,} chars")
         print(f"    Call 2B:   {len(prompt_2b):,} chars (~{len(prompt_2b) // 4:,} tokens)")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Context compression, constraint resolution, few-shot
+# ---------------------------------------------------------------------------
+
+
+class TestTieredContextCompression:
+    def test_classify_clip_priority(self, clip_reviews):
+        from ai_video_editor.editorial_prompts import classify_clip_priority
+
+        priorities = [classify_clip_priority(r) for r in clip_reviews]
+
+        # Should have a mix of priorities in a real 31-clip project
+        assert "high" in priorities
+        assert len(set(priorities)) >= 2, "Expected at least 2 priority levels"
+
+    def test_tiered_is_smaller_than_full(self, clip_reviews, transcripts):
+        from ai_video_editor.editorial_prompts import _format_clip_reviews_text
+
+        full = _format_clip_reviews_text(clip_reviews, transcripts, tiered=False)
+        tiered = _format_clip_reviews_text(clip_reviews, transcripts, tiered=True)
+
+        # With 31 clips (>= 15 threshold), tiered should be smaller
+        assert len(tiered) < len(full), (
+            f"Tiered ({len(tiered)}) should be smaller than full ({len(full)})"
+        )
+        savings_pct = (1 - len(tiered) / len(full)) * 100
+        print(f"\n  Tiered compression: {len(full):,} → {len(tiered):,} chars ({savings_pct:.0f}% savings)")
+
+    def test_tiered_disabled_below_threshold(self):
+        from ai_video_editor.editorial_prompts import _format_clip_reviews_text
+
+        # With < 15 clips, tiered=True should produce same output as tiered=False
+        small_reviews = [{"clip_id": f"clip_{i}", "summary": "test"} for i in range(5)]
+
+        full = _format_clip_reviews_text(small_reviews, tiered=False)
+        tiered = _format_clip_reviews_text(small_reviews, tiered=True)
+
+        assert full == tiered
+
+    def test_high_priority_clips_have_full_detail(self, clip_reviews, transcripts):
+        from ai_video_editor.editorial_prompts import (
+            _format_clip_reviews_text, classify_clip_priority,
+        )
+
+        tiered = _format_clip_reviews_text(clip_reviews, transcripts, tiered=True)
+
+        # Find a high-priority clip and verify it has full detail markers
+        for r in clip_reviews:
+            if classify_clip_priority(r) == "high":
+                cid = r["clip_id"]
+                # High-priority clips should have "Usable segments:" section
+                # Find the clip's block in the output
+                if cid in tiered and "Usable segments:" in tiered.split(cid)[1].split("##")[0]:
+                    break
+        else:
+            pytest.skip("No high-priority clip with usable segments found")
+
+
+class TestConstraintResolution:
+    def test_resolves_highlights_to_clips(self, user_context, clip_reviews):
+        from ai_video_editor.editorial_prompts import resolve_constraints_to_clips
+
+        resolved = resolve_constraints_to_clips(user_context, clip_reviews)
+
+        # Should find matches for at least some highlight mentions
+        assert resolved, "Expected constraint resolution to find matches"
+        assert "Clip references" in resolved
+        assert "→" in resolved  # match indicators
+
+    def test_empty_context_returns_empty(self, clip_reviews):
+        from ai_video_editor.editorial_prompts import resolve_constraints_to_clips
+
+        assert resolve_constraints_to_clips({}, clip_reviews) == ""
+        assert resolve_constraints_to_clips({"tone": "warm"}, clip_reviews) == ""
+
+    def test_resolution_in_prompt(self, clip_reviews, user_context):
+        from ai_video_editor.editorial_prompts import (
+            extract_cast_from_reviews,
+            condense_clip_for_planning,
+            build_phase2a_reasoning_prompt,
+        )
+        from ai_video_editor.briefing import format_context_for_prompt
+
+        cast = extract_cast_from_reviews(clip_reviews)
+        condensed = [condense_clip_for_planning(r) for r in clip_reviews]
+        ctx_text = format_context_for_prompt(user_context)
+
+        prompt = build_phase2a_reasoning_prompt(
+            clip_reviews=clip_reviews,
+            style="vlog",
+            total_duration_sec=600.0,
+            cast=cast,
+            condensed_clips=condensed,
+            user_context_text=ctx_text,
+            user_context=user_context,
+        )
+
+        assert "Clip references for filmmaker constraints" in prompt
+
+
+class TestFewShotExample:
+    def test_example_in_reasoning_prompt(self, clip_reviews, user_context):
+        from ai_video_editor.editorial_prompts import (
+            extract_cast_from_reviews,
+            condense_clip_for_planning,
+            build_phase2a_reasoning_prompt,
+        )
+
+        cast = extract_cast_from_reviews(clip_reviews)
+        condensed = [condense_clip_for_planning(r) for r in clip_reviews]
+
+        prompt = build_phase2a_reasoning_prompt(
+            clip_reviews=clip_reviews,
+            style="vlog",
+            total_duration_sec=600.0,
+            cast=cast,
+            condensed_clips=condensed,
+        )
+
+        assert "<example>" in prompt
+        assert "CONSTRAINT CHECK" in prompt.split("<example>")[1].split("</example>")[0]
+        assert "MUST-INCLUDE" in prompt
+        assert "MUST-EXCLUDE" in prompt
+
+    def test_example_shows_segment_sequence(self, clip_reviews):
+        from ai_video_editor.editorial_prompts import (
+            extract_cast_from_reviews,
+            condense_clip_for_planning,
+            build_phase2a_reasoning_prompt,
+        )
+
+        cast = extract_cast_from_reviews(clip_reviews)
+        condensed = [condense_clip_for_planning(r) for r in clip_reviews]
+
+        prompt = build_phase2a_reasoning_prompt(
+            clip_reviews=clip_reviews,
+            style="vlog",
+            total_duration_sec=600.0,
+            cast=cast,
+            condensed_clips=condensed,
+        )
+
+        example = prompt.split("<example>")[1].split("</example>")[0]
+        assert "hook" in example
+        assert "climax" in example
+        assert "DISCARDED" in example

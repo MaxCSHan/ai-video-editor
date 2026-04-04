@@ -154,6 +154,142 @@ def _format_cast_list(cast: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def resolve_constraints_to_clips(
+    user_context: dict,
+    clip_reviews: list[dict],
+) -> str:
+    """Fuzzy-match user constraint mentions against Phase 1 clip data.
+
+    Resolves free-text like "the sunset at the temple" to specific clip IDs
+    and key_moment timestamps, so the LLM doesn't have to search through
+    all reviews to find the right moment.
+
+    Returns enhanced constraint text with clip references appended.
+    """
+    highlights = user_context.get("highlights", "")
+    avoid = user_context.get("avoid", "")
+    if not highlights and not avoid:
+        return ""
+
+    # Build a searchable index of key moments and summaries
+    index: list[tuple[str, str, str]] = []  # (clip_id, text, reference)
+    for r in clip_reviews:
+        cid = r.get("clip_id", "")
+        summary = r.get("summary", "")
+        if summary:
+            index.append((cid, summary.lower(), f"{cid} summary: {summary[:100]}"))
+        for km in r.get("key_moments", []):
+            desc = km.get("description", "")
+            ts = km.get("timestamp_sec", 0)
+            val = km.get("editorial_value", "")
+            if desc:
+                index.append(
+                    (
+                        cid,
+                        desc.lower(),
+                        f"{cid} @{ts:.1f}s [{val}]: {desc[:80]}",
+                    )
+                )
+        for seg in r.get("usable_segments", []):
+            desc = seg.get("description", "")
+            if desc:
+                index.append(
+                    (
+                        cid,
+                        desc.lower(),
+                        f"{cid} {seg.get('in_sec', 0):.1f}-{seg.get('out_sec', 0):.1f}s: {desc[:80]}",
+                    )
+                )
+
+    def _find_matches(query: str, max_results: int = 3) -> list[str]:
+        """Simple keyword overlap matching."""
+        query_words = set(query.lower().split())
+        # Remove common stop words
+        stop = {"the", "a", "an", "at", "in", "on", "to", "of", "and", "is", "my", "we", "i"}
+        query_words -= stop
+        if not query_words:
+            return []
+
+        scored = []
+        for cid, text, ref in index:
+            text_words = set(text.split())
+            overlap = len(query_words & text_words)
+            if overlap > 0:
+                scored.append((overlap, ref))
+        scored.sort(key=lambda x: -x[0])
+        return [ref for _, ref in scored[:max_results]]
+
+    lines = []
+    if highlights:
+        # Split highlights by commas or common delimiters to match individually
+        parts = [p.strip() for p in re.split(r"[,;]|(?:and )", highlights) if p.strip()]
+        if not parts:
+            parts = [highlights]
+        for part in parts:
+            matches = _find_matches(part)
+            if matches:
+                lines.append(f'  "{part[:60]}" → likely: {matches[0]}')
+                for m in matches[1:]:
+                    lines.append(f"    also: {m}")
+
+    if avoid:
+        parts = [p.strip() for p in re.split(r"[,;]|(?:and )", avoid) if p.strip()]
+        if not parts:
+            parts = [avoid]
+        for part in parts:
+            matches = _find_matches(part)
+            if matches:
+                lines.append(f'  Avoid "{part[:60]}" → check: {matches[0]}')
+
+    if lines:
+        return "\nClip references for filmmaker constraints:\n" + "\n".join(lines)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Few-shot example for Phase 2A reasoning
+# ---------------------------------------------------------------------------
+
+_PHASE2A_FEWSHOT_EXAMPLE = """
+<example>
+Here is an example of a well-structured editorial plan:
+
+1. CONSTRAINT CHECK:
+- MUST INCLUDE "the group photo at the summit" → C0023 usable segment [2] at 142.5-155.0s
+  shows the full group standing at the summit marker. Will place as climax (segment 8).
+- MUST EXCLUDE "camera bag footage" → C0005 segment [0] 0-45s and C0012 segment [0] 0-12s
+  are accidental bag recordings. Excluding both clips entirely.
+
+2. STORY CONCEPT: A family conquering a challenging trail together — the payoff is
+earning the view at the top.
+
+3. OPENING HOOK: C0023 usable segment [2] at 148.0-153.0s — flash-forward to the summit
+celebration. Immediately shows the payoff, then we cut to the beginning of the hike.
+
+4. SEGMENT SEQUENCE:
+- C0023 segment [2] — hook, flash-forward to summit (ambient_only)
+- C0001 segment [0] — establishing, parking lot arrival (ambient_only)
+- C0003 segment [1] — context, trail entrance and gear check (preserve_dialogue)
+- C0008 segment [0] — action, steep section with rope assist (ambient_only)
+- C0012 segment [1] — action, forest canopy walk (music_bed)
+- C0018 segment [0] — context, rest stop conversation about the view (preserve_dialogue)
+- C0020 segment [0] — b_roll, panoramic ridge view (music_bed)
+- C0023 segment [2] — climax, summit group photo MUST-INCLUDE (preserve_dialogue)
+- C0025 segment [0] — reflection, descent through forest (music_bed)
+- C0030 segment [0] — outro, restaurant dinner together (preserve_dialogue)
+
+5. DISCARDED: C0005 (bag footage — MUST-EXCLUDE), C0009 (duplicate of C0008, same rope
+section from different angle), C0015 (blurry, very shaky throughout).
+
+6. PACING: Slow opening (establishing → context), accelerate through the climb (action
+segments), breathe at the summit (climax), gentle descent to resolution.
+
+7. MUSIC: Ambient guitar for establishing/context, build energy for action segments,
+emotional piano at summit, gentle fade for descent and outro.
+</example>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Multi-call Phase 2 prompt builders
 # ---------------------------------------------------------------------------
@@ -200,9 +336,15 @@ def build_phase2a_reasoning_prompt(
     transcripts: dict[str, str] | None = None,
     filming_timeline: str | None = None,
     user_context_text: str | None = None,
+    user_context: dict | None = None,
     style_supplement: str | None = None,
 ) -> str:
-    """Build the freeform reasoning prompt for Call 2A (no structured output)."""
+    """Build the freeform reasoning prompt for Call 2A (no structured output).
+
+    Args:
+        user_context_text: Pre-formatted constraint/preference text.
+        user_context: Raw user_context dict for constraint → clip resolution.
+    """
     clip_ids = [c["clip_id"] for c in condensed_clips]
     prompt = _PHASE2A_REASONING_PROMPT.format(
         style=style,
@@ -211,8 +353,17 @@ def build_phase2a_reasoning_prompt(
         clip_ids=", ".join(clip_ids),
     )
 
+    # Few-shot example (shows the model what a good plan looks like)
+    prompt += _PHASE2A_FEWSHOT_EXAMPLE
+
     if user_context_text:
         prompt += "\n\n" + user_context_text
+
+    # Constraint → clip resolution (fuzzy-match user mentions to specific clips)
+    if user_context:
+        resolved = resolve_constraints_to_clips(user_context, clip_reviews)
+        if resolved:
+            prompt += "\n" + resolved
 
     if style_supplement:
         prompt += "\n\n" + style_supplement
@@ -361,83 +512,168 @@ def build_phase2b_assembly_prompt(
     return prompt
 
 
+def classify_clip_priority(review: dict) -> str:
+    """Classify a clip review as high/medium/low editorial priority.
+
+    Used for tiered context compression in large projects (15+ clips).
+    - high: clips with high-value key moments, speech, or multiple usable segments
+    - medium: clips with moderate usable content
+    - low: B-roll only, single short segment, or poor quality
+    """
+    high_moments = sum(
+        1 for km in review.get("key_moments", []) if km.get("editorial_value") == "high"
+    )
+    usable = review.get("usable_segments", [])
+    total_usable_sec = sum(s.get("duration_sec", 0) for s in usable)
+    has_speech = review.get("audio", {}).get("has_speech", False)
+    quality = review.get("quality", {}).get("overall", "fair")
+
+    if high_moments >= 2 or (has_speech and total_usable_sec > 30):
+        return "high"
+    if quality == "poor" or total_usable_sec < 5:
+        return "low"
+    content = review.get("content_type", [])
+    if isinstance(content, list) and all(
+        c in ("b_roll", "establishing", "landscape") for c in content
+    ):
+        if total_usable_sec < 15:
+            return "low"
+    return "medium"
+
+
+def _format_clip_review_full(r: dict, transcripts: dict[str, str] | None = None) -> str:
+    """Format a single clip review at full detail (Tier A)."""
+    cid = r.get("clip_id", "unknown")
+    lines = [f"## {cid}"]
+    lines.append(r.get("summary", ""))
+
+    q = r.get("quality", {})
+    if q:
+        parts = [f"{k}={v}" for k, v in q.items()]
+        lines.append(f"Quality: {', '.join(parts)}")
+
+    ct = r.get("content_type", [])
+    if ct:
+        lines.append(f"Content: {', '.join(ct) if isinstance(ct, list) else ct}")
+
+    for p in r.get("people", []):
+        role = p.get("role", "")
+        desc = p.get("description", "")
+        speaking = " (speaking)" if p.get("speaking") else ""
+        pct = p.get("screen_time_pct")
+        pct_str = f" {pct:.0%}" if pct else ""
+        lines.append(f"  Person: {p.get('label', '?')} — {role}{pct_str}{speaking}: {desc}")
+
+    for km in r.get("key_moments", []):
+        ts = km.get("timestamp_sec", 0)
+        val = km.get("editorial_value", "")
+        use = km.get("suggested_use", "")
+        lines.append(f"  @{ts:.1f}s [{val}] {km.get('description', '')} (use: {use})")
+
+    segs = r.get("usable_segments", [])
+    if segs:
+        lines.append("Usable segments:")
+        for s in segs:
+            lines.append(
+                f"  {s.get('in_sec', 0):.1f}s–{s.get('out_sec', 0):.1f}s "
+                f"({s.get('duration_sec', 0):.1f}s, {s.get('quality', '?')}): "
+                f"{s.get('description', '')}"
+            )
+
+    a = r.get("audio", {})
+    if a:
+        parts = []
+        if a.get("speech_summary"):
+            parts.append(f"speech: {a['speech_summary']}")
+        if a.get("ambient_description"):
+            parts.append(f"ambient: {a['ambient_description']}")
+        if a.get("music_potential"):
+            parts.append(a["music_potential"])
+        if parts:
+            lines.append(f"Audio: {'; '.join(parts)}")
+
+    notes = r.get("editorial_notes", "")
+    if notes:
+        lines.append(f"Editorial: {notes}")
+
+    if transcripts and cid in transcripts:
+        lines.append(f"Transcript:\n{transcripts[cid]}")
+
+    return "\n".join(lines)
+
+
+def _format_clip_review_summary(r: dict) -> str:
+    """Format a single clip review at summary detail (Tier B)."""
+    cid = r.get("clip_id", "unknown")
+    lines = [f"## {cid}"]
+    lines.append(r.get("summary", ""))
+
+    # Best 2-3 usable segments only
+    segs = r.get("usable_segments", [])
+    best = sorted(segs, key=lambda s: s.get("duration_sec", 0), reverse=True)[:3]
+    if best:
+        lines.append("Best segments:")
+        for s in best:
+            lines.append(
+                f"  {s.get('in_sec', 0):.1f}s–{s.get('out_sec', 0):.1f}s "
+                f"({s.get('duration_sec', 0):.1f}s): {s.get('description', '')}"
+            )
+
+    a = r.get("audio", {})
+    if a and a.get("speech_summary"):
+        lines.append(f"Speech: {a['speech_summary']}")
+
+    return "\n".join(lines)
+
+
+def _format_clip_review_oneliner(r: dict) -> str:
+    """Format a single clip review as a one-liner (Tier C)."""
+    cid = r.get("clip_id", "unknown")
+    total_usable = sum(s.get("duration_sec", 0) for s in r.get("usable_segments", []))
+    n_segs = len(r.get("usable_segments", []))
+    summary = r.get("summary", "")[:80]
+    ct = r.get("content_type", [])
+    ct_str = ", ".join(ct) if isinstance(ct, list) else str(ct)
+
+    best = r.get("usable_segments", [])[:1]
+    seg_str = ""
+    if best:
+        s = best[0]
+        seg_str = f" Best: {s.get('in_sec', 0):.1f}-{s.get('out_sec', 0):.1f}s"
+
+    return f"## {cid} — {ct_str}, {total_usable:.0f}s usable ({n_segs} segs).{seg_str} {summary}"
+
+
 def _format_clip_reviews_text(
     clip_reviews: list[dict],
     transcripts: dict[str, str] | None = None,
+    tiered: bool = False,
 ) -> str:
     """Flatten clip review dicts into compact plain-text for the Phase 2 prompt.
 
     Drops JSON overhead, duplicate timestamp formats (keeps seconds only),
     and discard_segments (Phase 2 only needs usable segments).
     Each clip's transcript (if available) is inlined after its review.
+
+    If tiered=True and there are 15+ clips, applies tiered compression:
+    - high priority: full detail (Tier A)
+    - medium priority: summary with best segments (Tier B)
+    - low priority: one-liner (Tier C)
     """
+    use_tiers = tiered and len(clip_reviews) >= 15
+
     blocks = []
     for r in clip_reviews:
-        cid = r.get("clip_id", "unknown")
-        lines = [f"## {cid}"]
-        lines.append(r.get("summary", ""))
-
-        # Quality — single line
-        q = r.get("quality", {})
-        if q:
-            parts = [f"{k}={v}" for k, v in q.items()]
-            lines.append(f"Quality: {', '.join(parts)}")
-
-        # Content type
-        ct = r.get("content_type", [])
-        if ct:
-            lines.append(f"Content: {', '.join(ct) if isinstance(ct, list) else ct}")
-
-        # People
-        for p in r.get("people", []):
-            role = p.get("role", "")
-            desc = p.get("description", "")
-            speaking = " (speaking)" if p.get("speaking") else ""
-            pct = p.get("screen_time_pct")
-            pct_str = f" {pct:.0%}" if pct else ""
-            lines.append(f"  Person: {p.get('label', '?')} — {role}{pct_str}{speaking}: {desc}")
-
-        # Key moments — seconds only
-        for km in r.get("key_moments", []):
-            ts = km.get("timestamp_sec", 0)
-            val = km.get("editorial_value", "")
-            use = km.get("suggested_use", "")
-            lines.append(f"  @{ts:.1f}s [{val}] {km.get('description', '')} (use: {use})")
-
-        # Usable segments — seconds only
-        segs = r.get("usable_segments", [])
-        if segs:
-            lines.append("Usable segments:")
-            for s in segs:
-                lines.append(
-                    f"  {s.get('in_sec', 0):.1f}s–{s.get('out_sec', 0):.1f}s "
-                    f"({s.get('duration_sec', 0):.1f}s, {s.get('quality', '?')}): "
-                    f"{s.get('description', '')}"
-                )
-
-        # Audio — compact
-        a = r.get("audio", {})
-        if a:
-            parts = []
-            if a.get("speech_summary"):
-                parts.append(f"speech: {a['speech_summary']}")
-            if a.get("ambient_description"):
-                parts.append(f"ambient: {a['ambient_description']}")
-            if a.get("music_potential"):
-                parts.append(a["music_potential"])
-            if parts:
-                lines.append(f"Audio: {'; '.join(parts)}")
-
-        # Editorial notes
-        notes = r.get("editorial_notes", "")
-        if notes:
-            lines.append(f"Editorial: {notes}")
-
-        # Inline transcript if available
-        if transcripts and cid in transcripts:
-            lines.append(f"Transcript:\n{transcripts[cid]}")
-
-        blocks.append("\n".join(lines))
+        if use_tiers:
+            priority = classify_clip_priority(r)
+            if priority == "high":
+                blocks.append(_format_clip_review_full(r, transcripts))
+            elif priority == "medium":
+                blocks.append(_format_clip_review_summary(r))
+            else:
+                blocks.append(_format_clip_review_oneliner(r))
+        else:
+            blocks.append(_format_clip_review_full(r, transcripts))
 
     return "\n\n".join(blocks)
 
@@ -639,7 +875,7 @@ def build_editorial_assembly_prompt(
         )
 
     # 4. Clip reviews (with inline transcripts)
-    reviews_text = _format_clip_reviews_text(clip_reviews, transcripts)
+    reviews_text = _format_clip_reviews_text(clip_reviews, transcripts, tiered=True)
     prompt += "\n\n---\nClip Reviews:\n\n" + reviews_text + "\n---"
 
     if transcripts:

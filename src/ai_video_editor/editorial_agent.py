@@ -1056,6 +1056,7 @@ def _run_phase2_split(
         transcripts=trimmed_transcripts,
         filming_timeline=filming_timeline,
         user_context_text=user_context_text,
+        user_context=user_context,
         style_supplement=style_supplement,
     )
 
