@@ -891,6 +891,85 @@ def validate_storyboard(storyboard, clip_reviews: list[dict]) -> tuple[list[str]
 # individual uploads. See run_phase2() below.
 
 
+def _validate_constraints(
+    storyboard,
+    user_context: dict,
+    client,
+    model: str,
+    tracer=None,
+) -> str | None:
+    """Run a cheap LLM validation call to check filmmaker constraint satisfaction.
+
+    Returns the validation report text, or None if validation was skipped.
+    Prints constraint violations to the console.
+    """
+    from .tracing import traced_gemini_generate
+
+    constraints = []
+    if user_context.get("highlights"):
+        constraints.append(f"MUST INCLUDE: {user_context['highlights']}")
+    if user_context.get("avoid"):
+        constraints.append(f"MUST EXCLUDE: {user_context['avoid']}")
+    if not constraints:
+        return None
+
+    # Build compact storyboard summary for the validator
+    seg_lines = []
+    for seg in storyboard.segments:
+        seg_lines.append(
+            f"  [{seg.index}] {seg.clip_id} {seg.in_sec:.1f}-{seg.out_sec:.1f}s "
+            f"({seg.purpose}): {seg.description}"
+        )
+    seg_summary = "\n".join(seg_lines)
+
+    prompt = (
+        "You are reviewing a video storyboard against the filmmaker's constraints.\n\n"
+        "CONSTRAINTS:\n"
+        + "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(constraints))
+        + "\n\nSTORYBOARD SEGMENTS:\n"
+        + seg_summary
+        + "\n\nFor each constraint, answer:\n"
+        "- SATISFIED: YES or NO\n"
+        "- EVIDENCE: which segment(s) satisfy it, or what is missing\n"
+        "- If NO: suggest a specific fix (which clip/segment to add or remove)\n\n"
+        "Be concise. One paragraph per constraint."
+    )
+
+    try:
+        from google.genai import types
+
+        print(f"  [Validate] Checking constraint satisfaction ({model})...")
+        response = traced_gemini_generate(
+            client,
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1),
+            phase="phase2_validation",
+            tracer=tracer,
+            prompt_chars=len(prompt),
+        )
+        report = response.text.strip()
+
+        # Parse for violations and print them
+        has_violation = False
+        for line in report.split("\n"):
+            line_lower = line.strip().lower()
+            if "satisfied: no" in line_lower or "no" in line_lower and "must" in line_lower:
+                has_violation = True
+        if has_violation:
+            print("  [Validate] ⚠ Constraint violation(s) detected:")
+            for line in report.split("\n"):
+                if line.strip():
+                    print(f"    {line.strip()}")
+        else:
+            print("  [Validate] ✓ All constraints satisfied")
+
+        return report
+    except Exception as e:
+        print(f"  [Validate] Skipped — validation call failed: {e}")
+        return None
+
+
 def _run_phase2_split(
     clip_reviews: list[dict],
     editorial_paths: EditorialProjectPaths,
@@ -1170,6 +1249,17 @@ def _run_phase2_split(
     if tracer and tracer.traces:
         tracer.traces[-1].validation_warnings = val_warnings + fix_log
 
+    # ── Constraint validation call (cheap LLM check) ──────────────────────
+    constraint_report = None
+    if user_context and (user_context.get("highlights") or user_context.get("avoid")):
+        constraint_report = _validate_constraints(
+            storyboard=storyboard,
+            user_context=user_context,
+            client=client,
+            model=gemini_cfg.structuring_model,
+            tracer=tracer,
+        )
+
     # ── Version and save outputs ───────────────────────────────────────────
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
 
@@ -1219,6 +1309,11 @@ def _run_phase2_split(
     if fix_log:
         fix_path = editorial_paths.storyboard / f"fixlog_{provider}_v{v}.txt"
         fix_path.write_text("\n".join(fix_log))
+
+    # Save constraint validation report
+    if constraint_report:
+        report_path = editorial_paths.storyboard / f"constraint_check_{provider}_v{v}.txt"
+        report_path.write_text(constraint_report)
 
     # Primary: structured JSON
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
@@ -1448,6 +1543,23 @@ def run_phase2(
         tracer.traces[-1].validation_warnings = val_warnings
     if val_critical:
         print("  Critical storyboard issues detected — consider re-running with --force")
+
+    # Constraint validation (cheap LLM check — works for both single and split pipelines)
+    if provider == "gemini" and user_context and gemini_cfg:
+        if user_context.get("highlights") or user_context.get("avoid"):
+            if not visual_timeline:
+                from google.genai import types  # noqa: F811
+
+                client = _get_gemini_client()
+            _validate_constraints(
+                storyboard=storyboard,
+                user_context=user_context,
+                client=client,
+                model=gemini_cfg.structuring_model
+                if hasattr(gemini_cfg, "structuring_model")
+                else "gemini-2.5-flash-lite",
+                tracer=tracer,
+            )
 
     # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
