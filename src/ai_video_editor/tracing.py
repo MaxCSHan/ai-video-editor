@@ -349,8 +349,10 @@ def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> N
     storage = storage_dir or Path.home() / ".vx" / "phoenix"
     storage.mkdir(parents=True, exist_ok=True)
     os.environ["PHOENIX_WORKING_DIR"] = str(storage)
+    os.environ["PHOENIX_HOST"] = "0.0.0.0"
+    os.environ["PHOENIX_PORT"] = str(port)
 
-    px.launch_app(host="0.0.0.0", port=port)
+    px.launch_app()
 
 
 def get_phoenix_status() -> tuple[bool, str | None]:
