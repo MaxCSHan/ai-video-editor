@@ -343,11 +343,13 @@ def export_srt_files(
     editorial_paths: EditorialProjectPaths,
     output_dir: Path,
 ) -> list[Path]:
-    """Export per-clip SRT files alongside the FCPXML for separate subtitle import.
+    """Export a timeline-aligned SRT plus per-clip SRT files alongside the FCPXML.
 
-    DaVinci Resolve cannot import captions via FCPXML — SRT files must be imported
-    separately (File > Import > Subtitle). This keeps subtitles non-destructive
-    and independently editable.
+    The timeline SRT is the primary output: subtitle cues are remapped to match the
+    FCPXML timeline offsets, so importing one SRT file into DaVinci Resolve gives you
+    subtitles that are already synced to the assembled edit. No manual association needed.
+
+    Per-clip SRT files are also exported for reference or individual clip work.
 
     Returns list of SRT paths written.
     """
@@ -360,24 +362,97 @@ def export_srt_files(
     # Collect unique clip IDs that appear in the storyboard
     used_clip_ids = list(dict.fromkeys(seg.clip_id for seg in storyboard.segments))
 
+    # Load all transcripts needed
+    clip_transcripts: dict[str, dict] = {}
     for clip_id in used_clip_ids:
         clip_root = editorial_paths.clips_dir / clip_id
         transcript_path = resolve_transcript_path(clip_root)
         if not transcript_path:
             log.debug("No transcript for %s — skipping SRT", clip_id)
             continue
-
         transcript = json.loads(transcript_path.read_text())
-        if not transcript.get("has_speech", False):
-            log.debug("No speech in %s — skipping SRT", clip_id)
-            continue
+        if transcript.get("has_speech", False):
+            clip_transcripts[clip_id] = transcript
 
+    if not clip_transcripts:
+        return written
+
+    # --- Per-clip SRT files (reference) ---
+    for clip_id, transcript in clip_transcripts.items():
         srt_path = output_dir / f"{clip_id}.srt"
         generate_srt(transcript, srt_path)
         written.append(srt_path)
-        log.info("SRT written: %s", srt_path)
+
+    # --- Timeline-aligned SRT (primary output) ---
+    timeline_srt_path = output_dir.parent / "timeline_subtitles.srt"
+    timeline_entries: list[str] = []
+    cue_index = 1
+    timeline_offset = 0.0  # running offset on the assembled timeline
+
+    for seg in storyboard.segments:
+        seg_duration = seg.out_sec - seg.in_sec
+        if seg_duration <= 0:
+            continue
+
+        transcript = clip_transcripts.get(seg.clip_id)
+        if transcript:
+            for tseg in transcript.get("segments", []):
+                seg_type = tseg.get("type", "speech")
+                text = tseg.get("text", "")
+                if not text or seg_type == "silence":
+                    continue
+
+                # Only include cues that overlap the segment's in/out window
+                cue_start = tseg.get("start", 0.0)
+                cue_end = tseg.get("end", 0.0)
+
+                # Skip cues entirely outside the segment window
+                if cue_end <= seg.in_sec or cue_start >= seg.out_sec:
+                    continue
+
+                # Clamp to segment boundaries
+                effective_start = max(cue_start, seg.in_sec)
+                effective_end = min(cue_end, seg.out_sec)
+
+                # Remap to timeline position
+                tl_start = timeline_offset + (effective_start - seg.in_sec)
+                tl_end = timeline_offset + (effective_end - seg.in_sec)
+
+                # Format cue text with speaker/type markers
+                speaker = tseg.get("speaker")
+                if seg_type == "music":
+                    cue_text = f"\u266a {text} \u266a"
+                elif seg_type == "sound_effect":
+                    cue_text = f"[{text}]"
+                elif speaker:
+                    cue_text = f"{speaker}: {text}"
+                else:
+                    cue_text = text
+
+                timeline_entries.append(
+                    f"{cue_index}\n"
+                    f"{_srt_timecode(tl_start)} --> {_srt_timecode(tl_end)}\n"
+                    f"{cue_text}\n"
+                )
+                cue_index += 1
+
+        timeline_offset += seg_duration
+
+    if timeline_entries:
+        timeline_srt_path.write_text("\n".join(timeline_entries), encoding="utf-8")
+        written.insert(0, timeline_srt_path)  # primary output first
+        log.info("Timeline SRT written: %s (%d cues)", timeline_srt_path, cue_index - 1)
 
     return written
+
+
+def _srt_timecode(seconds: float) -> str:
+    """Convert seconds to SRT timecode format: HH:MM:SS,mmm"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def _compute_timeline_duration(segments: list[Segment]) -> float:

@@ -1145,15 +1145,23 @@ def cmd_export_xml(args, cfg: Config):
     print(f"  Duration:    {format_duration(storyboard.total_segments_duration)}")
 
     # Export SRT files alongside FCPXML if transcripts exist
+    timeline_srt = None
     if not getattr(args, "no_srt", False):
         srt_dir = output_path.parent / "subtitles"
         srt_files = export_srt_files(storyboard, ep, srt_dir)
         if srt_files:
-            print(f"  {GREEN}Subtitles:{RESET}  {len(srt_files)} SRT files → {srt_dir}")
+            # First file is the timeline-aligned SRT
+            timeline_srt = srt_files[0]
+            per_clip_count = len(srt_files) - 1
+            print(f"  {GREEN}Subtitles:{RESET}  {timeline_srt.name} (timeline-aligned)")
+            if per_clip_count > 0:
+                print(f"               + {per_clip_count} per-clip SRT files in subtitles/")
 
     print("\n  Import into DaVinci Resolve:")
     print(f"    Timeline:  File \u2192 Import \u2192 Timeline \u2192 {result.name}")
-    print("    Subtitles: File \u2192 Import \u2192 Subtitle  (from subtitles/ folder)")
+    if timeline_srt:
+        print(f"    Subtitles: File \u2192 Import \u2192 Subtitle \u2192 {timeline_srt.name}")
+        print("               (auto-aligned to timeline — no manual sync needed)")
 
 
 def cmd_config(args, cfg: Config):

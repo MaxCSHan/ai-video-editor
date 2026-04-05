@@ -223,7 +223,8 @@ library/
           segments/
         latest -> cut_001/
       my-trip.fcpxml                    # FCPXML for DaVinci Resolve / FCP import
-      subtitles/                        # Per-clip SRT files for subtitle import
+      timeline_subtitles.srt            # Timeline-aligned SRT (synced to FCPXML)
+      subtitles/                        # Per-clip SRT files (source-relative)
         20260330_C0059.srt
 ```
 
@@ -703,15 +704,19 @@ Resolution priority for source files:
 
 ### Subtitle handling (SRT)
 
-DaVinci Resolve cannot import subtitles via FCPXML — it strips caption data on import. Instead, VX exports per-clip `.srt` files alongside the FCPXML for separate import. This keeps subtitles **non-destructive and independently editable**:
+DaVinci Resolve cannot import subtitles via FCPXML — it strips caption data on import. VX exports two types of SRT files to cover different editing workflows:
 
-- SRT files include speaker identification (`Speaker_A: Hello!`)
-- Non-speech audio is marked (`[door slam]`, music notes)
-- Import separately in Resolve: File > Import > Subtitle
+**`timeline_subtitles.srt`** — Timeline-aligned, for initial import. Each transcript cue is remapped from its source clip timestamp to the assembled timeline position. Import once with File > Import > Subtitle and subtitles land in sync with the edit. **Caveat:** If you adjust cut points or reorder clips in Resolve, these timecodes become stale. Re-export from VX after storyboard changes, or manually adjust in Resolve's subtitle editor.
+
+**`subtitles/{clip_id}.srt`** — Per-clip, source-relative. These use the original clip timestamps and stay valid regardless of timeline edits. Useful as reference when editing individual clips, or for re-generating timeline subtitles after changes.
+
+Both formats include:
+- Speaker identification (`Max: Hello!`)
+- Non-speech audio markers (`[door slam]`, `♪ music ♪`)
+- Only cues within each segment's in/out window (timeline SRT)
 - Fully editable in Resolve's subtitle editor after import
-- Requires transcripts: run `vx transcribe` before exporting
 
-Use `--no-srt` to skip subtitle export if you don't need them.
+Requires transcripts: run `vx transcribe` before exporting. Use `--no-srt` to skip subtitle export.
 
 ### Usage
 
@@ -733,8 +738,9 @@ vx export-xml my-trip --output ~/Desktop/edit.fcpxml --no-srt
 
 1. **Import media first**: File > Import > Media — add your source clips to the Media Pool
 2. **Import timeline**: File > Import > Timeline > `project.fcpxml` — creates timeline with all cuts
-3. **Import subtitles** (optional): File > Import > Subtitle — add `.srt` files from `subtitles/`
+3. **Import subtitles** (optional): File > Import > Subtitle > `timeline_subtitles.srt` — lands in sync with the edit
 4. **Edit freely**: All in/out points, transitions, and audio levels are fully adjustable
+5. **After major re-edits**: If you significantly change cut points in Resolve, the timeline SRT will drift. Either adjust subtitles manually in Resolve's subtitle editor, or re-run `vx export-xml` after updating the storyboard and re-import
 
 ### Technical notes
 
