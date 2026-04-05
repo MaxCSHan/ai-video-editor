@@ -53,6 +53,14 @@ class EvalReport:
     clips_discarded_explicitly: int = 0
     estimated_duration_sec: float = 0.0
 
+    # Speech cut safety
+    speech_cut_safety_rate: float = 1.0
+    unsafe_cuts: list[dict] = field(default_factory=list)
+
+    # Aggregated scores (0.0-1.0)
+    structural_completeness_score: float = 0.0
+    coverage_score: float = 0.0
+
     def constraint_satisfaction_rate(self) -> float:
         """Fraction of constraints satisfied (0.0-1.0)."""
         if not self.constraints:
@@ -239,10 +247,103 @@ def score_timestamp_precision(
     return total, valid, clamped, invalid_clips
 
 
+def score_structural_completeness(storyboard) -> float:
+    """Score 0.0-1.0 for structural completeness of a storyboard."""
+    checks = [
+        bool(getattr(storyboard, "editorial_reasoning", "") and
+             len(getattr(storyboard, "editorial_reasoning", "")) > 50),
+        bool(getattr(storyboard, "story_arc", [])),
+        bool(getattr(storyboard, "cast", [])),
+        bool(getattr(storyboard, "discarded", [])),
+        len([s.index for s in storyboard.segments]) == len(
+            set(s.index for s in storyboard.segments)
+        ),  # no duplicate indices
+    ]
+    return sum(checks) / len(checks) if checks else 1.0
+
+
+def score_coverage(storyboard, clip_reviews: list[dict]) -> float:
+    """Score 0.0-1.0 for clip coverage (used + explicitly discarded / total)."""
+    total = len(clip_reviews)
+    if total == 0:
+        return 1.0
+    used = len({s.clip_id for s in storyboard.segments})
+    discarded = len(getattr(storyboard, "discarded", []))
+    return min(1.0, (used + discarded) / total)
+
+
+def score_speech_cut_safety(
+    storyboard,
+    transcripts_by_clip: dict[str, list[dict]],
+) -> tuple[float, list[dict]]:
+    """Check that segment out-points don't fall mid-sentence.
+
+    Args:
+        storyboard: EditorialStoryboard with segments
+        transcripts_by_clip: {clip_id: [{start, end, text, type, ...}, ...]}
+
+    Returns:
+        (safety_rate 0.0-1.0, list of unsafe cuts with details)
+    """
+    if not storyboard.segments:
+        return 1.0, []
+
+    safe_count = 0
+    unsafe_cuts = []
+
+    for seg in storyboard.segments:
+        transcript_entries = transcripts_by_clip.get(seg.clip_id, [])
+        if not transcript_entries:
+            safe_count += 1  # no transcript = can't check
+            continue
+
+        # Find speech entries near the out-point
+        cut_time = seg.out_sec
+        tolerance = 0.5  # seconds
+
+        speech_at_cut = None
+        for entry in transcript_entries:
+            if entry.get("type", "speech") != "speech":
+                continue
+            e_start = entry.get("start", 0)
+            e_end = entry.get("end", 0)
+            # Speech is active at cut point
+            if e_start <= cut_time <= e_end + tolerance:
+                speech_at_cut = entry
+                break
+
+        if speech_at_cut is None:
+            safe_count += 1  # no speech at cut point
+            continue
+
+        # Check if cut is near a sentence boundary
+        text = speech_at_cut.get("text", "").strip()
+        e_end = speech_at_cut.get("end", 0)
+
+        # Safe if: cut is at or after the end of the speech entry,
+        # or the text ends with sentence-ending punctuation
+        if cut_time >= e_end - tolerance:
+            safe_count += 1
+        elif text and text[-1] in ".!?":
+            safe_count += 1
+        else:
+            unsafe_cuts.append({
+                "segment_index": seg.index,
+                "clip_id": seg.clip_id,
+                "cut_time": cut_time,
+                "speech_text": text[:80],
+                "speech_end": e_end,
+            })
+
+    rate = safe_count / len(storyboard.segments)
+    return rate, unsafe_cuts
+
+
 def score_storyboard(
     storyboard,
     clip_reviews: list[dict],
     user_context: dict | None = None,
+    transcripts_by_clip: dict[str, list[dict]] | None = None,
 ) -> EvalReport:
     """Comprehensive evaluation of a storyboard against reviews and constraints.
 
@@ -279,5 +380,15 @@ def score_storyboard(
     report.clips_used = len({s.clip_id for s in storyboard.segments})
     report.clips_discarded_explicitly = len(getattr(storyboard, "discarded", []))
     report.estimated_duration_sec = getattr(storyboard, "estimated_duration_sec", 0)
+
+    # Aggregated scores
+    report.structural_completeness_score = score_structural_completeness(storyboard)
+    report.coverage_score = score_coverage(storyboard, clip_reviews)
+
+    # Speech cut safety (requires transcripts)
+    if transcripts_by_clip:
+        rate, unsafe = score_speech_cut_safety(storyboard, transcripts_by_clip)
+        report.speech_cut_safety_rate = rate
+        report.unsafe_cuts = unsafe
 
     return report

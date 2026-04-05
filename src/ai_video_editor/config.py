@@ -244,11 +244,60 @@ class EditorialProjectPaths:
 
 
 @dataclass
+class ReviewConfig:
+    """Configuration for the Editorial Director review loop."""
+
+    enabled: bool = True
+    model: str = "gemini-2.5-flash"
+    max_turns: int = 15
+    max_fixes: int = 10
+    max_review_cost_usd: float = 0.50
+    wall_clock_timeout_sec: float = 180.0
+    human_checkpoint_on_uncertainty: bool = True
+
+
+@dataclass
+class ReviewBudget:
+    """Mutable budget tracker for a single review session."""
+
+    max_turns: int = 15
+    max_fixes: int = 10
+    max_cost_usd: float = 0.50
+    turns_used: int = 0
+    fixes_used: int = 0
+    cost_used_usd: float = 0.0
+
+    def can_continue(self) -> bool:
+        return (
+            self.turns_used < self.max_turns
+            and self.fixes_used < self.max_fixes
+            and self.cost_used_usd < self.max_cost_usd
+        )
+
+    def remaining_summary(self) -> str:
+        """Injected into system prompt so agent sees its budget."""
+        return (
+            f"Budget: {self.max_turns - self.turns_used} turns, "
+            f"{self.max_fixes - self.fixes_used} fixes, "
+            f"${self.max_cost_usd - self.cost_used_usd:.3f} remaining"
+        )
+
+    @classmethod
+    def from_config(cls, cfg: "ReviewConfig") -> "ReviewBudget":
+        return cls(
+            max_turns=cfg.max_turns,
+            max_fixes=cfg.max_fixes,
+            max_cost_usd=cfg.max_review_cost_usd,
+        )
+
+
+@dataclass
 class Config:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     transcribe: TranscribeConfig = field(default_factory=TranscribeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
     library_dir: Path = field(default_factory=lambda: LIBRARY_DIR)
 
     def project(self, name: str) -> ProjectPaths:

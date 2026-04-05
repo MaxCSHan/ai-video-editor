@@ -229,6 +229,8 @@ The rough cut must be **good enough to share directly** for everyday users who w
 ```
 Phase 0: Quality Foundation
     ↓
+Phase 0.5: Editorial Director (AI Self-Review Loop)
+    ↓
 Phase 1: B-Roll Lanes & Multi-Track Video
     ↓
 Phase 2: Music Integration
@@ -260,6 +262,33 @@ Each phase has explicit prerequisites and exit criteria. The phase gate rule: **
 - [ ] **Real-world testing** — Test with diverse footage types (indoor, outdoor, action, talking head), 30+ clip projects, and both Gemini and Claude providers end-to-end.
 
 **Exit criteria**: Split pipeline is default. Eval baseline established across all library projects. MusicCue is populated with direction data. Editorial reasoning visible in preview.
+
+---
+
+### Phase 0.5: Editorial Director (AI Self-Review Loop)
+
+**Goal**: Add a tool-using ReAct agent that reviews, critiques, and iteratively refines storyboard outputs with multimodal verification. The director sees the edit visually (contact strip thumbnails), cross-checks transcripts against images, spots mid-sentence cuts, and applies targeted segment-level fixes — not full regeneration.
+
+**User impact**: Storyboards are automatically quality-checked before the user sees them. Mid-sentence cuts, constraint violations, transcript mismatches, and pacing problems are caught and fixed. The rough cut is closer to "good enough to share" on the first try.
+
+**Prerequisites**: Phase 0 complete (eval baseline established, split pipeline default).
+
+**Deliverables**:
+
+- [ ] **Review rubric** — 7 dimensions: constraint satisfaction, timestamp precision, structural completeness, speech cut safety (computable), narrative flow, segment coherence, transcription coherence (agent-judged via multimodal LLM)
+- [ ] **Director tools** — 8 tools for the agent: `screenshot_segment` (2x2 thumbnail grid), `get_transcript_excerpt`, `get_clip_review`, `run_eval_check` (inspect); `apply_segment_fix`, `delete_segment`, `reorder_segments` (fix); `finalize_review` (control)
+- [ ] **Contact strip** — One midpoint thumbnail per segment composited into a single overview image. Always-on multimodal (cost: ~$0.001 per review via Gemini Flash)
+- [ ] **Cross-modal transcript verification** — Agent sees thumbnails alongside transcript text to spot speaker misattribution, content mismatches, and hallucinated dialogue
+- [ ] **Speech cut safety** — Computable check that segment boundaries don't cut mid-sentence (cross-reference transcripts with cut points)
+- [ ] **Agent harness** — Tool-using loop with budget tracking (max turns, max fixes, max cost), micro-compact context management, regression protection on fixes, model-controlled termination
+- [ ] **CLI flags** — `--no-review`, `--review-budget`, `--review-max-turns`
+- [ ] **TUI progress** — Per-turn display showing what the director is inspecting and fixing
+
+**Cost**: ~$0.02–0.06 per project (5-15% of pipeline cost). Eliminates $0.10–0.50 of manual re-runs.
+
+**Design doc**: `docs/design-editorial-director.md`
+
+**Exit criteria**: Director completes review in ≤15 turns on all library projects. Speech cut safety catches known mid-sentence cuts. Cross-modal verification catches injected transcript mismatches. Cost stays within $0.06 per project.
 
 ---
 

@@ -462,6 +462,59 @@ class MonologuePlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Editorial Director: review loop models
+# ---------------------------------------------------------------------------
+
+
+class SegmentIssue(BaseModel):
+    """A specific problem found during editorial review."""
+
+    segment_index: int = Field(description="Which segment has the issue (-1 for global)")
+    dimension: str = Field(
+        description="Which rubric dimension flagged this: constraint_satisfaction, "
+        "timestamp_precision, structural_completeness, speech_cut_safety, "
+        "narrative_flow, segment_coherence, transcription_coherence"
+    )
+    severity: str = Field(description="critical | warning | suggestion")
+    description: str = Field(description="Human-readable description of the problem")
+    suggested_fix: str = Field(default="", description="What the fix should look like")
+
+
+class ReviewVerdict(BaseModel):
+    """Result of a single review assessment."""
+
+    passed: bool = Field(description="Whether the storyboard meets the quality bar")
+    scores: dict[str, float] = Field(
+        default={}, description="Dimension name → score (0.0-1.0 for computable, 0-2 for LLM)"
+    )
+    issues: list[SegmentIssue] = Field(default=[], description="All issues found")
+    summary: str = Field(default="", description="Agent's editorial assessment")
+
+
+class ReviewIteration(BaseModel):
+    """Record of a single iteration in the review loop."""
+
+    turn: int
+    tool_name: str = ""
+    tool_args: dict = {}
+    result_summary: str = ""
+    cost_usd: float = 0.0
+    duration_sec: float = 0.0
+
+
+class ReviewLog(BaseModel):
+    """Full audit trail of an editorial review session."""
+
+    iterations: list[ReviewIteration] = Field(default=[])
+    final_verdict: ReviewVerdict | None = None
+    total_turns: int = 0
+    total_fixes: int = 0
+    total_cost_usd: float = 0.0
+    total_duration_sec: float = 0.0
+    convergence_reason: str = ""  # "finalized" | "budget" | "timeout" | "no_tool_calls"
+
+
+# ---------------------------------------------------------------------------
 # Versioning: artifact metadata and composition
 # ---------------------------------------------------------------------------
 
