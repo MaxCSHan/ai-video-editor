@@ -85,29 +85,6 @@
 - [x] Short segment warnings (<0.5s)
 - [x] Warnings section in HTML preview
 
-### Housekeeping
-- [x] `ingest_source()` uses symlink instead of copying 4K files
-- [x] Original source path stored in clip metadata (`manifest.json`); `rough_cut.py` resolves from manifest with legacy fallback
-- [x] Per-clip `storyboard/` and `exports/` dirs no longer created — `ProjectPaths.ensure_dirs()` trimmed to per-clip concerns only
-- [x] Consolidated HTML preview into `exports/vN/preview.html` — removed duplicate from `storyboard/`
-- [x] Cut writes into the analyze version's export dir (derived from storyboard JSON filename) instead of maintaining a separate version counter
-- [x] `manifest.json` enriched with format metadata: rotation, orientation, aspect ratio, resolution class, FPS (float), HDR flag
-- [x] `OutputFormat` persisted in `project.json` — rough cut loads automatically, backward-compatible default when absent
-
----
-
-## In Progress
-
-### Real-World Testing
-- [ ] Test with diverse footage types (indoor, outdoor, action, talking head)
-- [ ] Test with 30+ clips to validate scaling
-- [ ] Test with both Gemini and Claude providers end-to-end
-- [ ] Validate proxy quality is sufficient for accurate AI scene understanding
-
----
-
-## Planned — Near Term
-
 ### Audio Transcription
 - [x] Dual-provider transcription: mlx-whisper (local, Apple Silicon) and Gemini (cloud, structured output)
 - [x] Gemini transcription with speaker identification, sound event detection, visual context from proxy video
@@ -161,18 +138,138 @@
 - [x] Manual briefing (non-Gemini path) runs after Phase 1 (depends on review data for smart questions)
 - [x] Force re-run option for cached Phase 1 reviews in TUI re-analyze flow
 
-### Multi-Track Audio Assembly
-- [ ] Parse `audio_note` field from EDL segments (already in the data model)
-- [ ] Support voice-over tracks: one clip's audio continues while visuals switch to B-roll
-- [ ] Hard constraint: when returning to audio source clip's own visuals, audio and video must be frame-aligned
-- [ ] ffmpeg filter_complex-based assembly for multi-track
-- [ ] `vx cut --multi-track` opt-in flag
-- [ ] Background music track mixing
-
 ### Improved Phase 1 (Holistic Context)
 - [x] Transcripts injected into Phase 1 prompt (what was said, when, by whom)
 - [x] Pass user_context.json into each Phase 1 review (filmmaker's intent, people names)
 - [x] Briefing Q&A context formatted with full question text for clean LLM consumption
+
+### DaVinci Resolve / NLE Integration
+- [x] FCPXML v1.9 export for DaVinci Resolve and Final Cut Pro (`fcpxml_export.py`)
+- [x] Embedded timecode probing (Sony XAVC tmcd track → asset `start` attribute)
+- [x] Auto-detect timeline format from dominant source clip resolution/fps
+- [x] All manifest clips exported as assets (full raw footage in Media Pool)
+- [x] Timeline-aligned SRT subtitle export alongside FCPXML
+- [x] Per-clip SRT files for source-relative reference
+- [x] TUI integration ("Export to DaVinci Resolve") with error handling and progress feedback
+- [x] CLI: `vx export-xml` with `--storyboard`, `--composition`, `--output`, `--no-srt` flags
+- [x] 10 documented pitfalls in `docs/design_fcpxml_export.md` (Resolve 20 compatibility)
+
+### Housekeeping
+- [x] `ingest_source()` uses symlink instead of copying 4K files
+- [x] Original source path stored in clip metadata (`manifest.json`); `rough_cut.py` resolves from manifest with legacy fallback
+- [x] Per-clip `storyboard/` and `exports/` dirs no longer created — `ProjectPaths.ensure_dirs()` trimmed to per-clip concerns only
+- [x] Consolidated HTML preview into `exports/vN/preview.html` — removed duplicate from `storyboard/`
+- [x] Cut writes into the analyze version's export dir (derived from storyboard JSON filename) instead of maintaining a separate version counter
+- [x] `manifest.json` enriched with format metadata: rotation, orientation, aspect ratio, resolution class, FPS (float), HDR flag
+- [x] `OutputFormat` persisted in `project.json` — rough cut loads automatically, backward-compatible default when absent
+
+---
+
+## In Progress
+
+### Real-World Testing
+- [ ] Test with diverse footage types (indoor, outdoor, action, talking head)
+- [ ] Test with 30+ clips to validate scaling
+- [ ] Test with both Gemini and Claude providers end-to-end
+- [ ] Validate proxy quality is sufficient for accurate AI scene understanding
+
+### Storyboard Quality & Evaluation
+- [x] Evaluation harness for storyboard quality scoring
+- [ ] A/B testing framework for prompt changes
+- [ ] Regression test suite across project types
+
+---
+
+## Planned — Near Term
+
+### Music-Aware Storyboard Planning
+
+The current `MusicCue` model exists but is **never populated by the LLM** — it's a structural artifact. The LLM prompt asks about music direction but has no output fields to capture it. This section makes music a first-class citizen in editorial planning.
+
+**Phase 1: Music library ingest & analysis**
+- [ ] Music library folder specification in project config (or briefing)
+- [ ] Audio analysis per track: BPM detection, key estimation, mood classification, duration, waveform energy curve
+- [ ] Store music metadata in `manifest.json` or dedicated `music_manifest.json`
+- [ ] `vx music` CLI command to manage music library per project
+
+**Phase 2: Music-informed storyboard construction**
+- [ ] Inject music library metadata into Phase 2 prompt (available tracks with BPM, mood, duration)
+- [ ] LLM selects music tracks and assigns them to story arc sections
+- [ ] Populate `MusicCue` with timeline-anchored fields: `start_sec`, `end_sec`, `asset_path`, `crossfade_sec`
+- [ ] LLM aligns segment durations with musical phrases (e.g., 4-bar boundaries at given BPM)
+- [ ] Beat-aware cut points: suggest segment transitions on downbeats when `audio_note="music_bed"`
+
+**Phase 3: Music in FCPXML export**
+- [ ] Export music tracks as audio-only `<asset>` elements (no `hasVideo`)
+- [ ] Place music clips on a dedicated audio lane (nested `<asset-clip>` with `lane` attribute)
+- [ ] Volume automation keyframes for fade-in/out and ducking under dialogue
+- [ ] Crossfade between music cues at section boundaries
+
+**Data model changes needed:**
+```
+MusicCue (enhanced):
+  + start_sec: float          # Timeline position where music starts
+  + end_sec: float            # Timeline position where music ends
+  + asset_path: str           # Path to music file
+  + crossfade_sec: float      # Transition duration to next cue
+  + volume_db: float          # Target volume level
+  + duck_under_dialogue: bool # Auto-lower when speech detected
+
+MusicTrackMeta (new):
+  + path: str
+  + duration_sec: float
+  + bpm: float | None
+  + key: str | None           # e.g., "C major", "A minor"
+  + mood: list[str]           # e.g., ["upbeat", "energetic"]
+  + energy_curve: list[float] # Normalized energy per second
+```
+
+### B-Roll & Multi-Track Video
+
+The current model labels segments with `purpose="b_roll"` but places them on the same single track as primary footage. Real B-roll should be on a separate video lane that overlays the primary track — exactly how DaVinci Resolve handles it with `lane` attributes on nested `<asset-clip>` elements.
+
+**Phase 1: Track assignment in storyboard model**
+- [ ] Add `lane: int = 0` to `Segment` model (0 = primary spine, 1+ = overlay lanes)
+- [ ] Add `opacity: float = 1.0` for compositing control
+- [ ] LLM assigns B-roll segments to lane 1 (overlay) instead of lane 0 (primary)
+- [ ] Primary track maintains dialogue continuity; B-roll lane handles visual variety
+
+**Phase 2: Multi-track FCPXML export**
+- [ ] B-roll segments exported as nested `<asset-clip>` inside the primary clip's element, with `lane="1"`
+- [ ] Support `<adjust-conform type="fit"/>` for resolution mismatches between primary and B-roll
+- [ ] Resolve imports B-roll on V2 track, freely adjustable
+
+**Phase 3: J-cut / L-cut audio**
+- [ ] Add `audioStart` / `audioDuration` attributes to asset-clips for decoupled audio-video timing
+- [ ] J-cut: next clip's audio starts before its video (audio leads)
+- [ ] L-cut: current clip's audio continues over next clip's video (audio trails)
+- [ ] LLM specifies J/L-cut timing in segments with `transition="j_cut"` or `transition="l_cut"`
+
+**Data model changes needed:**
+```
+Segment (enhanced):
+  + lane: int = 0             # 0 = primary spine, 1+ = overlay
+  + opacity: float = 1.0      # For compositing (B-roll overlay transparency)
+  + audio_offset_sec: float = 0.0  # For J/L-cut: negative = audio leads, positive = audio trails
+```
+
+### FCPXML Export Versioning
+
+- [ ] Versioned exports: `exports/fcpxml/editorial_gemini_v1.fcpxml` with auto-increment
+- [ ] `_latest` symlink for convenience
+- [ ] `.meta.json` sidecar: storyboard version, timestamp, segment count, clip count, timeline duration, format
+- [ ] Reuse `begin_version()` / `commit_version()` from `versioning.py`
+
+### FCPXML Round-Trip (Re-Import from Resolve)
+
+Enable users to edit in Resolve and bring changes back to VX for AI-assisted iteration.
+
+- [ ] Parse FCPXML v1.9 files exported from DaVinci Resolve
+- [ ] Detect changes vs original export: added/removed/reordered clips, adjusted in/out points, new transitions
+- [ ] Generate a diff report: "You trimmed segment 3 by 2s, removed segment 7, added a new clip from C0004"
+- [ ] Update `EditorialStoryboard` from the imported FCPXML (user-confirmed)
+- [ ] Enable "AI re-review": LLM sees user's Resolve edits and suggests further improvements
+- [ ] Track export → Resolve edit → re-import as a versioned workflow with lineage
 
 ### Transcription & Timestamp Precision
 - [ ] Improve transcription timestamp accuracy (chunked processing, cross-validation)
@@ -184,16 +281,25 @@
 - [ ] Add/remove segments from the UI
 - [ ] Side-by-side comparison of different versions
 - [ ] Waveform visualization for audio-driven editing decisions
-- [ ] Touch/mobile support for iPad preview
+- [ ] Multi-track timeline preview (primary + B-roll lanes)
+- [ ] Music track visualization with beat markers
 
 ---
 
 ## Planned — Medium Term
 
-### DaVinci Resolve / NLE Integration
-- [ ] Export EDL as DaVinci Resolve XML (FCPXML or OTIO)
-- [ ] Export as FFmpeg concat script for reproducible builds
-- [ ] Import user adjustments from NLE back into VX
+### Multi-Track Audio Assembly
+
+Builds on the music-aware storyboard and B-roll track foundations. Goal: produce a multi-track rough cut with properly mixed audio, not just a single-track concat.
+
+- [ ] Audio lane structure: A1 (dialogue), A2 (music), A3 (ambient/SFX)
+- [ ] Parse `audio_note` per segment to route audio: `preserve_dialogue` → A1, `music_bed` → duck A1 under A2, `ambient` → A3
+- [ ] ffmpeg `filter_complex` assembly for multi-track audio mixing
+- [ ] Volume automation from `MusicCue` data (fade-in/out, ducking curves)
+- [ ] Voice-over tracks: one clip's audio continues while visuals switch to B-roll
+- [ ] Hard constraint: when returning to audio source clip's own visuals, audio and video must be frame-aligned
+- [ ] Multi-track FCPXML export with audio lanes matching the rough cut mix
+- [ ] `vx cut --multi-track` opt-in flag
 
 ### Smart Clip Selection
 - [x] Auto-detect iPhone Live Photo .mov files (short duration + 4:3 heuristic) with optional filtering
@@ -210,37 +316,40 @@
 ### Template System
 - [ ] Predefined editing templates: "travel vlog", "event recap", "day-in-the-life"
 - [ ] Templates define: pacing rules, typical arc structure, music placement patterns
+- [ ] Music mood profiles per template (which energy curves work for which template)
 - [ ] User-created custom templates saved per project or globally
 
 ---
 
 ## Planned — Long Term
 
-### Automated Music
-- [ ] Mood-based music suggestion from free-license libraries
-- [ ] Auto-sync cuts to beat (beat detection + segment alignment)
-- [ ] Fade in/out and ducking automation
+### Automated Music Selection & Sync
+- [ ] Mood-based music suggestion from free-license libraries (matching footage energy to track mood)
+- [ ] Auto-sync cuts to beat (beat detection + segment boundary alignment)
+- [ ] Fade in/out and ducking automation (keyframe generation from speech detection)
+- [ ] Multi-section music arrangement: different tracks per story arc section with crossfades
 
 ### Multi-Camera / Multi-Source
 - [ ] Sync clips from multiple cameras by audio fingerprinting
 - [ ] Phone + action cam + drone footage unified timeline
-- [ ] Split-screen / picture-in-picture support in EDL
+- [ ] Split-screen / picture-in-picture support via lane-based compositing
 
 ### AI Iteration Loop
 - [ ] User feedback on rough cut → AI adjusts editorial plan
 - [ ] "Make the intro shorter", "Use more of clip 5" as natural language commands
 - [ ] Conversational editing: chat with the AI editor about the cut
+- [ ] Integrate with FCPXML round-trip: user edits in Resolve, AI reviews and suggests improvements
 
 ### Cloud & Collaboration
 - [ ] Remote project storage (S3/GCS)
 - [ ] Share preview links (HTML preview as hosted page)
 - [ ] Multi-user review: comments/annotations on timeline segments
 
-### Full NLE
-- [ ] Transition effects (dissolves, wipes) applied in ffmpeg assembly
-- [ ] Speed ramps (slow motion, time lapse) from EDL metadata
-- [ ] Basic color grading presets
-- [ ] Text overlay rendering (titles, lower thirds, captions)
+### Advanced NLE Features
+- [ ] Speed ramps (slow motion, time lapse) via FCPXML `<timeMap>` (reference: mazsola2k implementation)
+- [ ] Basic color grading presets (LUT references in FCPXML)
+- [ ] Watermark overlay on dedicated video lane with `<adjust-blend>`
+- [ ] Text overlay rendering (titles, lower thirds, captions) — burn-in via ffmpeg or FCPXML text elements
 
 ---
 
@@ -252,14 +361,39 @@
 3. **Cache everything**: Preprocessing, transcription, Phase 1 reviews, concat bundles, Gemini File API URIs. Re-runs are fast.
 4. **Context flows downstream**: Briefing → Transcription → Phase 1 → Phase 2 → Phase 3. Each stage benefits from all prior context.
 5. **Version everything**: Every LLM output is versioned. Compare, rollback, iterate.
-6. **Human-in-the-loop**: AI proposes, user adjusts via interactive preview, then execute.
+6. **Human-in-the-loop**: AI proposes, user adjusts via interactive preview or DaVinci Resolve, then execute.
 7. **No build step**: HTML preview is self-contained. No React, no bundling, opens in any browser.
 8. **Cost visibility**: Dry-run estimation before committing, per-phase cost breakdown in status, cumulative tracking across runs.
 9. **Respect API limits**: Proxy concatenation bypasses Gemini's 10-video limit. Chronological ordering aids editorial judgment.
+10. **NLE-native output**: FCPXML is the bridge between AI-assembled storyboards and professional editing. Design data models with NLE export in mind — every editorial concept should map cleanly to FCPXML elements.
+
+### Data Model Evolution Path
+
+The `EditorialStoryboard` model needs to evolve to support multi-track workflows. The progression:
+
+```
+Current: Single-track linear timeline
+  Segment: clip_id, in_sec, out_sec, purpose, transition, audio_note
+
+Phase 1: B-roll overlay support
+  Segment: + lane (0=primary, 1+=overlay), + opacity
+
+Phase 2: Music-aware planning
+  MusicCue: + start_sec, end_sec, asset_path, crossfade_sec, volume_db
+  MusicTrackMeta: BPM, key, mood, duration, energy_curve
+
+Phase 3: Multi-track audio
+  Segment: + audio_offset_sec (J/L-cut timing)
+  AudioTrack: lane, source_type, volume_automation
+
+Phase 4: Full NLE interop
+  SpeedRamp, ColorGrade, TextOverlay models
+  FCPXML round-trip (import + diff + re-export)
+```
 
 ### Tech Stack
 - **Python 3.11+** with Pydantic for data models
-- **ffmpeg/ffprobe** for all video processing
+- **ffmpeg/ffprobe** for all video processing (+ audio analysis for music BPM/energy)
 - **questionary** (prompt_toolkit) for interactive TUI
 - **Gemini API** (structured output, native video) as primary provider
 - **Claude API** (frame-based analysis) as alternative provider
