@@ -10,7 +10,6 @@ Usage:
 
 import json
 import logging
-import urllib.parse
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -37,31 +36,109 @@ AUDIO_VOLUME_MAP: dict[str, str | None] = {
 }
 
 
+# Standard NTSC frame rates — float fps values don't map to exact fractions,
+# so we detect common rates and use the industry-standard representations
+# that DaVinci Resolve and Final Cut Pro expect.
+_NTSC_FPS_MAP: dict[str, Fraction] = {
+    "23.976": Fraction(24000, 1001),
+    "23.98": Fraction(24000, 1001),
+    "29.97": Fraction(30000, 1001),
+    "59.94": Fraction(60000, 1001),
+}
+
+_FRAC_LIMIT = 1_000_000
+
+
+def _fps_to_fraction(fps: float) -> Fraction:
+    """Convert fps float to exact Fraction, using NTSC lookup for common rates."""
+    key = f"{fps:.3f}".rstrip("0").rstrip(".")
+    if key in _NTSC_FPS_MAP:
+        return _NTSC_FPS_MAP[key]
+    # Also check 2-decimal form
+    key2 = f"{fps:.2f}".rstrip("0").rstrip(".")
+    if key2 in _NTSC_FPS_MAP:
+        return _NTSC_FPS_MAP[key2]
+    return Fraction(fps).limit_denominator(_FRAC_LIMIT)
+
+
 def _sec_to_frac(seconds: float, fps: float) -> str:
     """Convert float seconds to FCPXML rational fraction string.
+
+    Uses the fps timebase for frame-aligned fractions that NLEs expect.
 
     Examples:
         _sec_to_frac(10.0, 29.97) -> "300300/30000s"
         _sec_to_frac(0.0, 29.97) -> "0/30000s"
     """
-    frac = Fraction(seconds).limit_denominator(1_000_000)
-    # Express in terms of the fps timebase for cleaner fractions
-    fps_frac = Fraction(fps).limit_denominator(1_000_000)
-    # Frame duration denominator becomes our timebase
+    if seconds == 0.0:
+        fps_frac = _fps_to_fraction(fps)
+        # Use the fps denominator as our timebase for consistency
+        frame_dur = Fraction(1) / fps_frac
+        return f"0/{frame_dur.limit_denominator(_FRAC_LIMIT).denominator}s"
+
+    frac = Fraction(seconds).limit_denominator(_FRAC_LIMIT)
+    fps_frac = _fps_to_fraction(fps)
     frame_dur = Fraction(1) / fps_frac
-    # Convert seconds to timebase units
-    frames = frac / frame_dur
-    frames = frames.limit_denominator(1_000_000)
-    # Result: (frames * frame_dur) expressed as num/den s
-    result = (frames * frame_dur).limit_denominator(1_000_000)
+    # Snap to nearest frame boundary
+    frames = round(float(frac / frame_dur))
+    result = (Fraction(frames) * frame_dur).limit_denominator(_FRAC_LIMIT)
     return f"{result.numerator}/{result.denominator}s"
 
 
 def _to_file_uri(path: Path) -> str:
-    """Convert an absolute path to a percent-encoded file:/// URI."""
-    abs_path = str(path.resolve())
-    encoded = urllib.parse.quote(abs_path, safe="/")
-    return f"file://{encoded}"
+    """Convert an absolute path to a file:/// URI using Python's native method."""
+    return path.resolve().as_uri()
+
+
+def _probe_start_timecode(source_path: Path, fps: float) -> str | None:
+    """Read the embedded start timecode from a video file and convert to FCPXML fraction.
+
+    Sony XAVC files embed timecodes like 19:13:13:04 in a tmcd track.
+    DaVinci Resolve uses this to match media — the asset `start` attribute must match.
+    Returns None if no timecode is found (iPhone MOVs, etc.).
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_entries", "stream_tags=timecode",
+                str(source_path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+        for stream in data.get("streams", []):
+            tc = stream.get("tags", {}).get("timecode")
+            if tc:
+                return _timecode_to_frac(tc, fps)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        pass
+    return None
+
+
+def _timecode_to_frac(timecode: str, fps: float) -> str:
+    """Convert HH:MM:SS:FF timecode to FCPXML rational fraction string.
+
+    Example: "19:13:13:04" at 23.976fps -> "415574159/6000s"
+    """
+    parts = timecode.replace(";", ":").split(":")
+    if len(parts) != 4:
+        return "0/1s"
+    h, m, s, f = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+
+    # NDF timecode: integer fps (24 for 23.976, 30 for 29.97)
+    fps_frac = _fps_to_fraction(fps)
+    fps_int = round(float(fps_frac))  # 24 for 23.976, 30 for 29.97
+
+    total_frames = h * 3600 * fps_int + m * 60 * fps_int + s * fps_int + f
+    frame_dur = Fraction(1) / fps_frac
+    result = (Fraction(total_frames) * frame_dur).limit_denominator(_FRAC_LIMIT)
+    return f"{result.numerator}/{result.denominator}s"
 
 
 def _build_source_map(editorial_paths: EditorialProjectPaths) -> dict[str, Path]:
@@ -110,15 +187,37 @@ def _read_manifest_clips(editorial_paths: EditorialProjectPaths) -> dict[str, di
 
 def _frame_duration_str(fps: float) -> str:
     """Compute FCPXML frameDuration from fps (e.g. 29.97 -> '1001/30000s')."""
-    fps_frac = Fraction(fps).limit_denominator(1_000_000)
-    frame_dur = (Fraction(1) / fps_frac).limit_denominator(1_000_000)
+    fps_frac = _fps_to_fraction(fps)
+    frame_dur = (Fraction(1) / fps_frac).limit_denominator(_FRAC_LIMIT)
     return f"{frame_dur.numerator}/{frame_dur.denominator}s"
 
 
 def _format_name(width: int, height: int, fps: float) -> str:
     """Generate a format name string like 'FFVideoFormat1920x1080p2997'."""
-    fps_int = str(fps).replace(".", "")
-    return f"FFVideoFormat{width}x{height}p{fps_int}"
+    # Use integer representation: 29.97 -> "2997", 24.0 -> "24", 30.0 -> "30"
+    if fps == int(fps):
+        fps_str = str(int(fps))
+    else:
+        fps_str = f"{fps:.2f}".replace(".", "")
+    return f"FFVideoFormat{width}x{height}p{fps_str}"
+
+
+def _detect_dominant_format(manifest_clips: dict[str, dict]) -> OutputFormat:
+    """Pick timeline format from the most common resolution + fps across clips."""
+    from collections import Counter
+
+    combos = Counter()
+    for clip in manifest_clips.values():
+        w = clip.get("display_width", clip.get("width", 1920))
+        h = clip.get("display_height", clip.get("height", 1080))
+        fps = clip.get("fps_float", 29.97)
+        combos[(w, h, fps)] += 1
+
+    if not combos:
+        return OutputFormat()
+
+    (w, h, fps), _ = combos.most_common(1)[0]
+    return OutputFormat(width=w, height=h, fps=fps)
 
 
 def export_fcpxml(
@@ -140,23 +239,35 @@ def export_fcpxml(
     Returns:
         The output path written.
     """
-    fmt = output_format or OutputFormat()
     name = project_name or editorial_paths.root.name
 
     source_map = _build_source_map(editorial_paths)
     manifest_clips = _read_manifest_clips(editorial_paths)
 
-    # Collect unique clips used in the storyboard
-    used_clip_ids = list(dict.fromkeys(seg.clip_id for seg in storyboard.segments))
+    # Auto-detect timeline format from the dominant source clip resolution/fps,
+    # since NLE editing should happen at native resolution (not the rough cut's 1080p).
+    if output_format:
+        fmt = output_format
+    elif manifest_clips:
+        fmt = _detect_dominant_format(manifest_clips)
+    else:
+        fmt = OutputFormat()
 
-    # Verify sources exist
+    # Collect ALL clips from manifest — user wants full footage in Media Pool,
+    # not just the clips used in the timeline. Timeline-used clips come first.
+    used_clip_ids = list(dict.fromkeys(seg.clip_id for seg in storyboard.segments))
+    all_manifest_ids = [c["clip_id"] for c in manifest_clips.values()]
+    # Merge: used clips first, then remaining manifest clips
+    all_clip_ids = list(dict.fromkeys(used_clip_ids + all_manifest_ids))
+
+    # Resolve sources for all clips
     clip_sources: dict[str, Path] = {}
-    for clip_id in used_clip_ids:
+    for clip_id in all_clip_ids:
         source = _resolve_clip_source(clip_id, editorial_paths, source_map)
         if source:
             clip_sources[clip_id] = source
-        else:
-            log.warning("Source not found for clip %s — will be skipped in export", clip_id)
+        elif clip_id in used_clip_ids:
+            log.warning("Source not found for clip %s — will be skipped in timeline", clip_id)
 
     # --- Build XML tree ---
     fcpxml = ET.Element("fcpxml", version="1.9")
@@ -184,11 +295,14 @@ def export_fcpxml(
         uid=CROSS_DISSOLVE_UID,
     )
 
-    # Asset elements — one per unique source clip (r2, r3, ...)
+    # Asset elements — one per source clip, ALL clips from manifest (r2, r3, ...)
     asset_id_map: dict[str, str] = {}  # clip_id -> resource id
+    asset_start_map: dict[str, str] = {}  # clip_id -> start timecode fraction
+    asset_fps_map: dict[str, float] = {}  # clip_id -> native fps
+    format_cache: dict[tuple, str] = {}  # (w, h) -> format id
     next_rid = 2
 
-    for clip_id in used_clip_ids:
+    for clip_id in all_clip_ids:
         if clip_id not in clip_sources:
             continue
 
@@ -205,41 +319,58 @@ def export_fcpxml(
         clip_width = clip_meta.get("display_width", clip_meta.get("width", fmt.width))
         clip_height = clip_meta.get("display_height", clip_meta.get("height", fmt.height))
 
-        # Build per-clip format if different from timeline
-        clip_format_id = timeline_format_id
-        if clip_fps != fmt.fps or clip_width != fmt.width or clip_height != fmt.height:
-            clip_format_id = f"r{next_rid}"
-            next_rid += 1
-            ET.SubElement(
-                resources,
-                "format",
-                id=clip_format_id,
-                name=_format_name(clip_width, clip_height, clip_fps),
-                width=str(clip_width),
-                height=str(clip_height),
-                frameDuration=_frame_duration_str(clip_fps),
-            )
+        # Use a single "source media" format for all assets.
+        # DaVinci Resolve detects actual format from the file — per-asset format
+        # declarations with non-matching fps cause media linking failures in Resolve 20.
+        # Following mazsola2k's pattern: use FFVideoFormatRateUndefined for source assets.
+        if (clip_width, clip_height) == (fmt.width, fmt.height):
+            clip_format_id = timeline_format_id
+        else:
+            undef_key = (clip_width, clip_height)
+            if undef_key in format_cache:
+                clip_format_id = format_cache[undef_key]
+            else:
+                clip_format_id = f"r{next_rid}"
+                next_rid += 1
+                format_cache[undef_key] = clip_format_id
+                ET.SubElement(
+                    resources,
+                    "format",
+                    id=clip_format_id,
+                    name="FFVideoFormatRateUndefined",
+                    width=str(clip_width),
+                    height=str(clip_height),
+                    frameDuration=_frame_duration_str(fmt.fps),
+                )
 
         file_uri = _to_file_uri(source_path)
         duration_str = _sec_to_frac(clip_duration, clip_fps) if clip_duration > 0 else "0s"
 
+        # Read embedded timecode (critical for Sony XAVC media linking in Resolve)
+        tc_start = _probe_start_timecode(source_path, clip_fps)
+        start_str = tc_start if tc_start else "0/1s"
+
+        # Match Resolve's own FCPXML export: no src/uid on asset, only media-rep
         asset_attrs = {
             "id": rid,
             "name": source_path.name,
-            "src": file_uri,
-            "start": "0s",
             "duration": duration_str,
-            "hasVideo": "1",
-            "hasAudio": "1",
-            "format": clip_format_id,
             "audioChannels": "2",
+            "start": start_str,
+            "format": clip_format_id,
+            "hasVideo": "1",
             "audioSources": "1",
+            "hasAudio": "1",
         }
         asset_el = ET.SubElement(resources, "asset", **asset_attrs)
         ET.SubElement(asset_el, "media-rep", src=file_uri, kind="original-media")
+        asset_start_map[clip_id] = start_str
+        asset_fps_map[clip_id] = clip_fps
 
-    # --- Project / Sequence / Spine ---
-    project_el = ET.SubElement(fcpxml, "project", name=name)
+    # --- Library / Event / Project / Sequence / Spine ---
+    library_el = ET.SubElement(fcpxml, "library")
+    event_el = ET.SubElement(library_el, "event", name=name)
+    project_el = ET.SubElement(event_el, "project", name=name)
 
     # Compute total timeline duration accounting for transitions
     timeline_duration = _compute_timeline_duration(storyboard.segments)
@@ -287,17 +418,27 @@ def export_fcpxml(
             ET.SubElement(trans_el, "filter-audio", ref=dissolve_effect_id)
 
         # Build asset-clip
-        clip_name = (
-            f"{seg.clip_id.split('_')[-1] if '_' in seg.clip_id else seg.clip_id} — {seg.purpose}"
-        )
+        # `start` must be asset timecode base + segment in_sec offset
+        # (Resolve uses this to find the right frame within the source media)
+        clip_name = clip_sources[seg.clip_id].name
+        asset_base = asset_start_map.get(seg.clip_id, "0/1s")
+        clip_fps = asset_fps_map.get(seg.clip_id, fmt.fps)
+
+        # Parse asset base timecode and add segment in_sec
+        base_parts = asset_base.rstrip("s").split("/")
+        base_frac = Fraction(int(base_parts[0]), int(base_parts[1])) if len(base_parts) == 2 else Fraction(0)
+        in_frac = Fraction(seg.in_sec).limit_denominator(_FRAC_LIMIT)
+        clip_start = (base_frac + in_frac).limit_denominator(_FRAC_LIMIT)
+        clip_start_str = f"{clip_start.numerator}/{clip_start.denominator}s"
+
         clip_el = ET.SubElement(
             spine,
             "asset-clip",
             ref=asset_id_map[seg.clip_id],
             name=clip_name,
             offset=_sec_to_frac(float(timeline_offset), fmt.fps),
-            start=_sec_to_frac(seg.in_sec, fmt.fps),
-            duration=_sec_to_frac(float(seg_duration), fmt.fps),
+            start=clip_start_str,
+            duration=_sec_to_frac(float(seg_duration), clip_fps),
             format=timeline_format_id,
             enabled="1",
             tcFormat="NDF",

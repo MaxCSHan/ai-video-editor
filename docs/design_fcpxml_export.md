@@ -26,14 +26,13 @@ VX currently outputs a rough cut MP4 and an HTML preview. Users who want to fine
 | 1.11 | Edge of compatibility (Resolve 19.1) |
 | 1.12–1.13 | NOT reliably supported — FCP 11 format |
 
-**DaVinci Resolve import quirks:**
+**DaVinci Resolve import quirks (battle-tested with Resolve 20):**
 - Titles, generators, and FCP-specific effects are stripped on import
 - Captions are NOT imported via FCPXML (use separate SRT import)
 - Compound clips work but are fragile — **flatten the timeline instead**
-- Media must exist in Media Pool before importing the XML for best results (though Resolve can auto-detect media paths from `<asset>` URIs)
-- Use absolute `file:///` URIs with percent-encoded paths
 - Use `tcFormat="NDF"` (non-drop-frame) — Resolve's default
 - Mixed frame rates: set Resolve's conform method to "Final Cut Pro X" in project settings
+- Import path: **File > Import > Timeline** (not File > Open or File > Import > Project)
 
 ### Supported Import Formats (DaVinci Resolve 19)
 
@@ -134,7 +133,100 @@ Priority order (from `rough_cut.py:_resolve_clip_source`):
    | `ambient` | `<adjust-volume amount="-6dB"/>` (slightly lower) |
    | `voice_over` | `<adjust-volume amount="-96dB"/>` (mute for VO) |
 
-6. **Segment naming** — clip names include purpose for editor reference: `"C0059 — hook"`, `"C0073 — action"`.
+6. **Segment naming** — asset-clip `name` must match the source filename (see Pitfalls below).
+
+---
+
+## Pitfalls & Lessons Learned (DaVinci Resolve 20)
+
+Hard-won knowledge from debugging FCPXML import failures. These are specific to DaVinci Resolve's FCPXML parser and are NOT documented in Apple's FCPXML reference or Blackmagic's docs.
+
+### 1. Embedded timecodes MUST be in the `start` attribute (critical)
+
+**Symptom:** Resolve imports audio but shows "Media Offline" for video on Sony XAVC clips, while iPhone MOV clips work fine from the same directory.
+
+**Root cause:** Sony cameras embed a running timecode in the `tmcd` track (e.g., `19:13:13:04`). DaVinci Resolve uses the `start` attribute on `<asset>` and `<asset-clip>` to match the media's internal timecode. When we set `start="0/1s"`, Resolve couldn't match the video track (which starts at frame 19:13:13:04), though it could still find the audio track.
+
+**Fix:** Probe each source file with ffprobe for embedded timecodes and convert to FCPXML rational fractions:
+```
+ffprobe -show_entries stream_tags=timecode → "19:13:13:04"
+→ Convert: 19*3600*24 + 13*60*24 + 13*24 + 4 = 1,660,636 frames
+→ At 23.976fps: 1,660,636 * 1001/24000 = 415574159/6000s
+```
+
+The `<asset-clip>` `start` must be the asset's base timecode PLUS the segment's `in_sec` offset.
+
+Files without embedded timecodes (iPhone MOVs) correctly use `start="0/1s"`.
+
+### 2. No `src` or `uid` on `<asset>` — only `<media-rep>`
+
+**Symptom:** Resolve fails to locate media files despite correct `file:///` URIs.
+
+**Root cause:** DaVinci Resolve 20's FCPXML parser reads the file path exclusively from the `<media-rep src="...">` child element, NOT from `src` or `uid` attributes on the `<asset>` element itself. This contradicts the FCPXML 1.9 spec (which documents `src` on `<asset>`) but matches Resolve's own FCPXML export behavior.
+
+**Fix:** Omit `src` and `uid` from `<asset>`. Provide the file URI only via `<media-rep>`:
+```xml
+<!-- WRONG (Resolve ignores these) -->
+<asset id="r1" name="clip.MP4" src="file:///path/to/clip.MP4" uid="file:///path/to/clip.MP4" .../>
+
+<!-- CORRECT (Resolve reads this) -->
+<asset id="r1" name="clip.MP4" ...>
+    <media-rep src="file:///path/to/clip.MP4" kind="original-media"/>
+</asset>
+```
+
+### 3. NTSC frame rates need standard fraction representations
+
+**Symptom:** Resolve shows wrong frame rate or rejects format definitions.
+
+**Root cause:** `Fraction(29.97)` in Python produces `100/2997` (from the float's binary representation), not the standard `1001/30000`. Resolve expects the industry-standard NTSC fractions.
+
+**Fix:** Lookup table for common NTSC rates:
+| Float fps | Standard frameDuration |
+|-----------|----------------------|
+| 23.976 | `1001/24000s` |
+| 29.97 | `1001/30000s` |
+| 59.94 | `1001/60000s` |
+
+### 4. Asset-clip `name` must be the source filename
+
+**Symptom:** Resolve creates "Media Offline" clips in the Media Pool with creative labels (e.g., `"C0003 — establish"`) instead of linking to the source file.
+
+**Root cause:** Resolve uses the `<asset-clip>` `name` attribute for media matching/relinking in the Media Pool. If the name doesn't match the source filename, Resolve can't link the media even when the `ref` correctly points to a valid `<asset>`.
+
+**Fix:** Set `name` on `<asset-clip>` to the actual source filename (e.g., `"20260315162915_C0003.MP4"`), matching the `<asset>` `name`.
+
+### 5. Use `FFVideoFormatRateUndefined` for mixed-fps source assets
+
+**Symptom:** Clips with non-matching fps formats fail to link.
+
+**Root cause:** When each clip gets its own `<format>` element with a specific fps (e.g., 23.976fps for Sony, 30fps for iPhone), Resolve may fail to link clips whose format doesn't match the timeline. The mazsola2k reference project uses only two formats: the timeline format and `FFVideoFormatRateUndefined` for everything else.
+
+**Fix:** Use the timeline format for matching clips, and `FFVideoFormatRateUndefined` for clips with different dimensions. Resolve detects the actual format from the file itself.
+
+### 6. Auto-detect timeline format from source footage
+
+**Symptom:** Timeline resolution defaults to 1080p 29.97fps when source footage is 4K 23.976fps.
+
+**Root cause:** The rough cut `OutputFormat` defaults (1080p 29.97fps) are designed for quick preview rendering, not for NLE export where you want native resolution.
+
+**Fix:** Auto-detect the dominant resolution and fps from the manifest clips using majority voting. For NLE export, the timeline should match the source footage's native format.
+
+### 7. `<library>/<event>` wrapper is required
+
+**Symptom:** Resolve shows "file type not supported" on import.
+
+**Root cause:** FCPXML files with `<project>` directly under `<fcpxml>` (without the `<library>/<event>` wrapper) are not recognized by Resolve's "Import Timeline" dialog.
+
+**Fix:** Always wrap in `<library><event name="..."><project name="...">`.
+
+### 8. `editorial_reasoning` must have a default value
+
+**Symptom:** TUI crashes silently when exporting older projects.
+
+**Root cause:** The `editorial_reasoning` field was added to `EditorialStoryboard` as a required field, but older storyboard JSONs don't have it. Pydantic validation fails with no visible error in the TUI.
+
+**Fix:** Add `default=""` to the field definition. Wrap TUI export in try/except with user-visible error messages.
 
 ---
 
@@ -190,55 +282,66 @@ vx export-xml <project> [--storyboard VERSION] [--composition NAME] [--output PA
 
 ---
 
-## FCPXML Output Structure
+## FCPXML Output Structure (verified working with Resolve 20)
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
   <resources>
-    <format id="r0" name="FFVideoFormat1920x1080p2997"
-            width="1920" height="1080" frameDuration="1001/30000s"/>
+    <!-- Timeline format (auto-detected from dominant source clip format) -->
+    <format id="r0" name="FFVideoFormat3840x2160p2398"
+            width="3840" height="2160" frameDuration="1001/24000s"/>
     <effect id="r1" name="Cross Dissolve"
             uid="FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"/>
+    <!-- FFVideoFormatRateUndefined for clips with different dimensions -->
+    <format id="r4" name="FFVideoFormatRateUndefined"
+            width="2160" height="3840" frameDuration="1001/24000s"/>
 
-    <!-- one <asset> per unique source clip used in the storyboard -->
-    <asset id="r2" name="20260330094906_C0059.MP4"
-           src="file:///Volumes/Seagate%20Hub/VIDEO_LIBRARY/RAW/2026/20260330094906_C0059.MP4"
-           start="0s" duration="23525/1000s"
-           hasVideo="1" hasAudio="1" format="r0"
-           audioChannels="2" audioSources="1">
-      <media-rep src="file:///Volumes/Seagate%20Hub/VIDEO_LIBRARY/RAW/2026/20260330094906_C0059.MP4"
+    <!-- ALL clips from manifest (not just timeline-used ones) -->
+    <!-- No src/uid on asset — only media-rep. start = embedded timecode. -->
+    <asset id="r2" name="20260315162915_C0003.MP4"
+           duration="31031/1000s" audioChannels="2"
+           start="415574159/6000s"
+           format="r0" hasVideo="1" audioSources="1" hasAudio="1">
+      <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/20260315162915_C0003.MP4"
                  kind="original-media"/>
     </asset>
-    <asset id="r3" name="20260330114125_C0073.MP4" .../>
+    <!-- iPhone MOV (no embedded timecode → start="0/1s") -->
+    <asset id="r3" name="IMG_9346.MOV"
+           duration="36/1s" audioChannels="2"
+           start="0/1s"
+           format="r0" hasVideo="1" audioSources="1" hasAudio="1">
+      <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9346.MOV"
+                 kind="original-media"/>
+    </asset>
   </resources>
 
-  <project name="family-trip-hsinchu-2026">
-    <sequence format="r0" tcStart="0s" tcFormat="NDF" duration="...">
-      <spine>
-        <!-- Segment 0: hook from C0059, 5.0s–15.0s -->
-        <asset-clip ref="r2" name="C0059 — hook"
-                    offset="0s" start="5000/1000s" duration="10000/1000s"
-                    format="r0" enabled="1" tcFormat="NDF">
-          <adjust-volume amount="-96dB"/>
-        </asset-clip>
+  <library>
+    <event name="my-project">
+      <project name="my-project">
+        <sequence format="r0" tcStart="0s" tcFormat="NDF" duration="...">
+          <spine>
+            <!-- asset-clip name = source filename (NOT creative label) -->
+            <!-- start = asset base timecode + segment in_sec offset -->
+            <asset-clip ref="r3" name="IMG_9346.MOV"
+                        offset="0/30s" start="8/1s" duration="8/1s"
+                        format="r0" enabled="1" tcFormat="NDF">
+              <adjust-volume amount="-6dB"/>
+            </asset-clip>
 
-        <!-- Cross-dissolve transition (1 second) -->
-        <transition name="Cross Dissolve" offset="9500/1000s" duration="1000/1000s">
-          <filter-video ref="r1"/>
-          <filter-audio ref="r1"/>
-        </transition>
+            <asset-clip ref="r2" name="20260315162915_C0003.MP4"
+                        offset="8/1s" start="415682159/6000s" duration="13013/1000s"
+                        format="r0" enabled="1" tcFormat="NDF">
+              <adjust-volume amount="-6dB"/>
+            </asset-clip>
 
-        <!-- Segment 1: establish from C0073, 0.0s–20.0s -->
-        <asset-clip ref="r3" name="C0073 — establish"
-                    offset="10000/1000s" start="0s" duration="20000/1000s"
-                    format="r0" enabled="1" tcFormat="NDF"/>
-
-        <!-- ... remaining segments ... -->
-      </spine>
-    </sequence>
-  </project>
+            <!-- ... remaining segments ... -->
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
 </fcpxml>
 ```
 

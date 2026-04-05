@@ -690,12 +690,16 @@ flowchart LR
 | `audio_note` (mute) | `<adjust-volume amount="-96dB"/>` | Volume slider — drag to change |
 | `audio_note` (music_bed) | `<adjust-volume amount="-12dB"/>` | Volume slider at -12dB — adjustable |
 | `audio_note` (ambient) | `<adjust-volume amount="-6dB"/>` | Volume slider at -6dB — adjustable |
-| `purpose` | Clip name: `"C0059 — hook"` | Visible label in timeline for editorial context |
+| `purpose` | Editorial metadata only | Not mapped — Resolve strips custom labels |
 | `text_overlay` | Not mapped (v1) | Resolve strips FCPXML text effects |
 
 ### Source video handling
 
-**Full videos are referenced, not segments.** Each `<asset>` element points to the complete original source file (4K, untouched) via an absolute `file:///` URI. The `<asset-clip>` on the timeline then defines which portion plays using `start` (in-point) and `duration`. This is critical for professional editing — you can freely extend or trim any clip in Resolve because the full media is available, not just the AI-selected segment.
+**All source videos are imported, not just timeline clips.** Every clip in the manifest gets an `<asset>` element pointing to the complete original source file (4K, untouched) via `<media-rep>`. This puts all raw footage in Resolve's Media Pool — even clips not used in the storyboard — so you can freely add or swap footage during editing. The `<asset-clip>` on the timeline defines which portion plays using `start` (in-point relative to the embedded timecode) and `duration`.
+
+**Embedded timecodes are critical.** Sony XAVC cameras embed a running timecode (e.g., `19:13:13:04`) in a `tmcd` track. VX probes each source file with ffprobe and converts this to the `start` attribute on both `<asset>` and `<asset-clip>`. Without this, DaVinci Resolve cannot match video tracks — it imports audio but shows "Media Offline" for video. iPhone MOVs have no embedded timecode and correctly use `start="0/1s"`.
+
+**Timeline format auto-detection.** The timeline resolution and frame rate are auto-detected from the dominant source clip format (e.g., 4K 23.976fps if most clips are Sony, or 4K 30fps if most are iPhone). This ensures the NLE project matches your footage's native quality.
 
 Resolution priority for source files:
 1. `manifest.json` → `source_path` (original full-res file)
@@ -736,20 +740,23 @@ vx export-xml my-trip --output ~/Desktop/edit.fcpxml --no-srt
 
 ### DaVinci Resolve import workflow
 
-1. **Import media first**: File > Import > Media — add your source clips to the Media Pool
-2. **Import timeline**: File > Import > Timeline > `project.fcpxml` — creates timeline with all cuts
-3. **Import subtitles** (optional): File > Import > Subtitle > `timeline_subtitles.srt` — lands in sync with the edit
-4. **Edit freely**: All in/out points, transitions, and audio levels are fully adjustable
-5. **After major re-edits**: If you significantly change cut points in Resolve, the timeline SRT will drift. Either adjust subtitles manually in Resolve's subtitle editor, or re-run `vx export-xml` after updating the storyboard and re-import
+1. **Import timeline**: File > Import > Timeline > `project.fcpxml` — check "Automatically import source clips into media pool" and "Automatically set project settings" in the dialog
+2. **Import subtitles** (optional): File > Import > Subtitle > `timeline_subtitles.srt` — lands in sync with the edit
+3. **Edit freely**: All in/out points, transitions, and audio levels are fully adjustable. All raw source clips are in the Media Pool for B-roll or alternate takes.
+4. **After major re-edits**: If you significantly change cut points in Resolve, the timeline SRT will drift. Either adjust subtitles manually in Resolve's subtitle editor, or re-run `vx export-xml` after updating the storyboard and re-import
 
 ### Technical notes
 
 - **FCPXML version 1.9** — DaVinci Resolve's native export version, compatible with Resolve 17+
 - **Flat timeline** — single `<spine>` with `<asset-clip>` elements, no compound clips (fragile in Resolve)
-- **Rational fraction timing** — all times expressed as fractions (e.g., `1001/30000s`) via Python's `fractions.Fraction`
+- **`<library>/<event>` wrapper** — required for Resolve's "Import Timeline" dialog to recognize the file
+- **Rational fraction timing** — all times expressed as fractions (e.g., `1001/30000s`) via Python's `fractions.Fraction`, with NTSC lookup table for standard rates (23.976 → `1001/24000s`)
+- **Embedded timecode probing** — Sony XAVC and other professional cameras embed running timecodes; VX reads these via ffprobe and maps them to the `start` attribute on assets and clips. Without this, Resolve cannot link video tracks.
+- **No `src`/`uid` on `<asset>`** — Resolve reads file paths exclusively from `<media-rep src="...">`, not from asset-level attributes (despite what the FCPXML spec suggests)
+- **Asset-clip names = source filenames** — Resolve uses clip names for media matching; creative labels like `"C0003 — hook"` break relinking
+- **`FFVideoFormatRateUndefined`** — used for source clips with different dimensions from the timeline; Resolve auto-detects actual format from the file
 - **Non-drop-frame timecode** (`tcFormat="NDF"`) — Resolve's default
-- **Percent-encoded file URIs** — handles spaces and special characters in file paths
-- **Per-clip format resources** — when a clip's fps or resolution differs from the timeline, a separate `<format>` element is created
+- **All manifest clips as assets** — not just timeline-used clips, so all raw footage appears in the Media Pool
 
 ### Future enhancements
 
