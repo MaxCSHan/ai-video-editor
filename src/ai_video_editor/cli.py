@@ -1122,7 +1122,7 @@ def cmd_export_xml(args, cfg: Config):
     print(f"  Storyboard: {json_path.name}")
 
     from .models import EditorialStoryboard
-    from .fcpxml_export import export_fcpxml
+    from .fcpxml_export import export_fcpxml, export_srt_files
 
     storyboard = EditorialStoryboard.model_validate_json(json_path.read_text())
 
@@ -1143,7 +1143,17 @@ def cmd_export_xml(args, cfg: Config):
     print(f"  {GREEN}FCPXML:{RESET}     {result}")
     print(f"  Segments:    {len(storyboard.segments)}")
     print(f"  Duration:    {format_duration(storyboard.total_segments_duration)}")
-    print(f"\n  Import into DaVinci Resolve: File → Import → Timeline → {result.name}")
+
+    # Export SRT files alongside FCPXML if transcripts exist
+    if not getattr(args, "no_srt", False):
+        srt_dir = output_path.parent / "subtitles"
+        srt_files = export_srt_files(storyboard, ep, srt_dir)
+        if srt_files:
+            print(f"  {GREEN}Subtitles:{RESET}  {len(srt_files)} SRT files → {srt_dir}")
+
+    print("\n  Import into DaVinci Resolve:")
+    print(f"    Timeline:  File \u2192 Import \u2192 Timeline \u2192 {result.name}")
+    print("    Subtitles: File \u2192 Import \u2192 Subtitle  (from subtitles/ folder)")
 
 
 def cmd_config(args, cfg: Config):
@@ -1643,6 +1653,11 @@ def main():
         "--output",
         metavar="PATH",
         help="Output file path (default: exports/<project>.fcpxml)",
+    )
+    p_export_xml.add_argument(
+        "--no-srt",
+        action="store_true",
+        help="Skip exporting SRT subtitle files alongside FCPXML",
     )
 
     # --- versions ---

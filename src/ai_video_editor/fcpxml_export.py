@@ -338,6 +338,48 @@ def export_fcpxml(
     return output_path
 
 
+def export_srt_files(
+    storyboard: EditorialStoryboard,
+    editorial_paths: EditorialProjectPaths,
+    output_dir: Path,
+) -> list[Path]:
+    """Export per-clip SRT files alongside the FCPXML for separate subtitle import.
+
+    DaVinci Resolve cannot import captions via FCPXML — SRT files must be imported
+    separately (File > Import > Subtitle). This keeps subtitles non-destructive
+    and independently editable.
+
+    Returns list of SRT paths written.
+    """
+    from .transcribe import generate_srt
+    from .versioning import resolve_transcript_path
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    # Collect unique clip IDs that appear in the storyboard
+    used_clip_ids = list(dict.fromkeys(seg.clip_id for seg in storyboard.segments))
+
+    for clip_id in used_clip_ids:
+        clip_root = editorial_paths.clips_dir / clip_id
+        transcript_path = resolve_transcript_path(clip_root)
+        if not transcript_path:
+            log.debug("No transcript for %s — skipping SRT", clip_id)
+            continue
+
+        transcript = json.loads(transcript_path.read_text())
+        if not transcript.get("has_speech", False):
+            log.debug("No speech in %s — skipping SRT", clip_id)
+            continue
+
+        srt_path = output_dir / f"{clip_id}.srt"
+        generate_srt(transcript, srt_path)
+        written.append(srt_path)
+        log.info("SRT written: %s", srt_path)
+
+    return written
+
+
 def _compute_timeline_duration(segments: list[Segment]) -> float:
     """Compute total timeline duration from segments (simple sum, no overlap accounting)."""
     return sum(seg.out_sec - seg.in_sec for seg in segments if seg.out_sec > seg.in_sec)
