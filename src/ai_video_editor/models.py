@@ -274,6 +274,7 @@ class StoryArcSection(BaseModel):
 
 class EditorialStoryboard(BaseModel):
     editorial_reasoning: str = Field(
+        default="",
         description="Your editorial thinking process. Address these in order: "
         "1) CONSTRAINT CHECK — for each filmmaker MUST-INCLUDE/MUST-EXCLUDE, state which "
         "clip and usable segment satisfies it. If a constraint cannot be satisfied, explain why. "

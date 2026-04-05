@@ -130,6 +130,8 @@ vx analyze my-trip --dry-run          # Estimate token usage and cost
 vx analyze my-trip --force            # Re-run Phase 1 reviews from scratch
 vx analyze my-trip --no-interactive   # Skip briefing questions
 vx cut my-trip                        # Assemble rough cut (no LLM)
+vx export-xml my-trip                 # Export FCPXML for DaVinci Resolve / FCP
+vx export-xml my-trip --no-srt        # FCPXML only, skip subtitle export
 
 vx projects                           # List all projects
 vx status my-trip                     # Per-clip cache, versions, LLM usage
@@ -220,6 +222,10 @@ library/
           composition.json              # Full provenance manifest
           segments/
         latest -> cut_001/
+      my-trip.fcpxml                    # FCPXML for DaVinci Resolve / FCP import
+      timeline_subtitles.srt            # Timeline-aligned SRT (synced to FCPXML)
+      subtitles/                        # Per-clip SRT files (source-relative)
+        20260330_C0059.srt
 ```
 
 ## Source Code
@@ -239,6 +245,7 @@ src/ai_video_editor/
   editorial_agent.py    # Multi-clip orchestrator (transcribe, review, assemble)
   render.py             # Markdown + interactive HTML from Pydantic models
   rough_cut.py          # Validation + format-normalized ffmpeg assembly (no LLM)
+  fcpxml_export.py      # FCPXML v1.9 export for DaVinci Resolve / Final Cut Pro
   versioning.py         # Composable versioning: begin/commit/fail, lineage, compositions
 ```
 
@@ -254,6 +261,7 @@ src/ai_video_editor/
 | Phase 2 | Reviews + transcripts + briefing (+ videos with --visual) | EditorialStoryboard (Pydantic JSON) | Yes — one call |
 | Render | Structured JSON | Markdown + HTML preview (with transcript overlay) | No — templates |
 | Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
+| Export XML | Structured JSON + manifest | .fcpxml + .srt files | No — XML generation |
 
 ## LLM Usage, Cost, and Tracing
 
@@ -610,3 +618,154 @@ These design decisions were not obvious upfront. They emerged from debugging rea
 | PTS discontinuities / cranky playback | Different source clips produce segments with mismatched timebases | Always apply `fps=` filter to normalize timebase, even when FPS matches |
 | A/V sync drift at segment boundaries | Audio re-encoded during concat while video was stream-copied | Switch concat audio to `-c:a copy` (audio already normalized in Phase A) |
 | "moov atom may be corrupt" false positives | Seek test too tight (10s timeout for 2GB+ files) and imprecise diagnostics | Scale timeout with file size, test both start and midpoint, report specific failure mode |
+
+## FCPXML Export for DaVinci Resolve / Final Cut Pro
+
+The FCPXML export bridges VX's AI-assembled storyboard with professional NLE editing. Instead of a baked rough cut MP4, it produces an `.fcpxml` timeline definition that DaVinci Resolve (and Final Cut Pro) can import directly — giving you full editorial control over every cut point, transition, and audio level.
+
+### How it works
+
+```mermaid
+flowchart TD
+    subgraph VX Pipeline
+        A[EditorialStoryboard JSON] --> B[fcpxml_export.py]
+        M[manifest.json<br/>clip metadata] --> B
+        S[Original source videos<br/>full resolution 4K] --> B
+        T[Transcript JSON<br/>per-clip] --> D[SRT Generator]
+    end
+
+    B --> C[project.fcpxml]
+    D --> E[subtitles/<br/>per-clip .srt files]
+
+    subgraph DaVinci Resolve
+        C -->|File → Import → Timeline| F[Timeline with full clips]
+        E -->|File → Import → Subtitle| G[Subtitle tracks]
+        F --> H[Edit: adjust cuts, transitions, audio]
+        G --> H
+    end
+
+    style A fill:#f3e8ff,stroke:#7c3aed
+    style C fill:#dcfce7,stroke:#16a34a
+    style E fill:#dcfce7,stroke:#16a34a
+    style F fill:#fef3c7,stroke:#ca8a04
+    style G fill:#fef3c7,stroke:#ca8a04
+```
+
+### What gets exported
+
+The FCPXML maps the `EditorialStoryboard` data model to DaVinci Resolve's native timeline format:
+
+```mermaid
+flowchart LR
+    subgraph EditorialStoryboard
+        SEG[Segment<br/>clip_id, in_sec, out_sec<br/>purpose, transition<br/>audio_note]
+    end
+
+    subgraph FCPXML v1.9
+        RES[Resources<br/>format, effect, asset]
+        AC[asset-clip<br/>ref, offset, start, duration<br/>adjust-volume]
+        TR[transition<br/>Cross Dissolve]
+    end
+
+    subgraph Resolve Import
+        FULL[Full source video<br/>in Media Pool]
+        TL[Timeline clip<br/>adjustable in/out points]
+        FX[Editable transitions]
+        VOL[Volume envelope<br/>non-destructive]
+    end
+
+    SEG --> AC
+    SEG --> TR
+    AC --> TL
+    TR --> FX
+    AC --> VOL
+    RES --> FULL
+```
+
+| Storyboard field | FCPXML element | Resolve behavior |
+|------------------|---------------|------------------|
+| `clip_id` | `<asset>` with full source file URI | Full video in Media Pool — freely trimmable |
+| `in_sec` / `out_sec` | `<asset-clip>` `start` + `duration` | Adjustable in/out points on timeline |
+| `transition` (dissolve) | `<transition>` Cross Dissolve | Editable transition with adjustable duration |
+| `audio_note` (mute) | `<adjust-volume amount="-96dB"/>` | Volume slider — drag to change |
+| `audio_note` (music_bed) | `<adjust-volume amount="-12dB"/>` | Volume slider at -12dB — adjustable |
+| `audio_note` (ambient) | `<adjust-volume amount="-6dB"/>` | Volume slider at -6dB — adjustable |
+| `purpose` | Editorial metadata only | Not mapped — Resolve strips custom labels |
+| `text_overlay` | Not mapped (v1) | Resolve strips FCPXML text effects |
+
+### Source video handling
+
+**All source videos are imported, not just timeline clips.** Every clip in the manifest gets an `<asset>` element pointing to the complete original source file (4K, untouched) via `<media-rep>`. This puts all raw footage in Resolve's Media Pool — even clips not used in the storyboard — so you can freely add or swap footage during editing. The `<asset-clip>` on the timeline defines which portion plays using `start` (in-point relative to the embedded timecode) and `duration`.
+
+**Embedded timecodes are critical.** Sony XAVC cameras embed a running timecode (e.g., `19:13:13:04`) in a `tmcd` track. VX probes each source file with ffprobe and converts this to the `start` attribute on both `<asset>` and `<asset-clip>`. Without this, DaVinci Resolve cannot match video tracks — it imports audio but shows "Media Offline" for video. iPhone MOVs have no embedded timecode and correctly use `start="0/1s"`.
+
+**Timeline format auto-detection.** The timeline resolution and frame rate are auto-detected from the dominant source clip format (e.g., 4K 23.976fps if most clips are Sony, or 4K 30fps if most are iPhone). This ensures the NLE project matches your footage's native quality.
+
+Resolution priority for source files:
+1. `manifest.json` → `source_path` (original full-res file)
+2. `clips/{clip_id}/source/` directory (legacy symlink/copy)
+3. Missing sources are warned and skipped
+
+### Subtitle handling (SRT)
+
+DaVinci Resolve cannot import subtitles via FCPXML — it strips caption data on import. VX exports two types of SRT files to cover different editing workflows:
+
+**`timeline_subtitles.srt`** — Timeline-aligned, for initial import. Each transcript cue is remapped from its source clip timestamp to the assembled timeline position. Import once with File > Import > Subtitle and subtitles land in sync with the edit. **Caveat:** If you adjust cut points or reorder clips in Resolve, these timecodes become stale. Re-export from VX after storyboard changes, or manually adjust in Resolve's subtitle editor.
+
+**`subtitles/{clip_id}.srt`** — Per-clip, source-relative. These use the original clip timestamps and stay valid regardless of timeline edits. Useful as reference when editing individual clips, or for re-generating timeline subtitles after changes.
+
+Both formats include:
+- Speaker identification (`Max: Hello!`)
+- Non-speech audio markers (`[door slam]`, `♪ music ♪`)
+- Only cues within each segment's in/out window (timeline SRT)
+- Fully editable in Resolve's subtitle editor after import
+
+Requires transcripts: run `vx transcribe` before exporting. Use `--no-srt` to skip subtitle export.
+
+### Usage
+
+```bash
+# Basic export (FCPXML + SRT subtitles)
+vx export-xml my-trip
+
+# Specific storyboard version
+vx export-xml my-trip --storyboard v3
+
+# Use a named composition
+vx export-xml my-trip --composition my-cut
+
+# Custom output path, no subtitles
+vx export-xml my-trip --output ~/Desktop/edit.fcpxml --no-srt
+```
+
+### DaVinci Resolve import workflow
+
+1. **Import timeline**: File > Import > Timeline > `project.fcpxml` — check "Automatically import source clips into media pool" and "Automatically set project settings" in the dialog
+2. **Import subtitles** (optional): File > Import > Subtitle > `timeline_subtitles.srt` — lands in sync with the edit
+3. **Edit freely**: All in/out points, transitions, and audio levels are fully adjustable. All raw source clips are in the Media Pool for B-roll or alternate takes.
+4. **After major re-edits**: If you significantly change cut points in Resolve, the timeline SRT will drift. Either adjust subtitles manually in Resolve's subtitle editor, or re-run `vx export-xml` after updating the storyboard and re-import
+
+### Technical notes
+
+- **FCPXML version 1.9** — DaVinci Resolve's native export version, compatible with Resolve 17+
+- **Flat timeline** — single `<spine>` with `<asset-clip>` elements, no compound clips (fragile in Resolve)
+- **`<library>/<event>` wrapper** — required for Resolve's "Import Timeline" dialog to recognize the file
+- **Rational fraction timing** — all times expressed as fractions (e.g., `1001/30000s`) via Python's `fractions.Fraction`, with NTSC lookup table for standard rates (23.976 → `1001/24000s`)
+- **Embedded timecode probing** — Sony XAVC and other professional cameras embed running timecodes; VX reads these via ffprobe and maps them to the `start` attribute on assets and clips. Without this, Resolve cannot link video tracks.
+- **No `src`/`uid` on `<asset>`** — Resolve reads file paths exclusively from `<media-rep src="...">`, not from asset-level attributes (despite what the FCPXML spec suggests)
+- **Asset-clip names = source filenames** — Resolve uses clip names for media matching; creative labels like `"C0003 — hook"` break relinking
+- **`FFVideoFormatRateUndefined`** — used for source clips with different dimensions from the timeline; Resolve auto-detects actual format from the file
+- **Non-drop-frame timecode** (`tcFormat="NDF"`) — Resolve's default
+- **All manifest clips as assets** — not just timeline-used clips, so all raw footage appears in the Media Pool
+- **Duplicate Media Pool entries** — clips used on the timeline appear twice in Resolve's Media Pool (master + subclip). This is normal Resolve behavior for trimmed FCPXML clips and doesn't affect the timeline.
+- **Manifest is source of truth** — only clips ingested into the VX project are exported. Video files in the source directory that weren't preprocessed by VX won't appear.
+
+### Future enhancements
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Background music track | Planned | Separate audio lane with music assets |
+| Speed ramping | Planned | `<timeMap>` for time-lapse segments |
+| Markers | Planned | Key moments as timeline markers |
+| J-cut / L-cut audio | Planned | Requires multi-track audio with offset clips |
+| Watermark overlay | Planned | Image asset on separate video lane |
