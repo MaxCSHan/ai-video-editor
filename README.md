@@ -629,18 +629,18 @@ The FCPXML export bridges VX's AI-assembled storyboard with professional NLE edi
 flowchart TD
     subgraph VX Pipeline
         A[EditorialStoryboard JSON] --> B[fcpxml_export.py]
-        M[manifest.json<br/>clip metadata] --> B
-        S[Original source videos<br/>full resolution 4K] --> B
+        M[manifest.json<br/>clip metadata + source paths] --> B
+        S[Original source videos<br/>full resolution 4K] -->|ffprobe: embedded timecodes| B
         T[Transcript JSON<br/>per-clip] --> D[SRT Generator]
     end
 
-    B --> C[project.fcpxml]
-    D --> E[subtitles/<br/>per-clip .srt files]
+    B --> C[project.fcpxml<br/>library/event/project/sequence/spine<br/>all manifest clips as assets]
+    D --> E[subtitles/<br/>per-clip + timeline-aligned .srt]
 
     subgraph DaVinci Resolve
-        C -->|File → Import → Timeline| F[Timeline with full clips]
+        C -->|File → Import → Timeline<br/>auto-import source clips| F[Timeline with full clips<br/>+ all raw footage in Media Pool]
         E -->|File → Import → Subtitle| G[Subtitle tracks]
-        F --> H[Edit: adjust cuts, transitions, audio]
+        F --> H[Edit: adjust cuts, transitions, audio<br/>add B-roll from Media Pool]
         G --> H
     end
 
@@ -662,13 +662,13 @@ flowchart LR
     end
 
     subgraph FCPXML v1.9
-        RES[Resources<br/>format, effect, asset]
-        AC[asset-clip<br/>ref, offset, start, duration<br/>adjust-volume]
+        RES[Resources<br/>format + effect + asset<br/>media-rep with file URI<br/>embedded timecode as start]
+        AC[asset-clip<br/>name = source filename<br/>start = timecode + in_sec<br/>offset, duration]
         TR[transition<br/>Cross Dissolve]
     end
 
     subgraph Resolve Import
-        FULL[Full source video<br/>in Media Pool]
+        FULL[All raw footage<br/>in Media Pool]
         TL[Timeline clip<br/>adjustable in/out points]
         FX[Editable transitions]
         VOL[Volume envelope<br/>non-destructive]
@@ -684,13 +684,13 @@ flowchart LR
 
 | Storyboard field | FCPXML element | Resolve behavior |
 |------------------|---------------|------------------|
-| `clip_id` | `<asset>` with full source file URI | Full video in Media Pool — freely trimmable |
-| `in_sec` / `out_sec` | `<asset-clip>` `start` + `duration` | Adjustable in/out points on timeline |
+| `clip_id` | `<asset>` with `<media-rep src="file:///...">` | Full video in Media Pool — freely trimmable |
+| `in_sec` / `out_sec` | `<asset-clip>` `start` (= embedded timecode + in_sec) + `duration` | Adjustable in/out points on timeline |
 | `transition` (dissolve) | `<transition>` Cross Dissolve | Editable transition with adjustable duration |
 | `audio_note` (mute) | `<adjust-volume amount="-96dB"/>` | Volume slider — drag to change |
 | `audio_note` (music_bed) | `<adjust-volume amount="-12dB"/>` | Volume slider at -12dB — adjustable |
 | `audio_note` (ambient) | `<adjust-volume amount="-6dB"/>` | Volume slider at -6dB — adjustable |
-| `purpose` | Editorial metadata only | Not mapped — Resolve strips custom labels |
+| `purpose` | Not mapped | Editorial metadata only — Resolve clips are named by source filename |
 | `text_overlay` | Not mapped (v1) | Resolve strips FCPXML text effects |
 
 ### Source video handling
