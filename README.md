@@ -757,6 +757,8 @@ vx export-xml my-trip --output ~/Desktop/edit.fcpxml --no-srt
 - **`FFVideoFormatRateUndefined`** — used for source clips with different dimensions from the timeline; Resolve auto-detects actual format from the file
 - **Non-drop-frame timecode** (`tcFormat="NDF"`) — Resolve's default
 - **All manifest clips as assets** — not just timeline-used clips, so all raw footage appears in the Media Pool
+- **Duplicate Media Pool entries** — clips used on the timeline appear twice in Resolve's Media Pool (master + subclip). This is normal Resolve behavior for trimmed FCPXML clips and doesn't affect the timeline.
+- **Manifest is source of truth** — only clips ingested into the VX project are exported. Video files in the source directory that weren't preprocessed by VX won't appear.
 
 ### Future enhancements
 

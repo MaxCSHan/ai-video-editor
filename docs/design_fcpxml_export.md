@@ -220,7 +220,21 @@ Files without embedded timecodes (iPhone MOVs) correctly use `start="0/1s"`.
 
 **Fix:** Always wrap in `<library><event name="..."><project name="...">`.
 
-### 8. `editorial_reasoning` must have a default value
+### 8. Duplicate clips in Resolve Media Pool (expected behavior)
+
+**Symptom:** Clips used on the timeline appear twice in the Media Pool — once as the master clip, once as a "subclip."
+
+**Root cause:** When an `<asset-clip>` has a different `start` value (base timecode + segment `in_sec` offset) than its referenced `<asset>`, Resolve 20 creates a separate subclip entry in the Media Pool. This is inherent to how Resolve handles FCPXML sub-clipping — it's distinguishing "full source clip" from "trimmed timeline clip."
+
+**Not a bug.** The timeline works correctly. Clips used in multiple segments only create one subclip (not N), so it's not proportional to usage count. This is cosmetic and matches behavior when manually trimming clips in Resolve and exporting FCPXML.
+
+### 9. Only manifest clips are exported (source directory is not scanned)
+
+**Symptom:** Video files in the source directory that were never ingested into the VX project are missing from the FCPXML Media Pool.
+
+**By design.** The FCPXML export uses `manifest.json` as the source of truth, not the filesystem. Files outside the VX project scope are not included. Users should add missing footage via `vx new` or preprocessing if they want it in the export.
+
+### 10. `editorial_reasoning` must have a default value
 
 **Symptom:** TUI crashes silently when exporting older projects.
 
