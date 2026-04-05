@@ -27,8 +27,7 @@ VX currently outputs a rough cut MP4 and an HTML preview. Users who want to fine
 | 1.12–1.13 | NOT reliably supported — FCP 11 format |
 
 **DaVinci Resolve import quirks (battle-tested with Resolve 20):**
-- Titles, generators, and FCP-specific effects are stripped on import
-- Captions are NOT imported via FCPXML (use separate SRT import)
+- **Bare `<title>` elements are stripped** on import — but titles that reference a known effect resource (e.g., "Middle" Lower Third `.moti` template) via `ref` survive. See Pitfall #11 below.
 - Compound clips work but are fragile — **flatten the timeline instead**
 - Use `tcFormat="NDF"` (non-drop-frame) — Resolve's default
 - Mixed frame rates: set Resolve's conform method to "Final Cut Pro X" in project settings
@@ -83,7 +82,7 @@ Each `Segment` provides:
 | `out_sec` | Derived: `duration` = out_sec - in_sec |
 | `transition` | `<transition>` element type |
 | `audio_note` | `<adjust-volume>` configuration |
-| `text_overlay` | Not mapped in v1 (Resolve strips text effects) |
+| `text_overlay` | `<title>` on lane 1 via "Middle" Lower Third effect (see Pitfall #11) |
 | `purpose` | Clip `name` annotation for editor reference |
 | `description` | Not mapped (editorial metadata only) |
 
@@ -242,6 +241,73 @@ Files without embedded timecodes (iPhone MOVs) correctly use `start="0/1s"`.
 
 **Fix:** Add `default=""` to the field definition. Wrap TUI export in try/except with user-visible error messages.
 
+### 11. Title elements require an effect resource reference to survive Resolve import
+
+**Symptom:** `<title>` elements in the FCPXML are silently stripped when imported into Resolve. No titles appear on the timeline.
+
+**Root cause:** DaVinci Resolve strips bare `<title>` elements that lack a `ref` attribute pointing to a known effect resource. A title without `ref` is treated as an FCP-specific generator and discarded.
+
+**Fix:** Register the "Middle" Lower Third effect as a `<effect>` resource with its `.moti` UID, and reference it from every `<title>` element:
+
+```xml
+<!-- In <resources>: -->
+<effect id="r_title"
+        uid=".../Titles.localized/Lower Thirds.localized/Middle.localized/Middle.moti"
+        name="Middle"/>
+
+<!-- In <asset-clip>: -->
+<title ref="r_title" offset="..." enabled="1" start="0/30s"
+       lane="1" name="overlay text" duration="3/1s">
+    <text roll-up-height="0">
+        <text-style ref="ts0">overlay text</text-style>
+    </text>
+    <text roll-up-height="0"/>  <!-- empty second field (Middle template) -->
+    <text-style-def id="ts0">
+        <text-style italic="0" alignment="center" fontColor="1 1 1 1"
+                    fontSize="59" bold="1" strokeColor="0 0 0 1"
+                    lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+    </text-style-def>
+    <adjust-conform type="fit"/>
+    <adjust-transform position="0 -8.148148" anchor="0 0" scale="1 1"/>
+</title>
+```
+
+**Critical structural requirements:**
+- `<text roll-up-height="0">` must come BEFORE `<text-style-def>` (Resolve parses in order)
+- The "Middle" template has two `<text>` fields — second can be empty
+- `<adjust-conform type="fit"/>` and `<adjust-transform>` are required
+- `enabled="1"` must be explicit on the `<title>` element
+
+### 12. Title positioning in Resolve uses percentage-based transform values
+
+**Symptom:** Titles appear at the wrong vertical position despite correct `<adjust-transform>` values.
+
+**Root cause:** Resolve multiplies the `<adjust-transform>` Y position value by `(timeline_height / 100)`. So for a 4K timeline (2160px), a Y value of `-8.148148` produces `-8.148148 × 21.6 ≈ -176px` from center — placing text in the lower third.
+
+**Calibrated positions (4K / 2160p timeline):**
+| Position | Y value | Pixel offset | Use case |
+|----------|---------|-------------|----------|
+| Lower third | `-8.148148` | ≈ -176px | Monologue overlays (lane 1) |
+| Upper area | `62.5` | ≈ +1350px | Speech captions avoiding monologue (lane 2) |
+| Center | `0` | 0px | Title cards (unused) |
+
+### 13. Multi-layer text overlays use separate lanes
+
+**Symptom:** Monologue and speech captions overlap visually when both are present.
+
+**Solution:** Use two lanes with distinct positioning:
+
+| Layer | Lane | Font size | Position Y | Content |
+|-------|------|-----------|-----------|---------|
+| Monologue | `lane="1"` | 59 | `-8.148148` | Text overlays from MonologuePlan |
+| Captions | `lane="2"` | 55 | `-8.148148` or `62.5` | Speech from transcripts |
+
+Captions detect collision with monologue intervals using the same overlap logic as `rough_cut.py`. When a caption's time range overlaps a monologue overlay on the same segment, it moves to the upper position (`62.5`) to avoid visual collision. Non-colliding captions stay at the lower-third position.
+
+Caption titles are only generated when a monologue plan is present (matching `rough_cut.py`'s `burn_captions = monologue is not None` pattern).
+
+A companion SRT export (`timeline_monologue.srt` + `timeline_subtitles.srt`) is also produced for editors who prefer subtitle-track workflows.
+
 ---
 
 ## Implementation Plan
@@ -379,7 +445,7 @@ vx export-xml <project> [--storyboard VERSION] [--composition NAME] [--output PA
 - **Background music track**: Add music assets on a separate audio lane, similar to mazsola2k's implementation
 - **Speed ramping**: Support via `<timeMap>` for time-lapse segments
 - **Watermark overlay**: Image asset on a separate video lane with `<adjust-blend>`
-- **Text overlays / captions**: Export as separate SRT file alongside FCPXML (since Resolve strips FCPXML text effects)
+- ~~**Text overlays / captions**~~: ✅ Implemented — monologue overlays as `<title>` elements (lane 1) + speech captions (lane 2) with collision avoidance, plus companion SRT files
 - **J-cut / L-cut audio transitions**: Requires multi-track audio with offset audio clips
 - **OTIO export**: Alternative format for broader NLE support
 - **Proxy mode**: Generate FCPXML pointing to proxy files for offline editing, with relinking workflow

@@ -637,6 +637,9 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
     elif active_node == "story":
         choices.append(questionary.Choice("Rerun storyboard", value="rerun_p2"))
         if node_exists:
+            choices.append(
+                questionary.Choice("Review storyboard (Director)", value="review_storyboard")
+            )
             choices.append(questionary.Choice("Compare storyboard versions", value="compare"))
         if has_preview:
             choices.append(questionary.Choice("Open preview", value="open_preview"))
@@ -985,6 +988,8 @@ def _new_project_flow(cfg):
         tracer=tracer,
         visual=visual,
         style_supplement=p2_supplement,
+        review_config=cfg.review,
+        interactive=True,
     )
 
     # Phase 3 — Visual Monologue (if preset supports it)
@@ -1158,6 +1163,9 @@ def _project_actions(name, cfg):
             if lineage is not None:
                 _run_analyze(name, meta, cfg, phase2_only=True)
 
+        elif action == "review_storyboard":
+            _run_director_review(ep, meta, cfg)
+
         elif action == "rerun_p3":
             lineage = _confirm_phase_inputs(ep, meta, "monologue")
             if lineage is not None:
@@ -1233,7 +1241,7 @@ def _project_actions(name, cfg):
 
         elif action == "export_xml":
             from .fcpxml_export import export_fcpxml, export_srt_files
-            from .models import EditorialStoryboard
+            from .models import EditorialStoryboard, MonologuePlan
             from .versioning import resolve_versioned_path
 
             json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
@@ -1247,36 +1255,59 @@ def _project_actions(name, cfg):
                 ep.exports.mkdir(parents=True, exist_ok=True)
                 output_path = ep.exports / f"{name}.fcpxml"
 
+                # Check for monologue overlays
+                monologue = None
+                mono_files = sorted(ep.storyboard.glob("monologue_*_latest.json"))
+                if mono_files:
+                    use_mono = questionary.confirm(
+                        "Include text overlays from monologue?", default=True, style=VX_STYLE
+                    ).ask()
+                    if use_mono:
+                        monologue = MonologuePlan.model_validate_json(
+                            resolve_versioned_path(mono_files[0]).read_text()
+                        )
+
                 seg_count = len(sb.segments)
                 clip_count = len(set(s.clip_id for s in sb.segments))
                 print(f"\n  Exporting FCPXML from {sb_path.name}...")
                 print(f"  ({seg_count} segments from {clip_count} clips)\n")
+                if monologue:
+                    print(f"  Including {len(monologue.overlays)} monologue overlays\n")
 
                 result_path = export_fcpxml(
                     storyboard=sb,
                     editorial_paths=ep,
                     output_path=output_path,
                     project_name=name,
+                    monologue=monologue,
                 )
 
                 print(f"  {_GREEN}\u2713 FCPXML exported:{_RESET} {result_path}")
 
-                # Export timeline-aligned SRT if transcripts exist
+                # Export SRT files (monologue + captions as separate tracks)
                 srt_dir = ep.exports / "subtitles"
-                srt_files = export_srt_files(sb, ep, srt_dir)
-                if srt_files:
-                    print(f"  {_GREEN}\u2713 Subtitles:{_RESET}     {srt_files[0].name} (timeline-aligned)")
-                    if len(srt_files) > 1:
-                        print(f"                     + {len(srt_files) - 1} per-clip SRT files")
+                srt_files = export_srt_files(sb, ep, srt_dir, monologue=monologue)
+                mono_srt = next((f for f in srt_files if f.name == "timeline_monologue.srt"), None)
+                caption_srt = next(
+                    (f for f in srt_files if f.name == "timeline_subtitles.srt"), None
+                )
+                per_clip_count = sum(1 for f in srt_files if f.parent == srt_dir)
+                if mono_srt:
+                    print(f"  {_GREEN}\u2713 Monologue:{_RESET}    {mono_srt.name} (text overlays)")
+                if caption_srt:
+                    print(f"  {_GREEN}\u2713 Subtitles:{_RESET}    {caption_srt.name} (speech captions)")
+                if per_clip_count > 0:
+                    print(f"                     + {per_clip_count} per-clip SRT files")
 
                 print(f"\n  {_BOLD}Import into DaVinci Resolve:{_RESET}")
                 print(
                     f"    Timeline:  File \u2192 Import \u2192 Timeline \u2192 {output_path.name}"
                 )
-                if srt_files:
-                    print(
-                        f"    Subtitles: File \u2192 Import \u2192 Subtitle \u2192 {srt_files[0].name}"
-                    )
+                if mono_srt or caption_srt:
+                    names = ", ".join(f.name for f in [mono_srt, caption_srt] if f)
+                    print(f"    Subtitles: File \u2192 Import \u2192 Subtitle \u2192 {names}")
+                    if mono_srt and caption_srt:
+                        print("               (import as separate tracks for proper layering)")
                 print()
             except Exception as exc:
                 print(f"\n  {_RED}Export failed:{_RESET} {exc}\n")
@@ -1823,6 +1854,8 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         tracer=tracer,
         visual=visual,
         style_supplement=p2_supplement,
+        review_config=cfg.review,
+        interactive=True,
     )
 
     # Phase 3 — Visual Monologue (if preset supports it)
@@ -1845,6 +1878,181 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
 
     tracer.print_summary("Analysis Total")
     print("\n  Storyboard ready!")
+
+
+def _run_director_review(ep, meta, cfg):
+    """Run the Editorial Director on the latest storyboard without regenerating Phase 2."""
+    from .config import ReviewBudget
+    from .models import EditorialStoryboard
+    from .review_display import (
+        print_change_diff,
+        print_post_review,
+        print_pre_review,
+        print_turn,
+    )
+    from .tracing import ProjectTracer
+    from .versioning import resolve_user_context_path
+
+    provider = meta.get("provider", "gemini")
+
+    # Load latest storyboard
+    sb_path = None
+    for p in ("gemini", "claude"):
+        candidate = ep.storyboard / f"editorial_{p}_latest.json"
+        if candidate.exists():
+            sb_path = candidate
+            provider = p
+            break
+    if not sb_path:
+        print("\n  No storyboard found. Run Phase 2 first.\n")
+        return
+
+    try:
+        storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
+    except Exception as e:
+        print(f"\n  Error loading storyboard: {e}\n")
+        return
+
+    # Load clip reviews
+    reviews = _load_reviews(ep)
+    if not reviews:
+        print("\n  No clip reviews found. Run Phase 1 first.\n")
+        return
+
+    # Load user context
+    user_context = None
+    ctx_path = resolve_user_context_path(ep.root)
+    if ctx_path:
+        user_context = json.loads(ctx_path.read_text())
+
+    tracer = ProjectTracer(ep.root)
+    budget = ReviewBudget.from_config(cfg.review)
+
+    # Pre-review: compute and show eval scores
+    from .director_prompts import build_eval_summary
+
+    transcripts = {}
+    clip_ids = {s.clip_id for s in storyboard.segments}
+    from .editorial_director import _load_transcripts
+
+    transcripts = _load_transcripts(ep.clips_dir, clip_ids)
+    eval_summary = build_eval_summary(storyboard, reviews, user_context, transcripts)
+
+    print()
+    print_pre_review(
+        eval_summary=eval_summary,
+        seg_count=len(storyboard.segments),
+        duration_sec=storyboard.total_segments_duration,
+        budget=budget,
+    )
+
+    from .editorial_director import run_editorial_review
+
+    # Snapshot before review — harness mutates storyboard in-place
+    original_snapshot = storyboard.model_dump()
+
+    reviewed, review_log = run_editorial_review(
+        storyboard=storyboard,
+        clip_reviews=reviews,
+        user_context=user_context,
+        clips_dir=ep.clips_dir,
+        review_config=cfg.review,
+        tracer=tracer,
+        interactive=True,
+        turn_callback=print_turn,
+    )
+
+    tracer.print_summary("Director Review")
+
+    # Post-review summary
+    had_changes = reviewed.model_dump() != original_snapshot
+    print_post_review(review_log, had_changes)
+
+    # Confirmation flow (only if there are changes)
+    if not had_changes:
+        return
+
+    print("  Changes are NOT saved yet.")
+    while True:
+        action = questionary.select(
+            "Save director's changes as new version?",
+            choices=[
+                questionary.Choice("Accept & save", value="accept"),
+                questionary.Choice("Show full diff", value="diff"),
+                questionary.Choice("Discard changes", value="reject"),
+            ],
+            style=VX_STYLE,
+        ).ask()
+
+        if action == "diff":
+            print_change_diff(review_log)
+            continue
+        elif action == "reject" or action is None:
+            print("\n  Changes discarded. Original storyboard unchanged.\n")
+            return
+        else:  # accept
+            break
+
+    # Save the reviewed storyboard
+    from .render import render_html_preview, render_markdown
+    from .versioning import (
+        begin_version,
+        commit_version,
+        current_version,
+        update_latest_symlink,
+        versioned_dir,
+        versioned_path,
+    )
+
+    rv_version = current_version(ep.root, f"review_{provider}")
+    if rv_version == 0:
+        rv_version = current_version(ep.root, "review")
+    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
+    art_meta = begin_version(
+        ep.root,
+        phase="storyboard",
+        provider=provider,
+        inputs={"source": "director_review"},
+        config_snapshot={"review_model": cfg.review.model},
+        target_dir=ep.storyboard,
+        parent_id=review_parent_id,
+    )
+    v = art_meta.version
+    base = f"editorial_{provider}"
+
+    json_path = versioned_path(ep.storyboard / f"{base}.json", v)
+    json_path.write_text(reviewed.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    md_path = versioned_path(ep.storyboard / f"{base}.md", v)
+    md_path.write_text(render_markdown(reviewed))
+    update_latest_symlink(md_path)
+
+    export_dir = versioned_dir(ep.exports, v)
+    preview_html = render_html_preview(reviewed, clips_dir=ep.clips_dir, output_dir=export_dir)
+    preview_path = export_dir / "preview.html"
+    preview_path.write_text(preview_html)
+    update_latest_symlink(export_dir)
+
+    commit_version(ep.root, art_meta, output_paths=[json_path, md_path], target_dir=ep.storyboard)
+
+    print(f"\n  Storyboard updated (v{v}) with director fixes.")
+    print(f"    JSON:    {json_path}")
+    print(f"    Preview: {preview_path}")
+
+    # Show full segment-by-segment diff
+    print_change_diff(review_log)
+
+    # Auto-open preview in browser
+    import subprocess as _sp
+
+    try:
+        _sp.run(["open", str(preview_path)], check=False)
+        print("  Preview opened in browser.")
+    except Exception:
+        pass
+    print()
 
 
 def _load_reviews(ep):

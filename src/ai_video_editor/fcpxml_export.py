@@ -15,7 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .config import EditorialProjectPaths, OutputFormat
-from .models import EditorialStoryboard, Segment
+from .models import EditorialStoryboard, MonologuePlan, Segment, TextOverlayStyle
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +24,9 @@ CROSS_DISSOLVE_UID = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"
 
 # Default transition duration in seconds
 DEFAULT_TRANSITION_SEC = 1.0
+
+# Fixed monologue style — matches rough_cut.py's _MONOLOGUE_STYLE
+_MONOLOGUE_STYLE = TextOverlayStyle()
 
 # Audio volume mapping from storyboard audio_note to dB adjustment
 AUDIO_VOLUME_MAP: dict[str, str | None] = {
@@ -220,14 +223,182 @@ def _detect_dominant_format(manifest_clips: dict[str, dict]) -> OutputFormat:
     return OutputFormat(width=w, height=h, fps=fps)
 
 
+def _add_title_overlay(
+    parent_clip: ET.Element,
+    overlay,
+    clip_start: Fraction,
+    clip_fps: float,
+    title_effect_id: str,
+) -> None:
+    """Add a monologue text overlay as a connected title on an asset-clip.
+
+    Uses the "Middle" Lower Third effect template which DaVinci Resolve
+    recognises on FCPXML import.  Structure matches a known-working Resolve
+    round-trip export (see example/family-hiking-in-Shipai.fcpxml).
+
+    The title is placed on lane 1 (above the video).  ``offset`` is relative
+    to the parent clip's local timeline (clip ``start`` + overlay appear_at).
+    """
+    style = _MONOLOGUE_STYLE
+
+    text = overlay.text
+    if style.case == "lowercase":
+        text = text.lower()
+    elif style.case == "sentence":
+        text = text.capitalize()
+
+    # Title offset is relative to the parent clip's start attribute
+    title_offset = clip_start + Fraction(overlay.appear_at).limit_denominator(_FRAC_LIMIT)
+    title_offset = title_offset.limit_denominator(_FRAC_LIMIT)
+    title_dur = Fraction(overlay.duration_sec).limit_denominator(_FRAC_LIMIT)
+
+    title_el = ET.SubElement(
+        parent_clip,
+        "title",
+        ref=title_effect_id,
+        offset=f"{title_offset.numerator}/{title_offset.denominator}s",
+        enabled="1",
+        start=_sec_to_frac(0, clip_fps),
+        lane="1",
+        name=text[:40],
+        duration=_sec_to_frac(float(title_dur), clip_fps),
+    )
+
+    # --- Text content (must come before text-style-def to match Resolve's format) ---
+    # The "Middle" Lower Third template has two text fields.
+    # Field 1: the monologue overlay text.  Field 2: left empty.
+    text_el = ET.SubElement(title_el, "text", **{"roll-up-height": "0"})
+    ts_id = f"ts-mono-{overlay.index}"
+    text_span = ET.SubElement(text_el, "text-style", ref=ts_id)
+    text_span.text = text
+
+    # Empty second text field (required by Middle template)
+    ET.SubElement(title_el, "text", **{"roll-up-height": "0"})
+
+    # --- Style definition ---
+    if style.alignment == "center":
+        alignment = "center"
+    elif style.alignment == "right":
+        alignment = "right"
+    else:
+        alignment = "left"
+
+    ts_def = ET.SubElement(title_el, "text-style-def", id=ts_id)
+    ET.SubElement(
+        ts_def,
+        "text-style",
+        font="Open Sans",
+        fontSize="59",
+        fontColor="1 1 1 1",
+        bold="1",
+        italic="0",
+        alignment=alignment,
+        strokeColor="0 0 0 1",
+        strokeWidth="0",
+        lineSpacing="1",
+    )
+
+    # Conform + transform to lower-third position (required for Resolve import).
+    # Resolve multiplies the Y value by (timeline_height / 100), so for a 4K
+    # timeline (2160px): -8.148148 * 21.6 ≈ -176px, placing text in the lower third.
+    ET.SubElement(title_el, "adjust-conform", type="fit")
+    ET.SubElement(
+        title_el,
+        "adjust-transform",
+        position="0 -8.148148",
+        anchor="0 0",
+        scale="1 1",
+    )
+
+
+def _add_caption_title(
+    parent_clip: ET.Element,
+    text: str,
+    caption_start: Fraction,
+    caption_end: Fraction,
+    clip_start: Fraction,
+    clip_fps: float,
+    title_effect_id: str,
+    caption_index: int,
+    upper: bool = False,
+) -> None:
+    """Add a speech caption as a connected title on an asset-clip.
+
+    When *upper* is True (caption collides with a monologue overlay), the title
+    is placed at the upper position (lane 2, position ``0 62.5``, fontSize 55).
+    Otherwise it sits at the default lower-third position (lane 2, position
+    ``0 -8.148148``, fontSize 55).
+    """
+    # Caption offset is clip_start + segment-relative start of the cue
+    title_offset = (clip_start + caption_start).limit_denominator(_FRAC_LIMIT)
+    title_dur = (caption_end - caption_start).limit_denominator(_FRAC_LIMIT)
+
+    cue_text = text.lower()
+
+    title_el = ET.SubElement(
+        parent_clip,
+        "title",
+        ref=title_effect_id,
+        offset=f"{title_offset.numerator}/{title_offset.denominator}s",
+        enabled="1",
+        start=_sec_to_frac(0, clip_fps),
+        lane="2",
+        name=cue_text[:40],
+        duration=_sec_to_frac(float(title_dur), clip_fps),
+    )
+
+    ts_id = f"ts-cap-{caption_index}"
+
+    # Text content (before style def, matching Resolve format)
+    text_el = ET.SubElement(title_el, "text", **{"roll-up-height": "0"})
+    text_span = ET.SubElement(text_el, "text-style", ref=ts_id)
+    text_span.text = cue_text
+
+    # Empty second text field (Middle template)
+    ET.SubElement(title_el, "text", **{"roll-up-height": "0"})
+
+    # Style definition
+    ts_def = ET.SubElement(title_el, "text-style-def", id=ts_id)
+    ET.SubElement(
+        ts_def,
+        "text-style",
+        font="Open Sans",
+        fontSize="55",
+        fontColor="1 1 1 1",
+        bold="1",
+        italic="0",
+        alignment="center",
+        strokeColor="0 0 0 1",
+        strokeWidth="0",
+        lineSpacing="1",
+    )
+
+    # Position: upper when colliding with monologue, lower-third otherwise
+    y_pos = "62.5" if upper else "-8.148148"
+    ET.SubElement(title_el, "adjust-conform", type="fit")
+    ET.SubElement(
+        title_el,
+        "adjust-transform",
+        position=f"0 {y_pos}",
+        anchor="0 0",
+        scale="1 1",
+    )
+
+
 def export_fcpxml(
     storyboard: EditorialStoryboard,
     editorial_paths: EditorialProjectPaths,
     output_path: Path,
     output_format: OutputFormat | None = None,
     project_name: str | None = None,
+    monologue: MonologuePlan | None = None,
 ) -> Path:
     """Generate an FCPXML v1.9 file from an EditorialStoryboard.
+
+    When *monologue* is provided, overlays are embedded as ``<title>`` elements
+    referencing the "Middle" Lower Third effect (confirmed working in DaVinci
+    Resolve import).  A companion monologue SRT is also produced by
+    ``export_srt_files`` for editors who prefer subtitle-track workflows.
 
     Args:
         storyboard: The editorial storyboard with segments to export.
@@ -235,6 +406,8 @@ def export_fcpxml(
         output_path: Where to write the .fcpxml file.
         output_format: Target format (defaults to 1920x1080 29.97fps).
         project_name: Name for the FCPXML project element.
+        monologue: Optional monologue plan — overlays are exported as title
+            elements on lane 1 above the video timeline.
 
     Returns:
         The output path written.
@@ -294,6 +467,24 @@ def export_fcpxml(
         name="Cross Dissolve",
         uid=CROSS_DISSOLVE_UID,
     )
+
+    # "Middle" Lower Third title effect — confirmed working in Resolve import.
+    # The .moti UID is the standard FCP/Resolve built-in template path.
+    title_effect_id = ""
+    overlay_map: dict[int, list] = {}
+    if monologue:
+        for ov in monologue.overlays:
+            overlay_map.setdefault(ov.segment_index, []).append(ov)
+    if overlay_map:
+        title_effect_id = "r_title"
+        ET.SubElement(
+            resources,
+            "effect",
+            id=title_effect_id,
+            uid=".../Titles.localized/Lower Thirds.localized/"
+            "Middle.localized/Middle.moti",
+            name="Middle",
+        )
 
     # Asset elements — one per source clip, ALL clips from manifest (r2, r3, ...)
     asset_id_map: dict[str, str] = {}  # clip_id -> resource id
@@ -386,8 +577,31 @@ def export_fcpxml(
     )
     spine = ET.SubElement(sequence, "spine")
 
+    # Load transcripts for caption titles when monologue is present
+    # (mirrors rough_cut.py: burn_captions=monologue is not None)
+    caption_transcripts: dict[str, list] = {}
+    if overlay_map:
+        from .versioning import resolve_transcript_path
+
+        for clip_id in used_clip_ids:
+            clip_root = editorial_paths.clips_dir / clip_id
+            tp = resolve_transcript_path(clip_root)
+            if tp:
+                data = json.loads(tp.read_text())
+                if data.get("has_speech", False):
+                    caption_transcripts[clip_id] = data.get("segments", [])
+
+    # Build monologue intervals per segment for caption collision detection
+    mono_intervals_by_seg: dict[int, list[tuple[float, float]]] = {}
+    if monologue:
+        for ov in monologue.overlays:
+            mono_intervals_by_seg.setdefault(ov.segment_index, []).append(
+                (ov.appear_at, ov.appear_at + ov.duration_sec)
+            )
+
     # Walk segments and build timeline
     timeline_offset = Fraction(0)
+    caption_counter = 0
 
     for i, seg in enumerate(storyboard.segments):
         if seg.clip_id not in asset_id_map:
@@ -449,6 +663,64 @@ def export_fcpxml(
         if volume is not None:
             ET.SubElement(clip_el, "adjust-volume", amount=volume)
 
+        # Add monologue text overlays as connected title clips above the video
+        seg_overlays = overlay_map.get(seg.index)
+        if seg_overlays:
+            for ov in seg_overlays:
+                _add_title_overlay(clip_el, ov, clip_start, clip_fps, title_effect_id)
+
+        # Add speech caption titles (lane 2) when monologue is present
+        seg_mono_intervals = mono_intervals_by_seg.get(seg.index)
+        transcript_segs = caption_transcripts.get(seg.clip_id)
+        if transcript_segs and overlay_map:
+            for tseg in transcript_segs:
+                if tseg.get("type", "speech") != "speech":
+                    continue
+                cue_text = tseg.get("text", "").strip()
+                if not cue_text:
+                    continue
+
+                cue_start = tseg.get("start", 0.0)
+                cue_end = tseg.get("end", 0.0)
+
+                # Skip cues outside the segment window
+                if cue_end <= seg.in_sec or cue_start >= seg.out_sec:
+                    continue
+
+                # Clamp to segment boundaries and convert to segment-relative
+                local_start = Fraction(max(0.0, cue_start - seg.in_sec)).limit_denominator(
+                    _FRAC_LIMIT
+                )
+                local_end = Fraction(
+                    min(float(seg_duration), cue_end - seg.in_sec)
+                ).limit_denominator(_FRAC_LIMIT)
+
+                if local_end - local_start < Fraction(2, 10):
+                    continue
+
+                # Check for collision with monologue overlays
+                is_upper = False
+                if seg_mono_intervals:
+                    ls = float(local_start)
+                    le = float(local_end)
+                    for m_start, m_end in seg_mono_intervals:
+                        if ls < m_end and le > m_start:
+                            is_upper = True
+                            break
+
+                _add_caption_title(
+                    clip_el,
+                    cue_text,
+                    local_start,
+                    local_end,
+                    clip_start,
+                    clip_fps,
+                    title_effect_id,
+                    caption_counter,
+                    upper=is_upper,
+                )
+                caption_counter += 1
+
         # Check for fade_out on this segment (transition at end)
         if seg.transition == "fade_out":
             fade_offset = float(timeline_offset + seg_duration) - float(transition_dur) / 2
@@ -475,7 +747,16 @@ def export_fcpxml(
         f.write(b"<!DOCTYPE fcpxml>\n")
         tree.write(f, encoding="UTF-8", xml_declaration=False)
 
-    log.info("FCPXML written to %s", output_path)
+    overlay_count = sum(len(ovs) for ovs in overlay_map.values())
+    parts = []
+    if overlay_count:
+        parts.append(f"{overlay_count} monologue overlays")
+    if caption_counter:
+        parts.append(f"{caption_counter} captions")
+    if parts:
+        log.info("FCPXML written to %s (%s)", output_path, ", ".join(parts))
+    else:
+        log.info("FCPXML written to %s", output_path)
     return output_path
 
 
@@ -483,16 +764,26 @@ def export_srt_files(
     storyboard: EditorialStoryboard,
     editorial_paths: EditorialProjectPaths,
     output_dir: Path,
+    monologue: MonologuePlan | None = None,
 ) -> list[Path]:
-    """Export a timeline-aligned SRT plus per-clip SRT files alongside the FCPXML.
+    """Export timeline-aligned SRT files alongside the FCPXML.
 
-    The timeline SRT is the primary output: subtitle cues are remapped to match the
-    FCPXML timeline offsets, so importing one SRT file into DaVinci Resolve gives you
-    subtitles that are already synced to the assembled edit. No manual association needed.
+    Produces up to three kinds of SRT:
 
-    Per-clip SRT files are also exported for reference or individual clip work.
+    1. **Monologue SRT** (``timeline_monologue.srt``) — text overlays from the
+       monologue plan, timed to the assembled timeline.  Import this as a
+       separate subtitle track in DaVinci Resolve so it lives on its own lane.
+    2. **Caption SRT** (``timeline_subtitles.srt``) — speech-only captions from
+       transcripts, remapped to timeline offsets.  Plain text (no speaker names).
+    3. **Per-clip SRT** files — raw per-clip transcripts for reference.
 
-    Returns list of SRT paths written.
+    Because DaVinci Resolve ignores ``{\\an8}`` positioning tags in SRT, the
+    collision-avoidance strategy is *track separation*: monologue and captions
+    are exported as two independent SRT files so the editor can place them on
+    different subtitle tracks/lanes in the NLE.
+
+    Returns list of SRT paths written (monologue first, then timeline captions,
+    then per-clip files).
     """
     from .transcribe import generate_srt
     from .versioning import resolve_transcript_path
@@ -500,10 +791,51 @@ def export_srt_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
-    # Collect unique clip IDs that appear in the storyboard
+    # ------------------------------------------------------------------
+    # Monologue SRT — text overlays on a dedicated subtitle track
+    # ------------------------------------------------------------------
+    if monologue and monologue.overlays:
+        # Build segment_index → timeline_offset lookup
+        seg_timeline_offsets: dict[int, float] = {}
+        offset = 0.0
+        for seg in storyboard.segments:
+            seg_timeline_offsets[seg.index] = offset
+            dur = seg.out_sec - seg.in_sec
+            if dur > 0:
+                offset += dur
+
+        style = _MONOLOGUE_STYLE
+        mono_srt_path = output_dir.parent / "timeline_monologue.srt"
+        mono_entries: list[str] = []
+        for i, ov in enumerate(monologue.overlays, start=1):
+            tl_base = seg_timeline_offsets.get(ov.segment_index, 0.0)
+            tl_start = tl_base + ov.appear_at
+            tl_end = tl_start + ov.duration_sec
+
+            text = ov.text
+            if style.case == "lowercase":
+                text = text.lower()
+            elif style.case == "sentence":
+                text = text.capitalize()
+
+            mono_entries.append(
+                f"{i}\n"
+                f"{_srt_timecode(tl_start)} --> {_srt_timecode(tl_end)}\n"
+                f"{text}\n"
+            )
+
+        if mono_entries:
+            mono_srt_path.write_text("\n".join(mono_entries), encoding="utf-8")
+            written.append(mono_srt_path)
+            log.info(
+                "Monologue SRT written: %s (%d overlays)", mono_srt_path, len(mono_entries)
+            )
+
+    # ------------------------------------------------------------------
+    # Speech captions — load transcripts
+    # ------------------------------------------------------------------
     used_clip_ids = list(dict.fromkeys(seg.clip_id for seg in storyboard.segments))
 
-    # Load all transcripts needed
     clip_transcripts: dict[str, dict] = {}
     for clip_id in used_clip_ids:
         clip_root = editorial_paths.clips_dir / clip_id
@@ -515,7 +847,7 @@ def export_srt_files(
         if transcript.get("has_speech", False):
             clip_transcripts[clip_id] = transcript
 
-    if not clip_transcripts:
+    if not clip_transcripts and not written:
         return written
 
     # --- Per-clip SRT files (reference) ---
@@ -524,11 +856,11 @@ def export_srt_files(
         generate_srt(transcript, srt_path)
         written.append(srt_path)
 
-    # --- Timeline-aligned SRT (primary output) ---
+    # --- Timeline-aligned caption SRT ---
     timeline_srt_path = output_dir.parent / "timeline_subtitles.srt"
     timeline_entries: list[str] = []
     cue_index = 1
-    timeline_offset = 0.0  # running offset on the assembled timeline
+    timeline_offset = 0.0
 
     for seg in storyboard.segments:
         seg_duration = seg.out_sec - seg.in_sec
@@ -540,35 +872,23 @@ def export_srt_files(
             for tseg in transcript.get("segments", []):
                 seg_type = tseg.get("type", "speech")
                 text = tseg.get("text", "")
-                if not text or seg_type == "silence":
+                if not text or seg_type != "speech":
                     continue
 
-                # Only include cues that overlap the segment's in/out window
                 cue_start = tseg.get("start", 0.0)
                 cue_end = tseg.get("end", 0.0)
 
-                # Skip cues entirely outside the segment window
                 if cue_end <= seg.in_sec or cue_start >= seg.out_sec:
                     continue
 
-                # Clamp to segment boundaries
                 effective_start = max(cue_start, seg.in_sec)
                 effective_end = min(cue_end, seg.out_sec)
 
-                # Remap to timeline position
                 tl_start = timeline_offset + (effective_start - seg.in_sec)
                 tl_end = timeline_offset + (effective_end - seg.in_sec)
 
-                # Format cue text with speaker/type markers
-                speaker = tseg.get("speaker")
-                if seg_type == "music":
-                    cue_text = f"\u266a {text} \u266a"
-                elif seg_type == "sound_effect":
-                    cue_text = f"[{text}]"
-                elif speaker:
-                    cue_text = f"{speaker}: {text}"
-                else:
-                    cue_text = text
+                # Plain text only — no speaker names, just the words spoken
+                cue_text = text.lower()
 
                 timeline_entries.append(
                     f"{cue_index}\n"
@@ -581,7 +901,7 @@ def export_srt_files(
 
     if timeline_entries:
         timeline_srt_path.write_text("\n".join(timeline_entries), encoding="utf-8")
-        written.insert(0, timeline_srt_path)  # primary output first
+        written.append(timeline_srt_path)
         log.info("Timeline SRT written: %s (%d cues)", timeline_srt_path, cue_index - 1)
 
     return written

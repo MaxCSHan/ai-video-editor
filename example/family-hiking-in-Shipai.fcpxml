@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.9">
+    <resources>
+        <format id="r0" frameDuration="1/30s" height="2160" width="3840" name="FFVideoFormat3840x2160p30"/>
+        <format id="r3" frameDuration="1001/24000s" height="2160" width="3840" name="FFVideoFormat3840x2160p2398"/>
+        <effect id="r2" uid="FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265" name="Cross Dissolve"/>
+        <effect id="r22" uid=".../Titles.localized/Lower Thirds.localized/Middle.localized/Middle.moti" name="Middle"/>
+        <media id="r15" name="20260315172158_C0015.MP4">
+            <sequence format="r0" tcStart="2083471/30s" tcFormat="NDF" duration="961/30s">
+                <spine>
+                    <clip offset="2083471/30s" format="r3" enabled="1" tcFormat="NDF" start="208347139/3000s" name="20260315172158_C0015.MP4" duration="32/1s">
+                        <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        <video ref="r14" offset="208347139/3000s" start="208347139/3000s" duration="4004/125s"/>
+                    </clip>
+                    <gap offset="2084431/30s" start="3600/1s" name="Gap" duration="1/30s"/>
+                </spine>
+            </sequence>
+        </media>
+        <media id="r21" name="20260315174733_C0017.MP4">
+            <sequence format="r0" tcStart="695061/10s" tcFormat="NDF" duration="49/2s">
+                <spine>
+                    <clip offset="695061/10s" format="r3" enabled="1" tcFormat="NDF" start="20851831/300s" name="20260315174733_C0017.MP4" duration="49/2s">
+                        <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        <video ref="r20" offset="20851831/300s" start="20851831/300s" duration="49049/2000s"/>
+                    </clip>
+                </spine>
+            </sequence>
+        </media>
+        <media id="r5" name="20260315162915_C0003.MP4">
+            <sequence format="r0" tcStart="207787/3s" tcFormat="NDF" duration="931/30s">
+                <spine>
+                    <clip offset="207787/3s" format="r3" enabled="1" tcFormat="NDF" start="415574159/6000s" name="20260315162915_C0003.MP4" duration="31/1s">
+                        <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        <video ref="r4" offset="415574159/6000s" start="415574159/6000s" duration="31031/1000s"/>
+                    </clip>
+                    <gap offset="207880/3s" start="3600/1s" name="Gap" duration="1/30s"/>
+                </spine>
+            </sequence>
+        </media>
+        <asset id="r1" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9346.MOV" audioChannels="2" duration="36/1s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9346.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r4" format="r3" hasVideo="1" audioSources="1" hasAudio="1" start="415574159/6000s" name="20260315162915_C0003.MP4" audioChannels="2" duration="31031/1000s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/20260315162915_C0003.MP4" kind="original-media"/>
+        </asset>
+        <asset id="r6" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9346.MOV" audioChannels="2" duration="36/1s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9346.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r7" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9349.MOV" audioChannels="2" duration="154/3s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9349.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r8" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9349.MOV" audioChannels="2" duration="154/3s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9349.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r9" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9355.MOV" audioChannels="2" duration="1073/30s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9355.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r10" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9356.MOV" audioChannels="2" duration="329/6s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9356.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r11" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9356.MOV" audioChannels="2" duration="329/6s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9356.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r12" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9357.MOV" audioChannels="2" duration="167/6s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9357.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r13" format="r3" hasVideo="1" audioSources="1" hasAudio="1" start="208227019/3000s" name="20260315171822_C0014.MP4" audioChannels="2" duration="1001/25s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/20260315171822_C0014.MP4" kind="original-media"/>
+        </asset>
+        <asset id="r14" format="r3" hasVideo="1" audioSources="1" hasAudio="1" start="208347139/3000s" name="20260315172158_C0015.MP4" audioChannels="2" duration="4004/125s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/20260315172158_C0015.MP4" kind="original-media"/>
+        </asset>
+        <asset id="r16" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9360.MOV" audioChannels="2" duration="1412/15s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9360.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r17" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9360.MOV" audioChannels="2" duration="1412/15s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9360.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r18" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9363.MOV" audioChannels="2" duration="301/6s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9363.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r19" format="r0" hasVideo="1" audioSources="1" hasAudio="1" start="0/1s" name="IMG_9363.MOV" audioChannels="2" duration="301/6s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/IMG_9363.MOV" kind="original-media"/>
+        </asset>
+        <asset id="r20" format="r3" hasVideo="1" audioSources="1" hasAudio="1" start="20851831/300s" name="20260315174733_C0017.MP4" audioChannels="2" duration="49049/2000s">
+            <media-rep src="file:///Volumes/Seagate%20Hub/family-hiking-in-Shipai/20260315174733_C0017.MP4" kind="original-media"/>
+        </asset>
+    </resources>
+    <library>
+        <event name="family-hiking-in-Shipai (Resolve)">
+            <project name="family-hiking-in-Shipai (Resolve)">
+                <sequence format="r0" tcStart="0/1s" tcFormat="NDF" duration="1483/5s">
+                    <spine>
+                        <asset-clip ref="r1" offset="0/1s" format="r0" enabled="1" tcFormat="NDF" start="8/1s" name="IMG_9346.MOV" duration="8/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="9/1s" enabled="1" start="1/1s" lane="1" name="hey... come along with us today." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts0">hey... come along with us today.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts0">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                            <title ref="r22" offset="9/1s" enabled="1" start="1/1s" lane="2" name="hey... come along with us today." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts17">upper smaller caption space</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts17">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="55" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 62.5" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <transition offset="15/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <ref-clip ref="r5" offset="8/1s" start="2078411/30s" name="20260315162915_C0003.MP4" duration="13/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="2078441/30s" enabled="1" start="9/1s" lane="1" name="we're back at battleship rock." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts1">we're back at battleship rock.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts1">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                            <title ref="r22" offset="2078621/30s" enabled="1" start="15/1s" lane="1" name="it's been way too long." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts2">it's been way too long.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts2">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </ref-clip>
+                        <transition offset="41/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <gap offset="21/1s" start="3600/1s" name="Gap" duration="7/1s">
+                            <title ref="r22" offset="3601/1s" enabled="1" start="22/1s" lane="1" name="the air is clear and bright." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts3">the air is clear and bright.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts3">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </gap>
+                        <transition offset="55/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <gap offset="28/1s" start="3600/1s" name="Gap" duration="9/1s">
+                            <title ref="r22" offset="3601/1s" enabled="1" start="29/1s" lane="1" name="just a simple family walk..." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts4">just a simple family walk...</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts4">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </gap>
+                        <transition offset="73/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <gap offset="37/1s" start="3600/1s" name="Gap" duration="8/1s">
+                            <title ref="r22" offset="3601/1s" enabled="1" start="38/1s" lane="1" name="revisiting old memories with mom and dad" duration="21/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts5">revisiting old memories with mom and dad.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts5">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </gap>
+                        <asset-clip ref="r6" offset="45/1s" format="r0" enabled="1" tcFormat="NDF" start="16/1s" name="IMG_9346.MOV" duration="19/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </asset-clip>
+                        <asset-clip ref="r7" offset="64/1s" format="r0" enabled="1" tcFormat="NDF" start="21/1s" name="IMG_9349.MOV" duration="21/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="23/1s" enabled="1" start="66/1s" lane="1" name="dad says he found a secret path." duration="21/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts6">dad says he found a secret path.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts6">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <asset-clip ref="r8" offset="85/1s" format="r0" enabled="1" tcFormat="NDF" start="8/1s" name="IMG_9349.MOV" duration="12/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </asset-clip>
+                        <asset-clip ref="r9" offset="97/1s" format="r0" enabled="1" tcFormat="NDF" start="2/1s" name="IMG_9355.MOV" duration="13/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="4/1s" enabled="1" start="99/1s" lane="1" name="the ridge gets a little steep here." duration="21/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts7">the ridge gets a little steep here.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts7">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <asset-clip ref="r10" offset="110/1s" format="r0" enabled="1" tcFormat="NDF" start="11/1s" name="IMG_9356.MOV" duration="9/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </asset-clip>
+                        <transition offset="237/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <asset-clip ref="r11" offset="119/1s" format="r0" enabled="1" tcFormat="NDF" start="36/1s" name="IMG_9356.MOV" duration="18/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="38/1s" enabled="1" start="121/1s" lane="1" name="almost at the top now." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts8">almost at the top now.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts8">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <asset-clip ref="r12" offset="137/1s" format="r0" enabled="1" tcFormat="NDF" start="13/1s" name="IMG_9357.MOV" duration="14/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="15/1s" enabled="1" start="139/1s" lane="1" name="finding our way down the valley." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts9">finding our way down the valley.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts9">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <transition offset="301/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <gap offset="151/1s" start="3600/1s" name="Gap" duration="18/1s">
+                            <title ref="r22" offset="54074/15s" enabled="1" start="2339/15s" lane="1" name="standing on the edge of the world." duration="49/10s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts10">standing on the edge of the world.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts10">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </gap>
+                        <transition offset="337/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <asset-clip audioDuration="9/1s" ref="r13" offset="169/1s" format="r3" enabled="1" tcFormat="NDF" start="111103993/1600s" audioStart="111103993/1600s" name="20260315171822_C0014.MP4" duration="9/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="111105593/1600s" enabled="1" start="170/1s" lane="1" name="the summit is always crowded..." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts11">the summit is always crowded...</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts11">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <ref-clip ref="r15" offset="178/1s" start="2084101/30s" name="20260315172158_C0015.MP4" duration="11/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </ref-clip>
+                        <transition offset="377/2s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <gap offset="189/1s" start="3600/1s" name="Gap" duration="26/1s">
+                            <title ref="r22" offset="3602/1s" enabled="1" start="191/1s" lane="1" name="someone is playing cinema paradiso." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts12">someone is playing cinema paradiso.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts12">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                            <title ref="r22" offset="3608/1s" enabled="1" start="197/1s" lane="1" name="it feels like a movie scene." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts13">it feels like a movie scene.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts13">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </gap>
+                        <asset-clip ref="r16" offset="215/1s" format="r0" enabled="1" tcFormat="NDF" start="26/1s" name="IMG_9360.MOV" duration="381/10s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </asset-clip>
+                        <transition offset="1263/5s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <asset-clip ref="r17" offset="2531/10s" format="r0" enabled="1" tcFormat="NDF" start="321/5s" name="IMG_9360.MOV" duration="12/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="331/5s" enabled="1" start="2551/10s" lane="1" name="watching the city turn to gold." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts14">watching the city turn to gold.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts14">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <transition offset="1323/5s" name="Cross Dissolve" duration="1/1s">
+                            <filter-video ref="r2" name="Cross Dissolve"/>
+                        </transition>
+                        <asset-clip ref="r18" offset="2651/10s" format="r0" enabled="1" tcFormat="NDF" start="2/1s" name="IMG_9363.MOV" duration="13/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="4/1s" enabled="1" start="2671/10s" lane="1" name="the perfect end to the hike." duration="18/5s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts15">the perfect end to the hike.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts15">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </asset-clip>
+                        <asset-clip ref="r19" offset="2781/10s" format="r0" enabled="1" tcFormat="NDF" start="41/1s" name="IMG_9363.MOV" duration="9/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                        </asset-clip>
+                        <ref-clip ref="r21" offset="2871/10s" start="695211/10s" name="20260315174733_C0017.MP4" duration="9/1s">
+                            <adjust-conform type="fit"/>
+                            <adjust-transform position="0 0" anchor="0 0" scale="1 1"/>
+                            <adjust-volume amount="-6"/>
+                            <title ref="r22" offset="695221/10s" enabled="1" start="2881/10s" lane="1" name="until next time... take care." duration="3/1s">
+                                <text roll-up-height="0">
+                                    <text-style ref="ts16">until next time... take care.</text-style>
+                                </text>
+                                <text roll-up-height="0"/>
+                                <text-style-def id="ts16">
+                                    <text-style italic="0" alignment="center" fontColor="1 1 1 1" fontSize="59" bold="1" strokeColor="0 0 0 1" lineSpacing="1" strokeWidth="0" font="Open Sans"/>
+                                </text-style-def>
+                                <adjust-conform type="fit"/>
+                                <adjust-transform position="0 -8.14815" anchor="0 0" scale="1 1"/>
+                            </title>
+                        </ref-clip>
+                        <gap offset="2961/10s" start="3600/1s" name="Gap" duration="1/2s"/>
+                    </spine>
+                </sequence>
+            </project>
+        </event>
+    </library>
+</fcpxml>
