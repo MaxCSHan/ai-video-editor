@@ -681,6 +681,9 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
             choices.append(questionary.Choice("Assemble rough cut", value="assemble"))
         else:
             choices.append(questionary.Choice("Assemble rough cut (proxy)", value="assemble_proxy"))
+        choices.append(
+            questionary.Choice("Export to DaVinci Resolve (.fcpxml)", value="export_xml")
+        )
 
     # --- Project (global) ---
     choices.append(Separator("── Project ──"))
@@ -1226,6 +1229,47 @@ def _project_actions(name, cfg):
                 print(f"\n  Done! {result.get('cut_id', '')}")
                 if questionary.confirm("Open preview?", default=True, style=VX_STYLE).ask():
                     subprocess.run(["open", str(result["preview"])])
+
+        elif action == "export_xml":
+            from .fcpxml_export import export_fcpxml, export_srt_files
+            from .models import EditorialStoryboard
+            from .versioning import resolve_versioned_path
+
+            json_files = sorted(ep.storyboard.glob("editorial_*_latest.json"))
+            if json_files:
+                sb_path = resolve_versioned_path(json_files[0])
+                sb = EditorialStoryboard.model_validate_json(sb_path.read_text())
+                ep.exports.mkdir(parents=True, exist_ok=True)
+                output_path = ep.exports / f"{name}.fcpxml"
+
+                print(f"\n  Exporting FCPXML from {sb_path.name}...")
+                export_fcpxml(
+                    storyboard=sb,
+                    editorial_paths=ep,
+                    output_path=output_path,
+                    project_name=name,
+                )
+                print(f"  {_GREEN}FCPXML:{_RESET} {output_path}")
+
+                # Export timeline-aligned SRT if transcripts exist
+                srt_dir = ep.exports / "subtitles"
+                srt_files = export_srt_files(sb, ep, srt_dir)
+                if srt_files:
+                    print(f"  {_GREEN}Subtitles:{_RESET} {srt_files[0].name} (timeline-aligned)")
+                    if len(srt_files) > 1:
+                        print(f"               + {len(srt_files) - 1} per-clip SRT files")
+
+                print("\n  Import into DaVinci Resolve:")
+                print(
+                    f"    Timeline:  File \u2192 Import \u2192 Timeline \u2192 {output_path.name}"
+                )
+                if srt_files:
+                    print(
+                        f"    Subtitles: File \u2192 Import \u2192 Subtitle \u2192 {srt_files[0].name}"
+                    )
+                print()
+            else:
+                print(f"\n  {_DIM}No storyboard found. Run analysis first.{_RESET}\n")
 
         elif action == "regen_preview":
             from .models import EditorialStoryboard
