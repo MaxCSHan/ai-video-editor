@@ -12,6 +12,7 @@ Commands:
     vx transcribe [project]      Transcribe audio (mlx-whisper local or Gemini cloud)
     vx analyze [project]         Run AI analysis and generate storyboard
     vx cut [project]             Assemble rough cut video (no LLM)
+    vx export-xml [project]      Export FCPXML for DaVinci Resolve / FCP
     vx config [--key value]      Show or update workspace defaults
 """
 
@@ -1064,6 +1065,87 @@ def cmd_cut(args, cfg: Config):
     print(f"\n  Open preview: {DIM}open {result['preview']}{RESET}")
 
 
+def cmd_export_xml(args, cfg: Config):
+    """Export storyboard as FCPXML for DaVinci Resolve / Final Cut Pro."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} 'vx export-xml' is only for editorial projects.")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+
+    # Resolve storyboard path (composition > --storyboard flag > latest)
+    composition = None
+    if getattr(args, "composition", None):
+        from .versioning import get_composition
+
+        composition = get_composition(project_root, args.composition)
+        if not composition:
+            print(f"{RED}Error:{RESET} Composition '{args.composition}' not found.")
+            sys.exit(1)
+        print(f"  Using composition: {args.composition}")
+
+    if composition:
+        from .versioning import resolve_artifact_path
+
+        json_path = resolve_artifact_path(project_root, composition.storyboard)
+        if not json_path:
+            print(f"{RED}Error:{RESET} Could not resolve storyboard: {composition.storyboard}")
+            sys.exit(1)
+    elif getattr(args, "storyboard", None):
+        sv = args.storyboard.lstrip("v")
+        matches = list(ep.storyboard.glob(f"editorial_*_v{sv}.json"))
+        if not matches:
+            print(f"{RED}Error:{RESET} No storyboard v{sv} found.")
+            sys.exit(1)
+        json_path = matches[0]
+    else:
+        json_path = _find_storyboard_json(ep)
+    if not json_path:
+        print(
+            f"{RED}Error:{RESET} No structured storyboard JSON found. "
+            f"Run {BOLD}vx analyze {name}{RESET} first."
+        )
+        sys.exit(1)
+
+    _header(f"Export FCPXML: {name}")
+    print(f"  Storyboard: {json_path.name}")
+
+    from .models import EditorialStoryboard
+    from .fcpxml_export import export_fcpxml
+
+    storyboard = EditorialStoryboard.model_validate_json(json_path.read_text())
+
+    # Determine output path
+    if getattr(args, "output", None):
+        output_path = Path(args.output)
+    else:
+        ep.exports.mkdir(parents=True, exist_ok=True)
+        output_path = ep.exports / f"{name}.fcpxml"
+
+    result = export_fcpxml(
+        storyboard=storyboard,
+        editorial_paths=ep,
+        output_path=output_path,
+        project_name=name,
+    )
+
+    print(f"  {GREEN}FCPXML:{RESET}     {result}")
+    print(f"  Segments:    {len(storyboard.segments)}")
+    print(f"  Duration:    {format_duration(storyboard.total_segments_duration)}")
+    print(f"\n  Import into DaVinci Resolve: File → Import → Timeline → {result.name}")
+
+
 def cmd_config(args, cfg: Config):
     """Show or update workspace defaults."""
     ws = _read_workspace_config()
@@ -1542,6 +1624,27 @@ def main():
         help="Use a specific monologue version (e.g., v1)",
     )
 
+    # --- export-xml ---
+    p_export_xml = sub.add_parser(
+        "export-xml", help="Export storyboard as FCPXML for DaVinci Resolve / Final Cut Pro"
+    )
+    p_export_xml.add_argument("project", nargs="?", help="Project name")
+    p_export_xml.add_argument(
+        "--composition",
+        metavar="NAME",
+        help="Use a named composition (storyboard + monologue combination)",
+    )
+    p_export_xml.add_argument(
+        "--storyboard",
+        metavar="VERSION",
+        help="Use a specific storyboard version (e.g., v3)",
+    )
+    p_export_xml.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output file path (default: exports/<project>.fcpxml)",
+    )
+
     # --- versions ---
     p_versions = sub.add_parser(
         "versions", aliases=["ver"], help="List artifact versions with lineage"
@@ -1609,6 +1712,7 @@ def main():
         "brief": cmd_brief,
         "preview": cmd_preview,
         "cut": cmd_cut,
+        "export-xml": cmd_export_xml,
         "versions": cmd_versions,
         "ver": cmd_versions,
         "compose": cmd_compose,
