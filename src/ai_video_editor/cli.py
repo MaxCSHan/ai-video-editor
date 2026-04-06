@@ -660,6 +660,10 @@ def cmd_analyze(args, cfg: Config):
         interactive = not getattr(args, "no_interactive", False)
         visual = getattr(args, "visual", False)
 
+        # Enable split pipeline if --split flag is set
+        if getattr(args, "split", False):
+            cfg.gemini.use_split_pipeline = True
+
         # Apply review CLI overrides
         if getattr(args, "no_review", False):
             cfg.review.enabled = False
@@ -873,6 +877,16 @@ def cmd_review(args, cfg: Config):
         budget=budget,
     )
 
+    # Load style guidelines from project preset (if any)
+    style_guidelines = None
+    preset_key = meta.get("style_preset")
+    if preset_key:
+        from .style_presets import get_preset
+
+        preset = get_preset(preset_key)
+        if preset:
+            style_guidelines = preset.phase2_supplement
+
     # Snapshot before review — harness mutates storyboard in-place
     original_snapshot = storyboard.model_dump()
 
@@ -885,6 +899,7 @@ def cmd_review(args, cfg: Config):
         tracer=tracer,
         interactive=True,
         turn_callback=print_turn,
+        style_guidelines=style_guidelines,
     )
 
     tracer.print_summary("Director Review")
@@ -941,6 +956,185 @@ def cmd_review(args, cfg: Config):
         )
 
         print(f"{GREEN}Storyboard updated (v{v}) with director fixes:{RESET}")
+        print(f"    JSON:    {json_path}")
+        print(f"    Preview: {preview_path}")
+
+
+def cmd_chat(args, cfg: Config):
+    """Chat with Editorial Director for conversational storyboard editing."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} Chat is only supported for editorial projects.")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+    provider = meta.get("provider", "gemini")
+
+    # Find latest storyboard
+    sb_path = None
+    for p in ("gemini", "claude"):
+        candidate = ep.storyboard / f"editorial_{p}_latest.json"
+        if candidate.exists():
+            sb_path = candidate
+            provider = p
+            break
+    if not sb_path:
+        print(f"{RED}Error:{RESET} No storyboard found. Run {BOLD}vx analyze {name}{RESET} first.")
+        sys.exit(1)
+
+    from .models import EditorialStoryboard
+
+    storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
+
+    # Load clip reviews
+    reviews = []
+    for clip_id in ep.discover_clips():
+        cp = ep.clip_paths(clip_id)
+        for pattern in ["review_*_latest.json", "review_*.json"]:
+            found = [
+                f
+                for f in cp.review.glob(pattern)
+                if not f.name.endswith("_latest.json") or f.is_symlink()
+            ]
+            if found:
+                reviews.append(json.loads(found[0].read_text()))
+                break
+    if not reviews:
+        print(f"{RED}Error:{RESET} No clip reviews. Run {BOLD}vx analyze {name}{RESET} first.")
+        sys.exit(1)
+
+    # Load user context
+    from .versioning import resolve_user_context_path
+
+    user_context = None
+    ctx_path = resolve_user_context_path(ep.root)
+    if ctx_path:
+        user_context = json.loads(ctx_path.read_text())
+
+    # Style guidelines
+    style_guidelines = None
+    preset_key = meta.get("style_preset")
+    if preset_key:
+        from .style_presets import get_preset
+
+        preset = get_preset(preset_key)
+        if preset:
+            style_guidelines = preset.phase2_supplement
+
+    # Apply CLI overrides
+    if getattr(args, "budget", None) is not None:
+        cfg.review.max_review_cost_usd = args.budget
+    if getattr(args, "max_turns", None) is not None:
+        cfg.review.max_turns = args.max_turns
+
+    from .config import ReviewBudget
+    from .editorial_director import run_director_chat
+    from .review_display import print_post_review, print_pre_review, print_turn
+    from .tracing import ProjectTracer
+
+    tracer = ProjectTracer(ep.root)
+    budget = ReviewBudget.from_config(cfg.review)
+
+    # Pre-review summary
+    from .director_prompts import build_eval_summary
+    from .editorial_director import _load_transcripts
+
+    clip_ids = {s.clip_id for s in storyboard.segments}
+    transcripts = _load_transcripts(ep.clips_dir, clip_ids)
+    eval_summary = build_eval_summary(storyboard, reviews, user_context, transcripts)
+
+    _header(f"Chat with Director: {name}")
+    print_pre_review(
+        eval_summary=eval_summary,
+        seg_count=len(storyboard.segments),
+        duration_sec=storyboard.total_segments_duration,
+        budget=budget,
+    )
+
+    # Input callback for CLI
+    def get_input():
+        try:
+            return input("  You: ")
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    original_snapshot = storyboard.model_dump()
+
+    reviewed, review_log = run_director_chat(
+        storyboard=storyboard,
+        clip_reviews=reviews,
+        user_context=user_context,
+        clips_dir=ep.clips_dir,
+        review_config=cfg.review,
+        tracer=tracer,
+        style_guidelines=style_guidelines,
+        turn_callback=print_turn,
+        input_callback=get_input,
+    )
+
+    tracer.print_summary("Director Chat")
+
+    had_changes = reviewed.model_dump() != original_snapshot
+    print_post_review(review_log, had_changes)
+
+    # Auto-save for CLI
+    if had_changes:
+        from .render import render_html_preview, render_markdown
+        from .versioning import (
+            begin_version,
+            commit_version,
+            current_version,
+            update_latest_symlink,
+            versioned_dir,
+            versioned_path,
+        )
+
+        rv_version = current_version(ep.root, f"review_{provider}")
+        if rv_version == 0:
+            rv_version = current_version(ep.root, "review")
+        review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
+        art_meta = begin_version(
+            ep.root,
+            phase="storyboard",
+            provider=provider,
+            inputs={"source": "director_chat"},
+            config_snapshot={"review_model": cfg.review.model},
+            target_dir=ep.storyboard,
+            parent_id=review_parent_id,
+        )
+        v = art_meta.version
+        base = f"editorial_{provider}"
+
+        json_path = versioned_path(ep.storyboard / f"{base}.json", v)
+        json_path.write_text(reviewed.model_dump_json(indent=2))
+        update_latest_symlink(json_path)
+
+        md_path = versioned_path(ep.storyboard / f"{base}.md", v)
+        md_path.write_text(render_markdown(reviewed))
+        update_latest_symlink(md_path)
+
+        export_dir = versioned_dir(ep.exports, v)
+        html = render_html_preview(reviewed, clips_dir=ep.clips_dir, output_dir=export_dir)
+        preview_path = export_dir / "preview.html"
+        preview_path.write_text(html)
+        update_latest_symlink(export_dir)
+
+        commit_version(
+            ep.root, art_meta, output_paths=[json_path, md_path], target_dir=ep.storyboard
+        )
+
+        print(f"{GREEN}Storyboard updated (v{v}) with director edits:{RESET}")
         print(f"    JSON:    {json_path}")
         print(f"    Preview: {preview_path}")
 
@@ -1351,9 +1545,7 @@ def cmd_export_xml(args, cfg: Config):
     print("\n  Import into DaVinci Resolve:")
     print(f"    Timeline:  File \u2192 Import \u2192 Timeline \u2192 {result.name}")
     if mono_srt or caption_srt:
-        subtitle_names = ", ".join(
-            f.name for f in [mono_srt, caption_srt] if f
-        )
+        subtitle_names = ", ".join(f.name for f in [mono_srt, caption_srt] if f)
         print(f"    Subtitles: File \u2192 Import \u2192 Subtitle \u2192 {subtitle_names}")
         if mono_srt and caption_srt:
             print("               (import as separate tracks for proper layering)")
@@ -1792,6 +1984,11 @@ def main():
         metavar="N",
         help="Max LLM turns for director review (default: 15)",
     )
+    p_analyze.add_argument(
+        "--split",
+        action="store_true",
+        help="Use multi-call split pipeline for Phase 2 (reasoning → structuring → assembly)",
+    )
 
     # --- review ---
     p_review = sub.add_parser("review", help="Run Editorial Director review on existing storyboard")
@@ -1807,6 +2004,22 @@ def main():
         type=int,
         metavar="N",
         help="Max LLM turns (default: 15)",
+    )
+
+    # --- chat ---
+    p_chat = sub.add_parser("chat", help="Chat with Editorial Director (conversational editing)")
+    p_chat.add_argument("project", nargs="?", help="Project name")
+    p_chat.add_argument(
+        "--budget",
+        type=float,
+        metavar="USD",
+        help="Max cost for chat session",
+    )
+    p_chat.add_argument(
+        "--max-turns",
+        type=int,
+        metavar="N",
+        help="Max LLM turns",
     )
 
     # --- monologue ---
@@ -1961,6 +2174,7 @@ def main():
         "run": cmd_analyze,
         "monologue": cmd_monologue,
         "review": cmd_review,
+        "chat": cmd_chat,
         "brief": cmd_brief,
         "preview": cmd_preview,
         "cut": cmd_cut,

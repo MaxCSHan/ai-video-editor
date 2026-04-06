@@ -640,6 +640,7 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
             choices.append(
                 questionary.Choice("Review storyboard (Director)", value="review_storyboard")
             )
+            choices.append(questionary.Choice("Chat with Director", value="chat_director"))
             choices.append(questionary.Choice("Compare storyboard versions", value="compare"))
         if has_preview:
             choices.append(questionary.Choice("Open preview", value="open_preview"))
@@ -963,6 +964,17 @@ def _new_project_flow(cfg):
     meta = json.loads(_pj.read_text()) if _pj.exists() else meta
     _render_tab_bar(_gather_pipeline_state(ep, meta), "P2")
 
+    # Ask about split pipeline (multi-call architecture)
+    if (
+        provider == "gemini"
+        and questionary.confirm(
+            "Use multi-call split pipeline? (experimental — better constraint-following)",
+            default=False,
+            style=VX_STYLE,
+        ).ask()
+    ):
+        cfg.gemini.use_split_pipeline = True
+
     # Phase 2
     if not questionary.confirm(
         "Generate editorial storyboard?", default=True, style=VX_STYLE
@@ -1166,6 +1178,9 @@ def _project_actions(name, cfg):
         elif action == "review_storyboard":
             _run_director_review(ep, meta, cfg)
 
+        elif action == "chat_director":
+            _chat_with_director(ep, meta, cfg)
+
         elif action == "rerun_p3":
             lineage = _confirm_phase_inputs(ep, meta, "monologue")
             if lineage is not None:
@@ -1295,7 +1310,9 @@ def _project_actions(name, cfg):
                 if mono_srt:
                     print(f"  {_GREEN}\u2713 Monologue:{_RESET}    {mono_srt.name} (text overlays)")
                 if caption_srt:
-                    print(f"  {_GREEN}\u2713 Subtitles:{_RESET}    {caption_srt.name} (speech captions)")
+                    print(
+                        f"  {_GREEN}\u2713 Subtitles:{_RESET}    {caption_srt.name} (speech captions)"
+                    )
                 if per_clip_count > 0:
                     print(f"                     + {per_clip_count} per-clip SRT files")
 
@@ -1841,6 +1858,17 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
 
+    # Ask about split pipeline (multi-call architecture)
+    if (
+        provider == "gemini"
+        and questionary.confirm(
+            "Use multi-call split pipeline? (experimental — better constraint-following)",
+            default=False,
+            style=VX_STYLE,
+        ).ask()
+    ):
+        cfg.gemini.use_split_pipeline = True
+
     print("\n  Phase 2: Generating storyboard...\n")
     run_phase2(
         clip_reviews=reviews,
@@ -1948,6 +1976,16 @@ def _run_director_review(ep, meta, cfg):
 
     from .editorial_director import run_editorial_review
 
+    # Load style guidelines from project preset (if any)
+    style_guidelines = None
+    preset_key = meta.get("style_preset")
+    if preset_key:
+        from .style_presets import get_preset
+
+        preset = get_preset(preset_key)
+        if preset:
+            style_guidelines = preset.phase2_supplement
+
     # Snapshot before review — harness mutates storyboard in-place
     original_snapshot = storyboard.model_dump()
 
@@ -1960,6 +1998,7 @@ def _run_director_review(ep, meta, cfg):
         tracer=tracer,
         interactive=True,
         turn_callback=print_turn,
+        style_guidelines=style_guidelines,
     )
 
     tracer.print_summary("Director Review")
@@ -2045,6 +2084,198 @@ def _run_director_review(ep, meta, cfg):
     print_change_diff(review_log)
 
     # Auto-open preview in browser
+    import subprocess as _sp
+
+    try:
+        _sp.run(["open", str(preview_path)], check=False)
+        print("  Preview opened in browser.")
+    except Exception:
+        pass
+    print()
+
+
+def _chat_with_director(ep, meta, cfg):
+    """Open conversational director for user-driven storyboard editing."""
+    from .config import ReviewBudget
+    from .models import EditorialStoryboard
+    from .review_display import (
+        print_change_diff,
+        print_post_review,
+        print_pre_review,
+        print_turn,
+    )
+    from .tracing import ProjectTracer
+    from .versioning import resolve_user_context_path
+
+    provider = meta.get("provider", "gemini")
+
+    # Load latest storyboard
+    sb_path = None
+    for p in ("gemini", "claude"):
+        candidate = ep.storyboard / f"editorial_{p}_latest.json"
+        if candidate.exists():
+            sb_path = candidate
+            provider = p
+            break
+    if not sb_path:
+        print("\n  No storyboard found. Run Phase 2 first.\n")
+        return
+
+    try:
+        storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
+    except Exception as e:
+        print(f"\n  Error loading storyboard: {e}\n")
+        return
+
+    reviews = _load_reviews(ep)
+    if not reviews:
+        print("\n  No clip reviews found. Run Phase 1 first.\n")
+        return
+
+    user_context = None
+    ctx_path = resolve_user_context_path(ep.root)
+    if ctx_path:
+        user_context = json.loads(ctx_path.read_text())
+
+    # Load style guidelines
+    style_guidelines = None
+    preset_key = meta.get("style_preset")
+    if preset_key:
+        from .style_presets import get_preset
+
+        preset = get_preset(preset_key)
+        if preset:
+            style_guidelines = preset.phase2_supplement
+
+    tracer = ProjectTracer(ep.root)
+    budget = ReviewBudget.from_config(cfg.review)
+
+    # Pre-review summary
+    from .director_prompts import build_eval_summary
+    from .editorial_director import _load_transcripts
+
+    clip_ids = {s.clip_id for s in storyboard.segments}
+    transcripts = _load_transcripts(ep.clips_dir, clip_ids)
+    eval_summary = build_eval_summary(storyboard, reviews, user_context, transcripts)
+
+    print()
+    print_pre_review(
+        eval_summary=eval_summary,
+        seg_count=len(storyboard.segments),
+        duration_sec=storyboard.total_segments_duration,
+        budget=budget,
+    )
+
+    # Input callback using questionary
+    def get_user_input():
+        try:
+            result = questionary.text(
+                "You:",
+                style=VX_STYLE,
+                instruction="(type 'done' to finish, Esc to cancel)",
+            ).ask()
+            return result  # None if Esc
+        except KeyboardInterrupt:
+            return None
+
+    from .editorial_director import run_director_chat
+
+    # Snapshot before chat
+    original_snapshot = storyboard.model_dump()
+
+    reviewed, review_log = run_director_chat(
+        storyboard=storyboard,
+        clip_reviews=reviews,
+        user_context=user_context,
+        clips_dir=ep.clips_dir,
+        review_config=cfg.review,
+        tracer=tracer,
+        style_guidelines=style_guidelines,
+        turn_callback=print_turn,
+        input_callback=get_user_input,
+    )
+
+    tracer.print_summary("Director Chat")
+
+    # Post-review summary
+    had_changes = reviewed.model_dump() != original_snapshot
+    print_post_review(review_log, had_changes)
+
+    if not had_changes:
+        return
+
+    # Save flow (same as auto-review)
+    print("  Changes are NOT saved yet.")
+    while True:
+        action = questionary.select(
+            "Save director's changes as new version?",
+            choices=[
+                questionary.Choice("Accept & save", value="accept"),
+                questionary.Choice("Show full diff", value="diff"),
+                questionary.Choice("Discard changes", value="reject"),
+            ],
+            style=VX_STYLE,
+        ).ask()
+
+        if action == "diff":
+            print_change_diff(review_log)
+            continue
+        elif action == "reject" or action is None:
+            print("\n  Changes discarded. Original storyboard unchanged.\n")
+            return
+        else:
+            break
+
+    # Save
+    from .render import render_html_preview, render_markdown
+    from .versioning import (
+        begin_version,
+        commit_version,
+        current_version,
+        update_latest_symlink,
+        versioned_dir,
+        versioned_path,
+    )
+
+    rv_version = current_version(ep.root, f"review_{provider}")
+    if rv_version == 0:
+        rv_version = current_version(ep.root, "review")
+    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
+    art_meta = begin_version(
+        ep.root,
+        phase="storyboard",
+        provider=provider,
+        inputs={"source": "director_chat"},
+        config_snapshot={"review_model": cfg.review.model},
+        target_dir=ep.storyboard,
+        parent_id=review_parent_id,
+    )
+    v = art_meta.version
+    base = f"editorial_{provider}"
+
+    json_path = versioned_path(ep.storyboard / f"{base}.json", v)
+    json_path.write_text(reviewed.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    md_path = versioned_path(ep.storyboard / f"{base}.md", v)
+    md_path.write_text(render_markdown(reviewed))
+    update_latest_symlink(md_path)
+
+    export_dir = versioned_dir(ep.exports, v)
+    preview_html = render_html_preview(reviewed, clips_dir=ep.clips_dir, output_dir=export_dir)
+    preview_path = export_dir / "preview.html"
+    preview_path.write_text(preview_html)
+    update_latest_symlink(export_dir)
+
+    commit_version(ep.root, art_meta, output_paths=[json_path, md_path], target_dir=ep.storyboard)
+
+    print(f"\n  Storyboard updated (v{v}) with director edits.")
+    print(f"    JSON:    {json_path}")
+    print(f"    Preview: {preview_path}")
+
+    print_change_diff(review_log)
+
     import subprocess as _sp
 
     try:
