@@ -105,11 +105,18 @@ def _probe_start_timecode(source_path: Path, fps: float) -> str | None:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_entries", "stream_tags=timecode",
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_entries",
+                "stream_tags=timecode",
                 str(source_path),
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode != 0:
             return None
@@ -481,8 +488,7 @@ def export_fcpxml(
             resources,
             "effect",
             id=title_effect_id,
-            uid=".../Titles.localized/Lower Thirds.localized/"
-            "Middle.localized/Middle.moti",
+            uid=".../Titles.localized/Lower Thirds.localized/Middle.localized/Middle.moti",
             name="Middle",
         )
 
@@ -640,7 +646,11 @@ def export_fcpxml(
 
         # Parse asset base timecode and add segment in_sec
         base_parts = asset_base.rstrip("s").split("/")
-        base_frac = Fraction(int(base_parts[0]), int(base_parts[1])) if len(base_parts) == 2 else Fraction(0)
+        base_frac = (
+            Fraction(int(base_parts[0]), int(base_parts[1]))
+            if len(base_parts) == 2
+            else Fraction(0)
+        )
         in_frac = Fraction(seg.in_sec).limit_denominator(_FRAC_LIMIT)
         clip_start = (base_frac + in_frac).limit_denominator(_FRAC_LIMIT)
         clip_start_str = f"{clip_start.numerator}/{clip_start.denominator}s"
@@ -819,17 +829,13 @@ def export_srt_files(
                 text = text.capitalize()
 
             mono_entries.append(
-                f"{i}\n"
-                f"{_srt_timecode(tl_start)} --> {_srt_timecode(tl_end)}\n"
-                f"{text}\n"
+                f"{i}\n{_srt_timecode(tl_start)} --> {_srt_timecode(tl_end)}\n{text}\n"
             )
 
         if mono_entries:
             mono_srt_path.write_text("\n".join(mono_entries), encoding="utf-8")
             written.append(mono_srt_path)
-            log.info(
-                "Monologue SRT written: %s (%d overlays)", mono_srt_path, len(mono_entries)
-            )
+            log.info("Monologue SRT written: %s (%d overlays)", mono_srt_path, len(mono_entries))
 
     # ------------------------------------------------------------------
     # Speech captions — load transcripts

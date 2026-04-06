@@ -717,6 +717,14 @@ def cmd_analyze(args, cfg: Config):
             output_path = run_claude_analysis(
                 frames_dir, manifest, scenes, video_info, pp.storyboard, cfg.claude
             )
+        elif provider == "gemma":
+            from .gemma_analyze import run_gemma_analysis
+
+            frames_dir, manifest = extract_frames(source, pp, cfg.preprocess)
+            scenes = detect_scenes(source, pp, cfg.preprocess)
+            output_path = run_gemma_analysis(
+                frames_dir, manifest, scenes, video_info, pp.storyboard, cfg.gemma
+            )
         else:
             print(f"{RED}Error:{RESET} Unknown provider: {provider}")
             sys.exit(1)
@@ -775,6 +783,7 @@ def cmd_monologue(args, cfg: Config):
         provider=provider,
         gemini_cfg=cfg.gemini,
         claude_cfg=cfg.claude,
+        gemma_cfg=cfg.gemma,
         style_preset=style_preset,
         tracer=tracer,
         persona_hint=persona_hint,
@@ -1956,7 +1965,7 @@ def main():
     p_new = sub.add_parser("new", help="Create a new project from footage")
     p_new.add_argument("name", help="Project name (e.g., puma-run, tokyo-trip)")
     p_new.add_argument("source", help="Footage directory (editorial) or video file (descriptive)")
-    p_new.add_argument("--provider", choices=["gemini", "claude"], help="AI provider")
+    p_new.add_argument("--provider", choices=["gemini", "claude", "gemma"], help="AI provider")
     p_new.add_argument("--style", help="Video style for editorial (default: vlog)")
     p_new.add_argument(
         "--preset",
@@ -1992,7 +2001,9 @@ def main():
     # --- analyze ---
     p_analyze = sub.add_parser("analyze", aliases=["run"], help="Run AI analysis")
     p_analyze.add_argument("project", nargs="?", help="Project name")
-    p_analyze.add_argument("--provider", choices=["gemini", "claude"], help="Override AI provider")
+    p_analyze.add_argument(
+        "--provider", choices=["gemini", "claude", "gemma"], help="Override AI provider"
+    )
     p_analyze.add_argument(
         "--force", action="store_true", help="Re-run Phase 1 reviews (ignore cache)"
     )
@@ -2096,7 +2107,7 @@ def main():
     )
     p_monologue.add_argument("--force", action="store_true", help="Re-generate even if cached")
     p_monologue.add_argument(
-        "--provider", choices=["gemini", "claude"], help="Override AI provider"
+        "--provider", choices=["gemini", "claude", "gemma"], help="Override AI provider"
     )
     p_monologue.add_argument(
         "--storyboard",
@@ -2204,7 +2215,9 @@ def main():
 
     # --- config ---
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
-    p_config.add_argument("--provider", choices=["gemini", "claude"], help="Default AI provider")
+    p_config.add_argument(
+        "--provider", choices=["gemini", "claude", "gemma"], help="Default AI provider"
+    )
     p_config.add_argument("--style", help="Default video style")
 
     p_trace = sub.add_parser("trace", help="Start Phoenix tracing server (dev tool)")

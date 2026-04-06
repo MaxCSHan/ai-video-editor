@@ -166,7 +166,7 @@ The preview (`storyboard/*_preview.html`) is an editing tool:
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) or pip
 - ffmpeg & ffprobe (`brew install ffmpeg`)
-- `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY` in `.env`
+- `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY` in `.env` (for cloud providers)
 
 ## Setup
 
@@ -175,6 +175,77 @@ cd ai-video-editor
 uv venv && uv pip install -e ".[dev]"
 cp .env.example .env
 ```
+
+## Using Gemma 4 (Local Model)
+
+Gemma 4 is Google's open-weight multimodal model that runs entirely on your machine — no API key, no cloud, no cost per token. It uses the same pipeline as the cloud providers (frame-based clip review, editorial assembly, monologue generation).
+
+### Requirements
+
+| Model | VRAM | Recommended GPU |
+|-------|------|-----------------|
+| `gemma4:12b` | ~8 GB | RTX 3080, M1 Pro (16GB) |
+| `gemma4:27b` | ~16-24 GB | RTX 3090/4090, M2 Ultra |
+
+### Setup
+
+1. **Install Ollama** (local model server):
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://ollama.com/install.sh | sh
+
+   # Or via Homebrew
+   brew install ollama
+   ```
+
+2. **Pull the Gemma 4 model**:
+   ```bash
+   ollama pull gemma4:27b    # Best quality (needs ~24GB VRAM)
+   ollama pull gemma4:12b    # Lighter alternative (~8GB VRAM)
+   ```
+
+3. **Start the Ollama server** (if not already running):
+   ```bash
+   ollama serve
+   ```
+
+4. **Install VX with Gemma support**:
+   ```bash
+   uv pip install -e ".[dev,gemma]"
+   ```
+
+### Usage
+
+```bash
+# Create a project with Gemma as the provider
+vx new my-trip ~/footage/ --provider gemma
+
+# Or analyze an existing project with Gemma
+vx analyze my-trip --provider gemma
+
+# Set Gemma as the default provider
+vx config --provider gemma
+```
+
+### Using a different server (vLLM, llama.cpp, etc.)
+
+Any OpenAI-compatible API server works. Override the endpoint in your code or config:
+
+```bash
+# vLLM example (default port 8000)
+# Set GemmaConfig.base_url = "http://localhost:8000/v1"
+
+# llama.cpp server
+# Set GemmaConfig.base_url = "http://localhost:8080/v1"
+```
+
+### Notes
+
+- **No API key needed.** Gemma runs locally; there is no per-token cost.
+- **Briefing uses Gemini.** The smart briefing quick-scan still requires `GEMINI_API_KEY` if you want AI-guided briefing. Without it, VX falls back to manual briefing (text prompts after Phase 1).
+- **Transcription is independent.** Use `mlx-whisper` (local) or Gemini for transcription regardless of your analysis provider.
+- **Slower than cloud.** Local inference is slower than Gemini/Claude API calls. Expect ~30-120 seconds per clip depending on your GPU.
+- **Sequential processing.** Clips are reviewed one at a time (a single GPU can't efficiently parallelize large model inference).
 
 ## Project Library
 

@@ -537,6 +537,95 @@ def traced_gemini_generate(
 
 
 # ---------------------------------------------------------------------------
+# OpenAI-compatible traced wrapper (Gemma local)
+# ---------------------------------------------------------------------------
+
+
+def _is_retryable_openai(exc: Exception) -> bool:
+    """Check if an OpenAI-compatible API error is transient and worth retrying."""
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    code = getattr(exc, "status_code", None)
+    return code in (429, 500, 502, 503)
+
+
+def traced_openai_generate(
+    client,
+    *,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.2,
+    max_tokens: int = 4096,
+    response_format: dict | None = None,
+    phase: str,
+    clip_id: str | None = None,
+    tracer: ProjectTracer | None = None,
+    prompt_chars: int = 0,
+):
+    """Wrapper around OpenAI chat.completions.create with retry and tracing."""
+    start = time.time()
+    trace = LLMCallTrace(
+        phase=phase,
+        provider="gemma",
+        model=model,
+        clip_id=clip_id,
+        prompt_chars=prompt_chars,
+    )
+
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    last_exc = None
+    for attempt in range(MAX_LLM_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(**kwargs)
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.retries = attempt
+
+            if hasattr(response, "usage") and response.usage:
+                trace.input_tokens = response.usage.prompt_tokens or 0
+                trace.output_tokens = response.usage.completion_tokens or 0
+                trace.total_tokens = (
+                    response.usage.total_tokens or trace.input_tokens + trace.output_tokens
+                )
+            # Local models are free
+            trace.estimated_cost_usd = 0.0
+            trace.success = True
+
+            if tracer:
+                tracer.record(trace)
+            return response
+
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_LLM_RETRIES and _is_retryable_openai(e):
+                delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
+                print(
+                    f"  Retryable error (attempt {attempt + 1}/{MAX_LLM_RETRIES}):"
+                    f" {type(e).__name__}"
+                )
+                print(f"  Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                continue
+
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.success = False
+            trace.error = str(e)
+            trace.retries = attempt
+            if tracer:
+                tracer.record(trace)
+            raise
+
+    raise last_exc  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # Dry-run estimation
 # ---------------------------------------------------------------------------
 

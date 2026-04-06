@@ -92,6 +92,17 @@ class GeminiConfig:
 
 
 @dataclass
+class GemmaConfig:
+    model: str = "gemma4:27b"
+    base_url: str = "http://localhost:11434/v1"  # Ollama default
+    api_key: str = "ollama"  # Required by openai SDK, ignored by Ollama
+    max_images_per_batch: int = 15  # Conservative for local model context window
+    temperature: float = 0.2
+    phase2_temperature: float = 0.6
+    max_tokens: int = 4096
+
+
+@dataclass
 class TranscribeConfig:
     # mlx-whisper settings (local)
     model: str = "mlx-community/whisper-large-v3-turbo"
@@ -297,6 +308,7 @@ class Config:
     transcribe: TranscribeConfig = field(default_factory=TranscribeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    gemma: GemmaConfig = field(default_factory=GemmaConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     library_dir: Path = field(default_factory=lambda: LIBRARY_DIR)
 

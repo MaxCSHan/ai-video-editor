@@ -250,14 +250,15 @@ def score_timestamp_precision(
 def score_structural_completeness(storyboard) -> float:
     """Score 0.0-1.0 for structural completeness of a storyboard."""
     checks = [
-        bool(getattr(storyboard, "editorial_reasoning", "") and
-             len(getattr(storyboard, "editorial_reasoning", "")) > 50),
+        bool(
+            getattr(storyboard, "editorial_reasoning", "")
+            and len(getattr(storyboard, "editorial_reasoning", "")) > 50
+        ),
         bool(getattr(storyboard, "story_arc", [])),
         bool(getattr(storyboard, "cast", [])),
         bool(getattr(storyboard, "discarded", [])),
-        len([s.index for s in storyboard.segments]) == len(
-            set(s.index for s in storyboard.segments)
-        ),  # no duplicate indices
+        len([s.index for s in storyboard.segments])
+        == len(set(s.index for s in storyboard.segments)),  # no duplicate indices
     ]
     return sum(checks) / len(checks) if checks else 1.0
 
@@ -327,13 +328,15 @@ def score_speech_cut_safety(
         elif text and text[-1] in ".!?":
             safe_count += 1
         else:
-            unsafe_cuts.append({
-                "segment_index": seg.index,
-                "clip_id": seg.clip_id,
-                "cut_time": cut_time,
-                "speech_text": text[:80],
-                "speech_end": e_end,
-            })
+            unsafe_cuts.append(
+                {
+                    "segment_index": seg.index,
+                    "clip_id": seg.clip_id,
+                    "cut_time": cut_time,
+                    "speech_text": text[:80],
+                    "speech_end": e_end,
+                }
+            )
 
     rate = safe_count / len(storyboard.segments)
     return rate, unsafe_cuts

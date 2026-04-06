@@ -20,6 +20,9 @@ dev = [
 scene = [
     "scenedetect[opencv]",
 ]
+gemma = [
+    "openai>=1.0",
+]
 whisper = [
     "mlx-whisper",
 ]

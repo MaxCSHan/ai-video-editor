@@ -11,6 +11,7 @@ from .config import (
     ClaudeConfig,
     Config,
     EditorialProjectPaths,
+    GemmaConfig,
     GeminiConfig,
     PreprocessConfig,
     ReviewConfig,
@@ -74,6 +75,28 @@ def _get_gemini_client():
     from google import genai
 
     return genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+
+
+def _get_gemma_client(cfg: GemmaConfig):
+    """Create an OpenAI client pointed at the local Gemma server (e.g. Ollama)."""
+    try:
+        import openai
+    except ImportError:
+        raise ImportError(
+            "The 'openai' package is required for Gemma support. "
+            "Install it with: uv pip install -e '.[gemma]'"
+        )
+    client = openai.OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+    # Health check: verify the server is reachable
+    try:
+        client.models.list()
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot connect to Gemma server at {cfg.base_url}. "
+            "Make sure Ollama is running (ollama serve) and the model is pulled "
+            f"(ollama pull {cfg.model}).\nDetails: {e}"
+        ) from e
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +824,133 @@ def run_phase1_claude(
     return reviews, failed_ids
 
 
+def run_phase1_gemma(
+    editorial_paths: EditorialProjectPaths,
+    manifest: dict,
+    cfg: GemmaConfig,
+    force: bool = False,
+    style_supplement: str | None = None,
+    only_clip_ids: list[str] | None = None,
+    user_context: dict | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Phase 1 via Gemma (local): send each clip's frames, get structured JSON review.
+
+    Returns (reviews, failed_clip_ids). Reviews are in original clip order.
+    Sequential processing (local GPU can't efficiently parallelize).
+    """
+    import base64
+
+    client = _get_gemma_client(cfg)
+
+    reviews = []
+    failed_ids = []
+    for i, clip_info in enumerate(manifest["clips"]):
+        clip_id = clip_info["clip_id"]
+        clip_paths = editorial_paths.clip_paths(clip_id)
+
+        # Skip clips not in retry set
+        if only_clip_ids and clip_id not in only_clip_ids:
+            for name in ["review_gemma_latest.json", "review_gemma.json"]:
+                cached = clip_paths.review / name
+                if cached.exists():
+                    try:
+                        reviews.append(json.loads(cached.read_text()))
+                    except json.JSONDecodeError:
+                        print(f"  WARN: corrupt cache {cached.name} for {clip_id}")
+                    break
+            continue
+
+        # Check cache
+        if not only_clip_ids:
+            latest_review = clip_paths.review / "review_gemma_latest.json"
+            legacy_review = clip_paths.review / "review_gemma.json"
+            if not force and (latest_review.exists() or legacy_review.exists()):
+                cached = latest_review if latest_review.exists() else legacy_review
+                try:
+                    print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: review cached")
+                    reviews.append(json.loads(cached.read_text()))
+                except json.JSONDecodeError:
+                    print(
+                        f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: corrupt cache, "
+                        "will re-review"
+                    )
+                continue
+
+        try:
+            print(f"  [{i + 1}/{manifest['clip_count']}] {clip_id}: loading frames...")
+            frames_manifest_path = clip_paths.frames / "manifest.json"
+            if not frames_manifest_path.exists():
+                print(f"    WARNING: No frames for {clip_id}, skipping")
+                failed_ids.append(clip_id)
+                continue
+            frames_manifest = json.loads(frames_manifest_path.read_text())
+
+            all_frames = frames_manifest["frames"]
+            frames_to_send = all_frames[: cfg.max_images_per_batch]
+
+            # Build OpenAI vision content
+            content: list[dict] = []
+            for frame in frames_to_send:
+                img_path = clip_paths.frames / frame["file"]
+                img_b64 = base64.standard_b64encode(img_path.read_bytes()).decode("utf-8")
+                content.append({"type": "text", "text": f"[{frame['timestamp_fmt']}]"})
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_b64}",
+                            "detail": "low",
+                        },
+                    }
+                )
+
+            # Load transcript if available
+            transcript_text = _load_transcript_for_prompt(clip_paths)
+
+            prompt = build_clip_review_prompt(
+                clip_id=clip_id,
+                filename=clip_info["filename"],
+                duration_sec=clip_info["duration_sec"],
+                resolution=clip_info["resolution"],
+                transcript_text=transcript_text,
+                style_supplement=style_supplement,
+                user_context=user_context,
+            )
+            content.append({"type": "text", "text": prompt})
+
+            print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
+            response = client.chat.completions.create(
+                model=cfg.model,
+                max_tokens=cfg.max_tokens,
+                temperature=cfg.temperature,
+                messages=[{"role": "user", "content": content}],
+                response_format={"type": "json_object"},
+            )
+
+            review = parse_clip_review(response.choices[0].message.content)
+
+            meta = begin_version(
+                clip_paths.root,
+                phase="review",
+                provider="gemma",
+                clip_id=clip_id,
+                inputs={},
+                config_snapshot={"model": cfg.model, "temperature": cfg.temperature},
+                target_dir=clip_paths.review,
+            )
+            vpath = versioned_path(clip_paths.review / "review_gemma.json", meta.version)
+            vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+            commit_version(
+                clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review
+            )
+            reviews.append(review)
+        except Exception as e:
+            print(f"  ERROR reviewing {clip_id}: {e}")
+            failed_ids.append(clip_id)
+
+    return reviews, failed_ids
+
+
 # ---------------------------------------------------------------------------
 # Response quality validation
 # ---------------------------------------------------------------------------
@@ -1396,6 +1546,7 @@ def run_phase2(
     provider: str,
     gemini_cfg: GeminiConfig | None = None,
     claude_cfg: ClaudeConfig | None = None,
+    gemma_cfg: GemmaConfig | None = None,
     style: str = "vlog",
     user_context: dict | None = None,
     tracer=None,
@@ -1575,6 +1726,25 @@ def run_phase2(
             ],
         )
         text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        storyboard = EditorialStoryboard.model_validate_json(text)
+    elif provider == "gemma":
+        client = _get_gemma_client(gemma_cfg)
+        response = client.chat.completions.create(
+            model=gemma_cfg.model,
+            max_tokens=gemma_cfg.max_tokens * 2,
+            temperature=gemma_cfg.phase2_temperature,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                    + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
+                }
+            ],
+            response_format={"type": "json_object"},
+        )
+        text = response.choices[0].message.content.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         storyboard = EditorialStoryboard.model_validate_json(text)
@@ -1937,6 +2107,7 @@ def run_monologue(
     provider: str,
     gemini_cfg: GeminiConfig | None = None,
     claude_cfg: ClaudeConfig | None = None,
+    gemma_cfg: GemmaConfig | None = None,
     style_preset=None,
     user_context: dict | None = None,
     tracer=None,
@@ -2065,6 +2236,26 @@ def run_monologue(
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         monologue = MonologuePlan.model_validate_json(text)
+    elif provider == "gemma":
+        client = _get_gemma_client(gemma_cfg)
+        with LLMSpinner("Generating visual monologue", provider="gemma"):
+            response = client.chat.completions.create(
+                model=gemma_cfg.model,
+                max_tokens=gemma_cfg.max_tokens * 2,
+                temperature=gemma_cfg.temperature,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                        + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
+                    }
+                ],
+                response_format={"type": "json_object"},
+            )
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        monologue = MonologuePlan.model_validate_json(text)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -2083,10 +2274,12 @@ def run_monologue(
             storyboard_input["storyboard"] = f"storyboard:{provider}:v{vm.group(1)}"
 
     cfg_snap = {}
-    if gemini_cfg:
+    if gemini_cfg and provider == "gemini":
         cfg_snap = {"model": gemini_cfg.model, "temperature": gemini_cfg.temperature}
-    elif claude_cfg:
+    elif claude_cfg and provider == "claude":
         cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
+    elif gemma_cfg and provider == "gemma":
+        cfg_snap = {"model": gemma_cfg.model, "temperature": gemma_cfg.temperature}
 
     # Determine storyboard parent_id for lineage-prefixed versioning
     sb_parent_id = None
@@ -2235,6 +2428,15 @@ def _retry_failed_phase1(
                 only_clip_ids=failed,
                 user_context=user_context,
             )
+        elif provider == "gemma":
+            reviews, failed = run_phase1_gemma(
+                editorial_paths,
+                manifest,
+                cfg.gemma,
+                style_supplement=style_supplement,
+                only_clip_ids=failed,
+                user_context=user_context,
+            )
         else:
             reviews, failed = run_phase1_claude(
                 editorial_paths,
@@ -2366,6 +2568,15 @@ def run_editorial_pipeline(
             style_supplement=p1_supplement,
             user_context=user_context,
         )
+    elif provider == "gemma":
+        reviews, failed = run_phase1_gemma(
+            editorial_paths,
+            manifest,
+            cfg.gemma,
+            force=force,
+            style_supplement=p1_supplement,
+            user_context=user_context,
+        )
     else:
         raise ValueError(f"Unknown provider: {provider}")
     reviews, failed = _retry_failed_phase1(
@@ -2399,6 +2610,7 @@ def run_editorial_pipeline(
         provider=provider,
         gemini_cfg=cfg.gemini,
         claude_cfg=cfg.claude,
+        gemma_cfg=cfg.gemma,
         style=style,
         user_context=user_context,
         tracer=tracer,
@@ -2418,6 +2630,7 @@ def run_editorial_pipeline(
             provider=provider,
             gemini_cfg=cfg.gemini,
             claude_cfg=cfg.claude,
+            gemma_cfg=cfg.gemma,
             style_preset=style_preset,
             user_context=user_context,
             tracer=tracer,

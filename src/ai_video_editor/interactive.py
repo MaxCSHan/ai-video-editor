@@ -166,7 +166,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
         latest_sb = ep.storyboard / f"editorial_{provider}_latest.json"
         if not latest_sb.exists():
             # Try any provider
-            for p in ("gemini", "claude"):
+            for p in ("gemini", "claude", "gemma"):
                 latest_sb = ep.storyboard / f"editorial_{p}_latest.json"
                 if latest_sb.exists():
                     break
@@ -804,12 +804,13 @@ def _new_project_flow(cfg):
     ws = json.loads(ws_path.read_text()) if ws_path.exists() else {}
     provider = ws.get("provider", "gemini")
 
-    # Check API key
-    key_var = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
-    if not os.environ.get(key_var):
-        print(f"\n  Warning: {key_var} not set. Check your .env file.\n")
-        if not questionary.confirm("Continue anyway?", default=False, style=VX_STYLE).ask():
-            return
+    # Check API key (Gemma uses a local server, no API key needed)
+    if provider != "gemma":
+        key_var = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+        if not os.environ.get(key_var):
+            print(f"\n  Warning: {key_var} not set. Check your .env file.\n")
+            if not questionary.confirm("Continue anyway?", default=False, style=VX_STYLE).ask():
+                return
 
     print(f"\n  Creating project: {name}")
     print(f"  Source: {source_path}")
@@ -824,6 +825,7 @@ def _new_project_flow(cfg):
         build_master_manifest,
         run_phase1_gemini,
         run_phase1_claude,
+        run_phase1_gemma,
         run_phase2,
         _retry_failed_phase1,
     )
@@ -931,6 +933,14 @@ def _new_project_flow(cfg):
             style_supplement=p1_supplement,
             user_context=user_context,
         )
+    elif provider == "gemma":
+        reviews, failed = run_phase1_gemma(
+            ep,
+            manifest,
+            cfg.gemma,
+            style_supplement=p1_supplement,
+            user_context=user_context,
+        )
     else:
         reviews, failed = run_phase1_claude(
             ep,
@@ -995,6 +1005,7 @@ def _new_project_flow(cfg):
         provider=provider,
         gemini_cfg=cfg.gemini,
         claude_cfg=cfg.claude,
+        gemma_cfg=cfg.gemma,
         style=style,
         user_context=user_context,
         tracer=tracer,
@@ -1017,6 +1028,7 @@ def _new_project_flow(cfg):
                 provider=provider,
                 gemini_cfg=cfg.gemini,
                 claude_cfg=cfg.claude,
+                gemma_cfg=cfg.gemma,
                 style_preset=style_preset,
                 user_context=user_context,
                 tracer=tracer,
@@ -1198,6 +1210,7 @@ def _project_actions(name, cfg):
                         provider=provider,
                         gemini_cfg=cfg.gemini,
                         claude_cfg=cfg.claude,
+                        gemma_cfg=cfg.gemma,
                         style_preset=_sp2,
                         tracer=tracer,
                     )
@@ -1731,6 +1744,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         build_master_manifest,
         run_phase1_gemini,
         run_phase1_claude,
+        run_phase1_gemma,
         run_phase2,
         _retry_failed_phase1,
     )
@@ -1826,6 +1840,15 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
             style_supplement=p1_supplement,
             user_context=user_context,
         )
+    elif provider == "gemma":
+        reviews, failed = run_phase1_gemma(
+            ep,
+            manifest,
+            cfg.gemma,
+            force=force_phase1,
+            style_supplement=p1_supplement,
+            user_context=user_context,
+        )
     else:
         reviews, failed = run_phase1_claude(
             ep,
@@ -1877,6 +1900,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         provider=provider,
         gemini_cfg=cfg.gemini,
         claude_cfg=cfg.claude,
+        gemma_cfg=cfg.gemma,
         style=style,
         user_context=user_context,
         tracer=tracer,
@@ -1899,6 +1923,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
                 provider=provider,
                 gemini_cfg=cfg.gemini,
                 claude_cfg=cfg.claude,
+                gemma_cfg=cfg.gemma,
                 style_preset=style_preset,
                 user_context=user_context,
                 tracer=tracer,
@@ -1925,7 +1950,7 @@ def _run_director_review(ep, meta, cfg):
 
     # Load latest storyboard
     sb_path = None
-    for p in ("gemini", "claude"):
+    for p in ("gemini", "claude", "gemma"):
         candidate = ep.storyboard / f"editorial_{p}_latest.json"
         if candidate.exists():
             sb_path = candidate
@@ -2152,7 +2177,7 @@ def _chat_with_director(ep, meta, cfg):
             sb_path = ep.storyboard / f"editorial_{provider}_latest.json"
     else:
         sb_path = None
-        for p in ("gemini", "claude"):
+        for p in ("gemini", "claude", "gemma"):
             candidate = ep.storyboard / f"editorial_{p}_latest.json"
             if candidate.exists():
                 sb_path = candidate
@@ -2635,7 +2660,7 @@ def _settings_flow(cfg):
 
     provider = questionary.select(
         "Default AI provider:",
-        choices=["gemini", "claude"],
+        choices=["gemini", "claude", "gemma"],
         default=ws.get("provider", "gemini"),
         style=VX_STYLE,
     ).ask()
