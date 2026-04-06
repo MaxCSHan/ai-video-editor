@@ -31,7 +31,6 @@ def _build_image_content(image_path: Path, timestamp_fmt: str) -> list[dict]:
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{_load_image_b64(image_path)}",
-                "detail": "low",
             },
         },
     ]
@@ -78,7 +77,9 @@ def analyze_frame_batch(
     response = client.chat.completions.create(
         model=cfg.model,
         max_tokens=cfg.max_tokens,
-        temperature=cfg.temperature,
+        temperature=cfg.descriptive_temperature,
+        top_p=cfg.top_p,
+        extra_body={"top_k": cfg.top_k},
         messages=[{"role": "user", "content": content}],
     )
     return response.choices[0].message.content
@@ -120,7 +121,9 @@ def synthesize_storyboard(
     response = client.chat.completions.create(
         model=cfg.model,
         max_tokens=cfg.max_tokens * 2,
-        temperature=cfg.temperature,
+        temperature=cfg.descriptive_temperature,
+        top_p=cfg.top_p,
+        extra_body={"top_k": cfg.top_k},
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content

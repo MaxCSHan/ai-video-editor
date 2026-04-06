@@ -180,12 +180,15 @@ cp .env.example .env
 
 Gemma 4 is Google's open-weight multimodal model that runs entirely on your machine — no API key, no cloud, no cost per token. It uses the same pipeline as the cloud providers (frame-based clip review, editorial assembly, monologue generation).
 
+> **Video support note:** Gemma 4 natively supports video input, but Ollama's current engine only exposes Text+Image via its API. VX extracts frames from your clips (360×240 JPEG every 5 seconds) and sends them as images — this is the recommended workaround and matches Gemma 4's own guidance for video understanding.
+
 ### Requirements
 
 | Model | VRAM | Recommended GPU |
 |-------|------|-----------------|
-| `gemma4:12b` | ~8 GB | RTX 3080, M1 Pro (16GB) |
-| `gemma4:27b` | ~16-24 GB | RTX 3090/4090, M2 Ultra |
+| `gemma4:e4b` | ~9.6 GB | RTX 3080, M1 Pro (16GB) |
+| `gemma4:26b` | ~18 GB | RTX 3090/4090, M2 Pro/Ultra |
+| `gemma4:31b` | ~20 GB | RTX 4090, M2 Ultra |
 
 ### Setup
 
@@ -200,8 +203,8 @@ Gemma 4 is Google's open-weight multimodal model that runs entirely on your mach
 
 2. **Pull the Gemma 4 model**:
    ```bash
-   ollama pull gemma4:27b    # Best quality (needs ~24GB VRAM)
-   ollama pull gemma4:12b    # Lighter alternative (~8GB VRAM)
+   ollama pull gemma4:26b    # Best quality MoE (needs ~18GB VRAM)
+   ollama pull gemma4:e4b    # Lighter alternative (~9.6GB VRAM)
    ```
 
 3. **Start the Ollama server** (if not already running):
@@ -236,8 +239,8 @@ VX talks to any OpenAI-compatible server — Ollama is the recommended default, 
 | **[Ollama](https://ollama.com)** (default) | Easiest setup, cross-platform | `http://localhost:11434/v1` | `curl -fsSL https://ollama.com/install.sh \| sh` |
 | **[LM Studio](https://lmstudio.ai)** | GUI users, non-technical filmmakers | `http://localhost:1234/v1` | Download app, search "gemma4", click Start Server |
 | **[llama.cpp](https://github.com/ggml-org/llama.cpp)** | Max performance, fine-grained control | `http://localhost:8080/v1` | Build from source, run `llama-server --model gemma4.gguf --mmproj mmproj.gguf` |
-| **[vLLM](https://docs.vllm.ai)** | Multi-user / production serving | `http://localhost:8000/v1` | `pip install vllm && vllm serve google/gemma-4-27b-it` |
-| **[MLX](https://github.com/ml-explore/mlx)** | Apple Silicon (best M-series perf) | `http://localhost:5001/v1` | `pip install mlx-lm omlx && omlx serve gemma4:27b` |
+| **[vLLM](https://docs.vllm.ai)** | Multi-user / production serving | `http://localhost:8000/v1` | `pip install vllm && vllm serve google/gemma-4-26b-it` |
+| **[MLX](https://github.com/ml-explore/mlx)** | Apple Silicon (best M-series perf) | `http://localhost:5001/v1` | `pip install mlx-lm omlx && omlx serve gemma4:26b` |
 
 To use a non-default server, pass the URL when configuring VX or set it in `.vx.json`:
 
@@ -255,6 +258,7 @@ vx config --provider gemma
 - **Slower than cloud.** Local inference is slower than Gemini/Claude API calls. Expect ~30-120 seconds per clip depending on your GPU.
 - **Sequential processing.** Clips are reviewed one at a time (a single GPU can't efficiently parallelize large model inference).
 - **Quantization recommended.** Q4_K_M quantization (Ollama default) cuts VRAM ~55% with minimal quality loss — strongly recommended for 24GB GPUs.
+- **Thinking mode.** Gemma 4 supports chain-of-thought reasoning (`<|think|>` token). VX auto-enables thinking for Phase 2 (editorial assembly) and Phase 3 (monologue), which improves editorial quality. Phase 1 clip reviews skip thinking for speed.
 
 ## Project Library
 

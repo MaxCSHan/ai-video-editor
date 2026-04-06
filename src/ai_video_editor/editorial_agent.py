@@ -899,7 +899,6 @@ def run_phase1_gemma(
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/jpeg;base64,{img_b64}",
-                            "detail": "low",
                         },
                     }
                 )
@@ -923,6 +922,8 @@ def run_phase1_gemma(
                 model=cfg.model,
                 max_tokens=cfg.max_tokens,
                 temperature=cfg.temperature,
+                top_p=cfg.top_p,
+                extra_body={"top_k": cfg.top_k},
                 messages=[{"role": "user", "content": content}],
                 response_format={"type": "json_object"},
             )
@@ -1731,17 +1732,21 @@ def run_phase2(
         storyboard = EditorialStoryboard.model_validate_json(text)
     elif provider == "gemma":
         client = _get_gemma_client(gemma_cfg)
+        messages = [
+            {"role": "system", "content": "<|think|>"},
+            {
+                "role": "user",
+                "content": prompt
+                + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
+            },
+        ]
         response = client.chat.completions.create(
             model=gemma_cfg.model,
             max_tokens=gemma_cfg.max_tokens * 2,
             temperature=gemma_cfg.phase2_temperature,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                    + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
-                }
-            ],
+            top_p=gemma_cfg.top_p,
+            extra_body={"top_k": gemma_cfg.top_k},
+            messages=messages,
             response_format={"type": "json_object"},
         )
         text = response.choices[0].message.content.strip()
@@ -2238,18 +2243,22 @@ def run_monologue(
         monologue = MonologuePlan.model_validate_json(text)
     elif provider == "gemma":
         client = _get_gemma_client(gemma_cfg)
+        messages = [
+            {"role": "system", "content": "<|think|>"},
+            {
+                "role": "user",
+                "content": prompt
+                + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
+            },
+        ]
         with LLMSpinner("Generating visual monologue", provider="gemma"):
             response = client.chat.completions.create(
                 model=gemma_cfg.model,
                 max_tokens=gemma_cfg.max_tokens * 2,
-                temperature=gemma_cfg.temperature,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                        + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
-                    }
-                ],
+                temperature=gemma_cfg.phase2_temperature,
+                top_p=gemma_cfg.top_p,
+                extra_body={"top_k": gemma_cfg.top_k},
+                messages=messages,
                 response_format={"type": "json_object"},
             )
         text = response.choices[0].message.content.strip()
@@ -2279,7 +2288,7 @@ def run_monologue(
     elif claude_cfg and provider == "claude":
         cfg_snap = {"model": claude_cfg.model, "temperature": claude_cfg.temperature}
     elif gemma_cfg and provider == "gemma":
-        cfg_snap = {"model": gemma_cfg.model, "temperature": gemma_cfg.temperature}
+        cfg_snap = {"model": gemma_cfg.model, "temperature": gemma_cfg.phase2_temperature}
 
     # Determine storyboard parent_id for lineage-prefixed versioning
     sb_parent_id = None

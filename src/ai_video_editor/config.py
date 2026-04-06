@@ -93,13 +93,17 @@ class GeminiConfig:
 
 @dataclass
 class GemmaConfig:
-    model: str = "gemma4:27b"
+    model: str = "gemma4:26b"
     base_url: str = "http://localhost:11434/v1"  # Ollama default
     api_key: str = "ollama"  # Required by openai SDK, ignored by Ollama
-    max_images_per_batch: int = 15  # Conservative for local model context window
-    temperature: float = 0.2
-    phase2_temperature: float = 0.6
-    max_tokens: int = 4096
+    max_images_per_batch: int = 12  # Conservative for context window safety
+    temperature: float = 0.4  # Phase 1: conservative for reliable JSON output
+    phase2_temperature: float = 0.8  # Phase 2: creative editorial judgment
+    descriptive_temperature: float = 1.0  # Descriptive mode: full Gemma recommended
+    max_tokens: int = 8192
+    top_p: float = 0.95  # Gemma 4 recommended
+    top_k: int = 64  # Gemma 4 recommended
+    thinking: bool = False  # Reasoning mode; auto-enabled for Phase 2/3
 
 
 @dataclass

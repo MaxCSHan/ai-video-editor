@@ -556,6 +556,8 @@ def traced_openai_generate(
     messages: list[dict],
     temperature: float = 0.2,
     max_tokens: int = 4096,
+    top_p: float | None = None,
+    extra_body: dict | None = None,
     response_format: dict | None = None,
     phase: str,
     clip_id: str | None = None,
@@ -578,6 +580,10 @@ def traced_openai_generate(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
     if response_format:
         kwargs["response_format"] = response_format
 
