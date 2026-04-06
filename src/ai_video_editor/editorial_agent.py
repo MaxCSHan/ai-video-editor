@@ -1071,13 +1071,21 @@ def _run_phase2_split(
         client = _get_gemini_client()
 
         # Visual mode: attach proxy videos to Call 2A
+        # Use all proxy clips from disk (same set as briefing/quick scan) so that
+        # concat bundle composition matches and Gemini File API URIs get cache hits.
         video_parts = []
         if visual:
             from .preprocess import concat_proxies
 
-            bundles = concat_proxies(editorial_paths, clip_ids)
+            all_clip_ids = sorted(
+                d.name
+                for d in editorial_paths.clips_dir.iterdir()
+                if d.is_dir() and (d / "proxy").exists()
+            )
+            bundles = concat_proxies(editorial_paths, all_clip_ids)
             if bundles:
                 file_cache = load_file_api_cache(editorial_paths)
+                cached_count = 0
                 for i, bundle in enumerate(bundles):
                     cache_key = f"_concat_bundle_{i}"
                     cached_uri = get_cached_uri(file_cache, cache_key)
@@ -1085,6 +1093,7 @@ def _run_phase2_split(
                         video_parts.append(
                             types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4")
                         )
+                        cached_count += 1
                         continue
                     print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
                     video_file = client.files.upload(file=str(bundle["path"]))
@@ -1095,6 +1104,11 @@ def _run_phase2_split(
                     cache_file_uri(editorial_paths, cache_key, video_file.uri)
                     video_parts.append(
                         types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4")
+                    )
+                if cached_count:
+                    print(
+                        f"  Concat cached: {cached_count}/{len(bundles)} bundle(s)"
+                        " reused from Gemini"
                     )
 
         mode_label = "visual" if video_parts else "text-only"
@@ -1442,18 +1456,25 @@ def run_phase2(
 
     # Resolve visual mode: concatenate proxies into bundles for Gemini.
     # Uses concat_proxies() to avoid the 10-video-per-prompt limit.
+    # Use all proxy clips from disk (same set as briefing/quick scan) so that
+    # concat bundle composition matches and Gemini File API URIs get cache hits.
     visual_timeline = None
     video_parts = []
     if visual and provider == "gemini":
         from google.genai import types
         from .preprocess import concat_proxies
 
-        clip_ids = list(dict.fromkeys(r.get("clip_id", "") for r in clip_reviews))
-        bundles = concat_proxies(editorial_paths, clip_ids)
+        all_clip_ids = sorted(
+            d.name
+            for d in editorial_paths.clips_dir.iterdir()
+            if d.is_dir() and (d / "proxy").exists()
+        )
+        bundles = concat_proxies(editorial_paths, all_clip_ids)
 
         if bundles:
             client = _get_gemini_client()
             file_cache = load_file_api_cache(editorial_paths)
+            cached_count = 0
 
             for i, bundle in enumerate(bundles):
                 cache_key = f"_concat_bundle_{i}"
@@ -1462,6 +1483,7 @@ def run_phase2(
                     video_parts.append(
                         types.Part.from_uri(file_uri=cached_uri, mime_type="video/mp4")
                     )
+                    cached_count += 1
                     continue
 
                 print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
@@ -1475,6 +1497,10 @@ def run_phase2(
                     types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4")
                 )
 
+            if cached_count:
+                print(
+                    f"  Concat cached: {cached_count}/{len(bundles)} bundle(s) reused from Gemini"
+                )
             visual_timeline = bundles
 
     user_context_text = format_context_for_prompt(user_context) if user_context else None

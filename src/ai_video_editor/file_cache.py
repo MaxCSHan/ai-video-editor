@@ -9,7 +9,7 @@ import time
 
 from .config import EditorialProjectPaths
 
-FILE_API_CACHE_MAX_AGE_SEC = 90 * 60  # 90 minutes (Gemini keeps files for 2 hours)
+FILE_API_CACHE_MAX_AGE_SEC = 46 * 60 * 60  # 46 hours (Gemini retains files for 48 hours)
 
 
 def load_file_api_cache(editorial_paths: EditorialProjectPaths) -> dict:
