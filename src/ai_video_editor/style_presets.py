@@ -200,16 +200,7 @@ coffee first."
 - **Two-Breath Rule**: each overlay must stay on screen long enough to read slowly twice. \
 Minimum duration: `word_count * 0.4` seconds. Recommended: `word_count * 0.6` seconds.
 
-### 4. Visual-Text Synergy
-
-For each overlay, specify whether it uses:
-- **"harmony"** — text matches the visual mood (rain on window + "the city decided to \
-wash itself clean...")
-- **"dissonance"** — text deliberately contrasts visuals for humor/relatability \
-(beautiful plated meal + "this took two hours and i ate it in three minutes standing \
-over the sink")
-
-### 5. Monologue Arc
+### 4. Monologue Arc
 
 Structure overlays to follow this emotional arc:
 - **grounding_hook** (first 15-20% of video): Welcome the audience. Establish the \
@@ -220,7 +211,7 @@ Less frequent than the opening — let the conversations and visuals breathe.
 - **resolution** (final 20%): Wind down. Reflect on the experience. Warm sign-off. \
 ("today was a good day." / "until next time...")
 
-### 6. Placement & Pacing Rules
+### 5. Placement & Pacing Rules
 
 - **ONLY place text on SCENERY/B-ROLL segments** — segments WITHOUT speech.
 - **NEVER place text on segments with conversation/dialogue.** Those will have their \
@@ -231,7 +222,7 @@ always use "lower_third" for monologue overlays.
 - The opening section should have more overlays (setting context). The middle can \
 be sparser (letting footage and conversations carry the story).
 
-### 7. Output Format
+### 6. Output Format
 
 Produce a MonologuePlan JSON with:
 - `persona`: your chosen persona key

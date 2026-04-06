@@ -147,6 +147,136 @@ def _resolve_clip_proxy(clip_id: str, clips_dir: Path) -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Thumbnail compositing — used by Editorial Director for visual review
+# ---------------------------------------------------------------------------
+
+THUMB_WIDTH = 160
+THUMB_HEIGHT = 90
+
+
+def _extract_thumbnail_to_bytes(
+    source_path: Path, timestamp_sec: float, width: int = THUMB_WIDTH, height: int = THUMB_HEIGHT
+) -> bytes | None:
+    """Extract a single frame as JPEG bytes, scaled to width×height."""
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(max(0, timestamp_sec)),
+            "-i",
+            str(source_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "-q:v",
+            "5",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ],
+        capture_output=True,
+    )
+    if result.returncode == 0 and result.stdout:
+        return result.stdout
+    return None
+
+
+def generate_contact_strip(
+    storyboard: EditorialStoryboard,
+    clips_dir: Path,
+    thumb_width: int = THUMB_WIDTH,
+    thumb_height: int = THUMB_HEIGHT,
+) -> bytes | None:
+    """Compose one midpoint thumbnail per segment into a horizontal strip.
+
+    Returns JPEG bytes of the contact strip image, or None if no frames extracted.
+    Used by the Editorial Director for overview visual review.
+    """
+    from PIL import Image
+    import io
+
+    frames: list[Image.Image] = []
+    for seg in storyboard.segments:
+        source = _resolve_clip_source(seg.clip_id, clips_dir)
+        if not source:
+            # Placeholder black frame
+            frames.append(Image.new("RGB", (thumb_width, thumb_height), (20, 20, 20)))
+            continue
+        mid = seg.in_sec + seg.duration_sec / 2
+        data = _extract_thumbnail_to_bytes(source, mid, thumb_width, thumb_height)
+        if data:
+            frames.append(Image.open(io.BytesIO(data)))
+        else:
+            frames.append(Image.new("RGB", (thumb_width, thumb_height), (20, 20, 20)))
+
+    if not frames:
+        return None
+
+    strip = Image.new("RGB", (thumb_width * len(frames), thumb_height), (0, 0, 0))
+    for i, frame in enumerate(frames):
+        strip.paste(frame, (i * thumb_width, 0))
+
+    buf = io.BytesIO()
+    strip.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
+def generate_segment_grid(
+    segment_index: int,
+    storyboard: EditorialStoryboard,
+    clips_dir: Path,
+    thumb_width: int = THUMB_WIDTH,
+    thumb_height: int = THUMB_HEIGHT,
+) -> bytes | None:
+    """Compose a 2×2 grid of 4 keyframes from a single segment.
+
+    Samples at: in_sec, in_sec + dur/3, in_sec + 2*dur/3, out_sec - 0.1.
+    Returns JPEG bytes, or None on failure.
+    Used by the Editorial Director's screenshot_segment tool.
+    """
+    from PIL import Image
+    import io
+
+    if segment_index < 0 or segment_index >= len(storyboard.segments):
+        return None
+    seg = storyboard.segments[segment_index]
+    source = _resolve_clip_source(seg.clip_id, clips_dir)
+    if not source:
+        return None
+
+    dur = seg.duration_sec
+    timestamps = [
+        seg.in_sec,
+        seg.in_sec + dur / 3,
+        seg.in_sec + 2 * dur / 3,
+        max(seg.in_sec, seg.out_sec - 0.1),
+    ]
+
+    frames: list[Image.Image] = []
+    for ts in timestamps:
+        data = _extract_thumbnail_to_bytes(source, ts, thumb_width, thumb_height)
+        if data:
+            frames.append(Image.open(io.BytesIO(data)))
+        else:
+            frames.append(Image.new("RGB", (thumb_width, thumb_height), (20, 20, 20)))
+
+    grid = Image.new("RGB", (thumb_width * 2, thumb_height * 2), (0, 0, 0))
+    for i, frame in enumerate(frames):
+        x = (i % 2) * thumb_width
+        y = (i // 2) * thumb_height
+        grid.paste(frame, (x, y))
+
+    buf = io.BytesIO()
+    grid.save(buf, format="JPEG", quality=80)
+    return buf.getvalue()
+
+
 def _get_clip_duration(clip_id: str, clips_dir: Path) -> float:
     source = _resolve_clip_source(clip_id, clips_dir)
     if not source:
@@ -172,24 +302,20 @@ def _render_monologue_panel(monologue) -> str:
         "detached_observer": "Detached Observer",
         "stream_of_consciousness": "Stream of Consciousness",
     }
-    synergy_colors = {"harmony": "#3498db", "dissonance": "#e67e22"}
-
     persona_label = persona_labels.get(monologue.persona, monologue.persona)
     mechanics = ", ".join(monologue.tone_mechanics) if monologue.tone_mechanics else "none"
     arc = " → ".join(monologue.arc_structure) if monologue.arc_structure else "none"
 
     overlay_cards = []
     for ov in monologue.overlays:
-        color = synergy_colors.get(ov.synergy, "#95a5a6")
         end_t = ov.appear_at + ov.duration_sec
         overlay_cards.append(
-            f'<div style="border-left:3px solid {color};padding:6px 12px;margin:6px 0;'
+            f'<div style="border-left:3px solid #3498db;padding:6px 12px;margin:6px 0;'
             f'background:#1a1a2e;border-radius:4px">'
             f'<div style="display:flex;justify-content:space-between;font-size:0.85em;'
             f'color:#aaa">'
             f"<span>Segment #{ov.segment_index}</span>"
             f"<span>{ov.appear_at:.1f}s – {end_t:.1f}s ({ov.duration_sec:.1f}s)</span>"
-            f'<span style="color:{color}">{ov.synergy}</span>'
             f"</div>"
             f'<div style="font-size:1.1em;margin-top:4px;font-style:italic;color:#e0e0e0">'
             f'"{ov.text}"</div>'

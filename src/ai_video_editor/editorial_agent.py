@@ -13,6 +13,7 @@ from .config import (
     EditorialProjectPaths,
     GeminiConfig,
     PreprocessConfig,
+    ReviewConfig,
     TranscribeConfig,
     DEFAULT_CONFIG,
 )
@@ -982,6 +983,8 @@ def _run_phase2_split(
     tracer=None,
     visual: bool = False,
     style_supplement: str | None = None,
+    review_config: "ReviewConfig | None" = None,
+    interactive: bool = False,
 ) -> Path:
     """Multi-call Phase 2: Reasoning → Structuring → Assembly → Validation.
 
@@ -1261,6 +1264,20 @@ def _run_phase2_split(
             tracer=tracer,
         )
 
+    # ── Editorial Director review (enabled by default) ────────────────────
+    if review_config and review_config.enabled:
+        from .editorial_director import run_editorial_review
+
+        storyboard, _review_log = run_editorial_review(
+            storyboard=storyboard,
+            clip_reviews=clip_reviews,
+            user_context=user_context,
+            clips_dir=editorial_paths.clips_dir,
+            review_config=review_config,
+            tracer=tracer,
+            interactive=interactive,
+        )
+
     # ── Version and save outputs ───────────────────────────────────────────
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
 
@@ -1365,6 +1382,8 @@ def run_phase2(
     tracer=None,
     visual: bool = False,
     style_supplement: str | None = None,
+    review_config: "ReviewConfig | None" = None,
+    interactive: bool = False,
 ) -> Path:
     """Phase 2: produce structured EditorialStoryboard + render markdown and HTML preview.
 
@@ -1385,6 +1404,8 @@ def run_phase2(
             tracer=tracer,
             visual=visual,
             style_supplement=style_supplement,
+            review_config=review_config,
+            interactive=interactive,
         )
 
     from .models import EditorialStoryboard
@@ -1561,6 +1582,20 @@ def run_phase2(
                 else "gemini-2.5-flash-lite",
                 tracer=tracer,
             )
+
+    # Editorial Director review (enabled by default)
+    if review_config and review_config.enabled:
+        from .editorial_director import run_editorial_review
+
+        storyboard, _review_log = run_editorial_review(
+            storyboard=storyboard,
+            clip_reviews=clip_reviews,
+            user_context=user_context,
+            clips_dir=editorial_paths.clips_dir,
+            review_config=review_config,
+            tracer=tracer,
+            interactive=interactive,
+        )
 
     # Version and save outputs
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
@@ -1794,7 +1829,6 @@ def _run_monologue_split(
                 text=ov.text,
                 appear_at=ov.appear_at,
                 duration_sec=ov.duration_sec,
-                synergy=ov.synergy,
                 note=f"arc: {ov.arc_phase}" if ov.arc_phase else "",
             )
         )
@@ -2338,6 +2372,8 @@ def run_editorial_pipeline(
         tracer=tracer,
         visual=visual,
         style_supplement=p2_supplement,
+        review_config=cfg.review,
+        interactive=interactive,
     )
 
     tracer.print_summary("Phase 2")

@@ -281,7 +281,7 @@ class EditorialStoryboard(BaseModel):
         "2) Story concept — what story does this footage tell? "
         "3) Opening hook — what is the strongest first 10 seconds? "
         "4) Arc structure — beginning/middle/end with clip assignments. "
-        "5) Pacing plan — where is the edit fast vs slow, energetic vs contemplative?"
+        "5) Pacing plan — where is the edit fast vs slow, energetic vs contemplative?",
     )
     title: str = Field(description="Creative title for the final video")
     estimated_duration_sec: float = Field(
@@ -418,11 +418,9 @@ class OverlayDraft(BaseModel):
     appear_at: float = Field(description="Seconds from segment start to show the overlay")
     duration_sec: float = Field(description="How long the overlay stays on screen")
     word_count: int = Field(description="Number of words in the text")
-    synergy: str = Field(default="harmony", description="harmony or dissonance")
     arc_phase: str = Field(
         default="", description="grounding_hook, wandering_middle, or resolution"
     )
-    position: str = Field(default="lower_third", description="Always lower_third")
 
 
 class OverlayDrafts(BaseModel):
@@ -445,8 +443,6 @@ class MonologueOverlay(BaseModel):
     text: str  # the overlay text (e.g. "the city decided to wash itself clean...")
     appear_at: float  # seconds from segment start
     duration_sec: float  # how long text stays on screen
-    style: TextOverlayStyle = TextOverlayStyle()
-    synergy: str = "harmony"  # "harmony" | "dissonance"
     note: str = ""  # editorial note about why this text here
 
 
@@ -502,6 +498,16 @@ class ReviewIteration(BaseModel):
     duration_sec: float = 0.0
 
 
+class SegmentChange(BaseModel):
+    """Record of a single segment modification during review."""
+
+    change_type: str  # "fix", "delete", "reorder"
+    segment_index: int = -1
+    fields_changed: list[str] = []
+    before: dict = {}
+    after: dict = {}
+
+
 class ReviewLog(BaseModel):
     """Full audit trail of an editorial review session."""
 
@@ -512,6 +518,9 @@ class ReviewLog(BaseModel):
     total_cost_usd: float = 0.0
     total_duration_sec: float = 0.0
     convergence_reason: str = ""  # "finalized" | "budget" | "timeout" | "no_tool_calls"
+    changes: list[SegmentChange] = Field(default=[])
+    eval_before: str = ""
+    eval_after: str = ""
 
 
 # ---------------------------------------------------------------------------

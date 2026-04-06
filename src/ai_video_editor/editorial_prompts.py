@@ -998,11 +998,7 @@ def build_monologue_call2_prompt(
         "- Keep overlays concise: 5-8 words each\n"
         "- Break one thought across multiple overlays on consecutive segments\n"
         "- Two-Breath Rule: duration = word_count * 0.4 minimum, word_count * 0.6 recommended\n"
-        "- Leave at least 3 seconds of no-text between consecutive overlays\n"
-        "- Position: always 'lower_third'\n\n"
-        "SYNERGY: For each overlay, choose:\n"
-        "- 'harmony' — text matches visual mood\n"
-        "- 'dissonance' — text contrasts visuals for humor/relatability\n\n"
+        "- Leave at least 3 seconds of no-text between consecutive overlays\n\n"
     )
 
     prompt += "ELIGIBLE SEGMENTS (write overlays ONLY for these):\n\n"

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import EditorialProjectPaths, OutputFormat
-from .models import EditorialStoryboard
+from .models import EditorialStoryboard, TextOverlayStyle
 from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
 from .render import render_html_preview
 from .versioning import (
@@ -728,11 +728,15 @@ def _resolve_macos_cjk_font(style: str = "sans-serif") -> str:
     return "/System/Library/Fonts/Avenir Next.ttc"
 
 
+_MONOLOGUE_STYLE = TextOverlayStyle()  # fixed: sans-serif, lowercase, medium, lower_third, center
+
+
 def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None) -> list[str]:
     """Build ffmpeg drawtext filter strings for a list of MonologueOverlay objects.
 
     Styled after Korean silent vlog typography: clean sans-serif, bright white,
     positioned in the lower portion of the frame with soft shadow for readability.
+    Style is applied at render time via _MONOLOGUE_STYLE, not from LLM output.
     """
     import platform
 
@@ -767,28 +771,29 @@ def _build_overlay_drawtext(overlays, output_format: OutputFormat | None = None)
     }
 
     filters = []
+    style = _MONOLOGUE_STYLE
     for ov in overlays:
         fmap = cjk_font_map if _contains_cjk(ov.text) else latin_font_map
-        font_file = fmap.get(ov.style.font, fmap["sans-serif"])
-        font_size = size_map.get(ov.style.size, size_map["medium"])
+        font_file = fmap.get(style.font, fmap["sans-serif"])
+        font_size = size_map.get(style.size, size_map["medium"])
 
         # Monologue overlays always render at lower_third — captions move up if colliding.
         # "center" position is reserved for future title cards / word cards, not monologue.
         y_expr = "h*0.88-th"
 
         # Alignment — default center for silent vlog aesthetic
-        if ov.style.alignment == "center":
+        if style.alignment == "center":
             x_expr = "(w-tw)/2"
-        elif ov.style.alignment == "right":
+        elif style.alignment == "right":
             x_expr = "w-tw-40"
         else:  # left
             x_expr = "40"
 
         # Apply case transformation
         text = ov.text
-        if ov.style.case == "lowercase":
+        if style.case == "lowercase":
             text = text.lower()
-        elif ov.style.case == "sentence":
+        elif style.case == "sentence":
             text = text.capitalize()
 
         escaped = _escape_drawtext(text)
