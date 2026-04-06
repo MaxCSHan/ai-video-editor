@@ -79,7 +79,7 @@ class ClaudeConfig:
 class GeminiConfig:
     model: str = "gemini-3-flash-preview"
     phase2_model: str | None = "gemini-3-flash-preview"
-    structuring_model: str = "gemini-2.5-flash-lite"  # cheap model for Call 2A.5
+    structuring_model: str = "gemini-3-flash-preview"  # cheap model for Call 2A.5
     temperature: float = 0.2
     phase2_temperature: float = 0.6
     phase2b_temperature: float = 0.3  # assembly is mechanical, not creative
@@ -248,11 +248,11 @@ class ReviewConfig:
     """Configuration for the Editorial Director review loop."""
 
     enabled: bool = True
-    model: str = "gemini-2.5-flash"
-    max_turns: int = 15
-    max_fixes: int = 10
+    model: str = "gemini-3-flash-preview"
+    max_turns: int = 50
+    max_fixes: int = 40
     max_review_cost_usd: float = 0.50
-    wall_clock_timeout_sec: float = 180.0
+    wall_clock_timeout_sec: float = 300.0
     human_checkpoint_on_uncertainty: bool = True
 
 
@@ -260,9 +260,9 @@ class ReviewConfig:
 class ReviewBudget:
     """Mutable budget tracker for a single review session."""
 
-    max_turns: int = 15
-    max_fixes: int = 10
-    max_cost_usd: float = 0.50
+    max_turns: int = 50
+    max_fixes: int = 40
+    max_cost_usd: float = 2
     turns_used: int = 0
     fixes_used: int = 0
     cost_used_usd: float = 0.0

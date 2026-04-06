@@ -1609,7 +1609,7 @@ def run_phase2(
                 client=client,
                 model=gemini_cfg.structuring_model
                 if hasattr(gemini_cfg, "structuring_model")
-                else "gemini-2.5-flash-lite",
+                else "gemini-3-flash-preview",
                 tracer=tracer,
             )
 
