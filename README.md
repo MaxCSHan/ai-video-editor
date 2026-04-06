@@ -227,16 +227,24 @@ vx analyze my-trip --provider gemma
 vx config --provider gemma
 ```
 
-### Using a different server (vLLM, llama.cpp, etc.)
+### Alternative local servers
 
-Any OpenAI-compatible API server works. Override the endpoint in your code or config:
+VX talks to any OpenAI-compatible server — Ollama is the recommended default, but you can swap the backend by changing `base_url` in the CLI or config. All options below support Gemma 4 multimodal (image input) and JSON mode.
+
+| Backend | Best for | `base_url` | Setup |
+|---------|----------|------------|-------|
+| **[Ollama](https://ollama.com)** (default) | Easiest setup, cross-platform | `http://localhost:11434/v1` | `curl -fsSL https://ollama.com/install.sh \| sh` |
+| **[LM Studio](https://lmstudio.ai)** | GUI users, non-technical filmmakers | `http://localhost:1234/v1` | Download app, search "gemma4", click Start Server |
+| **[llama.cpp](https://github.com/ggml-org/llama.cpp)** | Max performance, fine-grained control | `http://localhost:8080/v1` | Build from source, run `llama-server --model gemma4.gguf --mmproj mmproj.gguf` |
+| **[vLLM](https://docs.vllm.ai)** | Multi-user / production serving | `http://localhost:8000/v1` | `pip install vllm && vllm serve google/gemma-4-27b-it` |
+| **[MLX](https://github.com/ml-explore/mlx)** | Apple Silicon (best M-series perf) | `http://localhost:5001/v1` | `pip install mlx-lm omlx && omlx serve gemma4:27b` |
+
+To use a non-default server, pass the URL when configuring VX or set it in `.vx.json`:
 
 ```bash
-# vLLM example (default port 8000)
-# Set GemmaConfig.base_url = "http://localhost:8000/v1"
-
-# llama.cpp server
-# Set GemmaConfig.base_url = "http://localhost:8080/v1"
+# Example: use LM Studio instead of Ollama
+vx config --provider gemma
+# Then edit .vx.json or GemmaConfig to set base_url = "http://localhost:1234/v1"
 ```
 
 ### Notes
@@ -246,6 +254,7 @@ Any OpenAI-compatible API server works. Override the endpoint in your code or co
 - **Transcription is independent.** Use `mlx-whisper` (local) or Gemini for transcription regardless of your analysis provider.
 - **Slower than cloud.** Local inference is slower than Gemini/Claude API calls. Expect ~30-120 seconds per clip depending on your GPU.
 - **Sequential processing.** Clips are reviewed one at a time (a single GPU can't efficiently parallelize large model inference).
+- **Quantization recommended.** Q4_K_M quantization (Ollama default) cuts VRAM ~55% with minimal quality loss — strongly recommended for 24GB GPUs.
 
 ## Project Library
 
