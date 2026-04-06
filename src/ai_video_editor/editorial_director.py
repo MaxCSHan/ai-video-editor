@@ -816,10 +816,7 @@ def run_director_chat(
                             role="user",
                             parts=[
                                 types.Part.from_text(
-                                    text=(
-                                        "## Updated Segment List (after edits)\n\n"
-                                        + refreshed
-                                    )
+                                    text=("## Updated Segment List (after edits)\n\n" + refreshed)
                                 )
                             ],
                         )

@@ -191,9 +191,7 @@ def build_initial_message(
 
     # 5. Filming timeline (chronological shooting order)
     if filming_timeline:
-        parts.append(
-            {"type": "text", "text": f"## Filming Timeline\n\n{filming_timeline}"}
-        )
+        parts.append({"type": "text", "text": f"## Filming Timeline\n\n{filming_timeline}"})
 
     # 6. Source material digest (so director sees the full picture)
     if clip_reviews:
