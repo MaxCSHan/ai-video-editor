@@ -1294,6 +1294,7 @@ def _run_phase2_split(
             review_config=review_config,
             tracer=tracer,
             interactive=interactive,
+            style_guidelines=style_supplement,
         )
 
     # ── Version and save outputs ───────────────────────────────────────────
@@ -1625,6 +1626,7 @@ def run_phase2(
             review_config=review_config,
             tracer=tracer,
             interactive=interactive,
+            style_guidelines=style_supplement,
         )
 
     # Version and save outputs
