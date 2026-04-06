@@ -84,6 +84,16 @@ def _write_workspace_config(cfg: dict):
     WORKSPACE_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
 
 
+def _apply_workspace_gemma_settings(cfg, ws: dict | None = None):
+    """Override GemmaConfig defaults with workspace settings from .vx.json."""
+    if ws is None:
+        ws = _read_workspace_config()
+    if ws.get("gemma_model"):
+        cfg.gemma.model = ws["gemma_model"]
+    if ws.get("gemma_base_url"):
+        cfg.gemma.base_url = ws["gemma_base_url"]
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -1629,6 +1639,14 @@ def cmd_config(args, cfg: Config):
     if args.style:
         ws["style"] = args.style
         changed = True
+    if getattr(args, "gemma_model", None):
+        ws["gemma_model"] = args.gemma_model
+        cfg.gemma.model = args.gemma_model
+        changed = True
+    if getattr(args, "gemma_base_url", None):
+        ws["gemma_base_url"] = args.gemma_base_url
+        cfg.gemma.base_url = args.gemma_base_url
+        changed = True
 
     if changed:
         _write_workspace_config(ws)
@@ -1653,6 +1671,25 @@ def cmd_config(args, cfg: Config):
         if anthropic_key
         else f"  ANTHROPIC_API_KEY: {RED}not set{RESET}"
     )
+
+    # Show Gemma local model status
+    _header("Gemma (Local)")
+    gemma_model = ws.get("gemma_model", cfg.gemma.model)
+    gemma_url = ws.get("gemma_base_url", cfg.gemma.base_url)
+    print(f"  Model:     {BOLD}{gemma_model}{RESET}")
+    print(f"  Server:    {gemma_url}")
+    try:
+        import openai
+
+        client = openai.OpenAI(base_url=gemma_url, api_key=cfg.gemma.api_key)
+        client.models.list()
+        print(f"  Status:    {GREEN}connected{RESET}")
+    except ImportError:
+        print(
+            f"  Status:    {YELLOW}openai not installed{RESET} (run: uv pip install -e '.[gemma]')"
+        )
+    except Exception:
+        print(f"  Status:    {RED}not reachable{RESET}")
 
     # Show preprocessing defaults
     _header("Preprocessing")
@@ -2219,6 +2256,10 @@ def main():
         "--provider", choices=["gemini", "claude", "gemma"], help="Default AI provider"
     )
     p_config.add_argument("--style", help="Default video style")
+    p_config.add_argument("--gemma-model", help="Gemma model name (e.g. gemma4:27b, gemma4:12b)")
+    p_config.add_argument(
+        "--gemma-base-url", help="Gemma server URL (e.g. http://localhost:11434/v1)"
+    )
 
     p_trace = sub.add_parser("trace", help="Start Phoenix tracing server (dev tool)")
     p_trace.add_argument("--port", type=int, default=6006, help="Server port (default: 6006)")
@@ -2226,6 +2267,7 @@ def main():
 
     args = parser.parse_args()
     cfg = DEFAULT_CONFIG
+    _apply_workspace_gemma_settings(cfg)
 
     if not args.command:
         # No subcommand → launch interactive mode

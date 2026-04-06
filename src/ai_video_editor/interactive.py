@@ -717,6 +717,11 @@ def run_interactive():
     print(BANNER)
     cfg = DEFAULT_CONFIG
 
+    # Apply workspace Gemma settings (base_url, model) from .vx.json
+    from .cli import _apply_workspace_gemma_settings
+
+    _apply_workspace_gemma_settings(cfg)
+
     # Auto-connect to Phoenix tracing server if running
     from .tracing import connect_phoenix, get_phoenix_status
 
@@ -2667,6 +2672,50 @@ def _settings_flow(cfg):
     if provider:
         ws["provider"] = provider
 
+    # Gemma-specific settings (local model server)
+    if provider == "gemma":
+        from .config import GemmaConfig
+
+        defaults = GemmaConfig()
+
+        server_choices = [
+            questionary.Choice("Ollama (localhost:11434)", value="http://localhost:11434/v1"),
+            questionary.Choice("LM Studio (localhost:1234)", value="http://localhost:1234/v1"),
+            questionary.Choice(
+                "llama.cpp server (localhost:8080)", value="http://localhost:8080/v1"
+            ),
+            questionary.Choice("vLLM (localhost:8000)", value="http://localhost:8000/v1"),
+            questionary.Choice("Custom URL...", value="_custom"),
+        ]
+        current_url = ws.get("gemma_base_url", defaults.base_url)
+
+        base_url = questionary.select(
+            "Local model server:",
+            choices=server_choices,
+            default=current_url if current_url in [c.value for c in server_choices] else "_custom",
+            style=VX_STYLE,
+        ).ask()
+
+        if base_url == "_custom":
+            base_url = questionary.text(
+                "Server URL (e.g. http://localhost:8080/v1):",
+                default=current_url,
+                style=VX_STYLE,
+            ).ask()
+
+        if base_url:
+            ws["gemma_base_url"] = base_url
+            cfg.gemma.base_url = base_url
+
+        model_name = questionary.text(
+            "Model name:",
+            default=ws.get("gemma_model", defaults.model),
+            style=VX_STYLE,
+        ).ask()
+        if model_name:
+            ws["gemma_model"] = model_name
+            cfg.gemma.model = model_name
+
     style = questionary.select(
         "Default video style:",
         choices=["vlog", "travel-vlog", "family-video", "event-recap", "cinematic", "short-form"],
@@ -2677,4 +2726,8 @@ def _settings_flow(cfg):
         ws["style"] = style
 
     ws_path.write_text(json.dumps(ws, indent=2) + "\n")
-    print(f"\n  Settings saved: provider={ws['provider']}, style={ws['style']}\n")
+    summary = f"provider={ws['provider']}, style={ws['style']}"
+    if ws["provider"] == "gemma":
+        summary += f", model={ws.get('gemma_model', 'default')}"
+        summary += f", server={ws.get('gemma_base_url', 'default')}"
+    print(f"\n  Settings saved: {summary}\n")
