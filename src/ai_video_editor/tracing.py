@@ -389,6 +389,77 @@ def get_phoenix_status() -> tuple[bool, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# OTel span helpers for agent tracing
+# ---------------------------------------------------------------------------
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def otel_session_span(name: str, session_id: str, attributes: dict | None = None):
+    """Create an OTel span with session_id for Phoenix Sessions grouping.
+
+    All Gemini API calls within this context will inherit the session_id via
+    OpenInference's ``using_session``, making them appear as a single
+    conversation in the Phoenix Sessions tab.
+
+    No-op (yields None) when Phoenix is not connected.
+    """
+    if not _phoenix_connected:
+        yield None
+        return
+
+    try:
+        from openinference.instrumentation import using_session
+        from openinference.semconv.trace import SpanAttributes
+        from opentelemetry import trace
+
+        tracer = trace.get_tracer("vx-pipeline")
+        span_attrs = {
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: "agent",
+            SpanAttributes.SESSION_ID: session_id,
+        }
+        if attributes:
+            span_attrs.update(attributes)
+
+        with tracer.start_as_current_span(name, attributes=span_attrs) as span:
+            with using_session(session_id):
+                yield span
+    except Exception:
+        # Tracing should never break the pipeline
+        yield None
+
+
+@contextmanager
+def otel_tool_span(tool_name: str, tool_args: dict | None = None):
+    """Create a child span for a director tool execution.
+
+    Records tool name, arguments, and (when set by caller) result attributes.
+    No-op when Phoenix is not connected.
+    """
+    if not _phoenix_connected:
+        yield None
+        return
+
+    try:
+        from openinference.semconv.trace import SpanAttributes
+        from opentelemetry import trace
+
+        tracer = trace.get_tracer("vx-pipeline")
+        attrs = {
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: "tool",
+            SpanAttributes.TOOL_NAME: tool_name,
+        }
+        if tool_args:
+            attrs[SpanAttributes.INPUT_VALUE] = str(tool_args)[:500]
+
+        with tracer.start_as_current_span(f"tool:{tool_name}", attributes=attrs) as span:
+            yield span
+    except Exception:
+        yield None
+
+
+# ---------------------------------------------------------------------------
 # Gemini traced wrapper
 # ---------------------------------------------------------------------------
 
