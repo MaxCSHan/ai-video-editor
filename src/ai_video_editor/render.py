@@ -366,6 +366,7 @@ def render_html_preview(
     warnings: list[str] | None = None,
     rough_cut_path: Path | None = None,
     monologue=None,
+    version: int = 0,
 ) -> str:
     total_dur = sb.total_segments_duration
     thumbs_dir = output_dir / "thumbnails" if output_dir else None
@@ -1016,6 +1017,22 @@ document.addEventListener('keydown', (e) => {{
     v.paused ? v.play() : v.pause();
   }}
 }});
+</script>
+
+<script>
+/* Live-reload: polls __metadata.json for version changes.
+   Inert when opened as file:// (fetch fails silently). */
+(function() {{
+  var currentVersion = {version};
+  if (currentVersion <= 0) return;
+  async function checkReload() {{
+    try {{
+      var r = await fetch('../__metadata.json?t=' + Date.now());
+      if (r.ok) {{ var m = await r.json(); if (m.version > currentVersion) location.reload(); }}
+    }} catch(e) {{}}
+  }}
+  setInterval(checkReload, 2000);
+}})();
 </script>
 
 </body>

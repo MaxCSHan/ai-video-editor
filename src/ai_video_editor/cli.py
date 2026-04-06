@@ -1273,6 +1273,11 @@ def cmd_preview(args, cfg: Config):
 
     ep = cfg.editorial_project(name)
 
+    # --serve: start live-reloading preview server
+    if getattr(args, "serve", False):
+        _serve_preview(ep, name, getattr(args, "port", 8080))
+        return
+
     json_path = _find_storyboard_json(ep)
     if not json_path:
         print(
@@ -1320,6 +1325,68 @@ def cmd_preview(args, cfg: Config):
 
     print(f"  {BOLD}Version:{RESET}    v{v}")
     print(f"  {GREEN}Preview:{RESET}    {preview_path}")
+
+
+def _serve_preview(ep, name: str, port: int = 8080):
+    """Start a live-reloading preview server."""
+    import http.server
+    import os
+    import webbrowser
+
+    serve_dir = str(ep.root)
+
+    # Find latest preview
+    latest_preview = ep.exports / "latest" / "preview.html"
+    if not latest_preview.exists():
+        # Try to find any preview
+        previews = sorted(ep.exports.glob("v*/preview.html"))
+        if not previews:
+            print(f"{RED}Error:{RESET} No preview found. Run {BOLD}vx preview {name}{RESET} first.")
+            return
+        latest_preview = previews[-1]
+
+    rel_path = os.path.relpath(latest_preview, ep.root)
+    url = f"http://localhost:{port}/{rel_path}"
+
+    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+        """Suppress noisy browser requests and broken pipe errors."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=serve_dir, **kwargs)
+
+        def log_message(self, format, *log_args):
+            # Suppress favicon, apple-touch-icon, .well-known requests
+            path = log_args[0] if log_args else ""
+            if any(
+                s in str(path) for s in ("favicon", "apple-touch-icon", ".well-known", "__metadata")
+            ):
+                return
+            super().log_message(format, *log_args)
+
+        def handle_one_request(self):
+            try:
+                super().handle_one_request()
+            except BrokenPipeError:
+                pass  # Browser closed connection early — harmless
+
+    try:
+        server = http.server.HTTPServer(("localhost", port), _QuietHandler)
+    except OSError as e:
+        print(f"{RED}Error:{RESET} Could not start server on port {port}: {e}")
+        return
+
+    print(f"  {GREEN}Preview server:{RESET} {url}")
+    print(f"  Serving from: {serve_dir}")
+    print("  Auto-reloads when storyboard is updated via director chat.")
+    print("  Press Ctrl+C to stop.\n")
+
+    webbrowser.open(url)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Server stopped.")
+        server.server_close()
 
 
 def cmd_cut(args, cfg: Config):
@@ -2056,6 +2123,12 @@ def main():
     # --- preview ---
     p_preview = sub.add_parser("preview", help="Regenerate HTML preview (no LLM, no ffmpeg)")
     p_preview.add_argument("project", nargs="?", help="Project name")
+    p_preview.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start a live-reloading preview server instead of regenerating",
+    )
+    p_preview.add_argument("--port", type=int, default=8080, help="Server port (default: 8080)")
 
     # --- cut ---
     p_cut = sub.add_parser(
