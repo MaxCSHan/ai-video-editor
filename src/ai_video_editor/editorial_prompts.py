@@ -689,7 +689,7 @@ Analyze this clip thoroughly and produce a structured review.
 Clip: {clip_id} ({filename})
 Duration: {duration}
 Resolution: {resolution}
-"""
+{orientation_line}"""
 
 _CLIP_REVIEW_INSTRUCTIONS = """\
 Be specific with timestamps. Identify EVERY usable and discardable segment.
@@ -768,16 +768,24 @@ def build_clip_review_prompt(
     filename: str,
     duration_sec: float,
     resolution: str,
+    orientation: str | None = None,
+    aspect_ratio: str | None = None,
     transcript_text: str | None = None,
     style_supplement: str | None = None,
     user_context: dict | None = None,
     include_json_template: bool = True,
 ) -> str:
+    orientation_line = ""
+    if orientation:
+        orientation_line = f"Orientation: {orientation}"
+        if aspect_ratio:
+            orientation_line += f" ({aspect_ratio})"
     fmt = dict(
         clip_id=clip_id,
         filename=filename,
         duration=format_duration(duration_sec),
         resolution=resolution,
+        orientation_line=orientation_line,
     )
     prompt = _CLIP_REVIEW_HEADER.format(**fmt)
     if include_json_template:

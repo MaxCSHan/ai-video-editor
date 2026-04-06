@@ -323,6 +323,8 @@ def create_proxy(
     vf = f"{rot}scale={cfg.proxy_width}:-2,fps={cfg.proxy_fps}"
     cmd = ["ffmpeg", "-y"]
     cmd.extend(get_hwaccel_args())
+    if rotation != 0:
+        cmd.append("-noautorotate")
     cmd.extend(
         [
             "-i",
@@ -364,6 +366,8 @@ def extract_frames(
     vf = f"fps=1/{cfg.frame_interval_sec},{rot}scale={cfg.frame_width}:-2"
     cmd = ["ffmpeg", "-y"]
     cmd.extend(get_hwaccel_args())
+    if rotation != 0:
+        cmd.append("-noautorotate")
     cmd.extend(
         [
             "-i",
@@ -418,6 +422,8 @@ def detect_scenes(
     vf = f"select='gt(scene,{cfg.scene_threshold})',showinfo,{rot}scale={cfg.frame_width}:-2"
     cmd = ["ffmpeg", "-y"]
     cmd.extend(get_hwaccel_args())
+    if rotation != 0:
+        cmd.append("-noautorotate")
     cmd.extend(
         [
             "-i",
@@ -515,6 +521,8 @@ def generate_contact_sheet(
     vf = f"select='gt(scene,{cfg.scene_threshold})',{rot}scale=180:-2,tile={columns}x{rows}"
     cmd = ["ffmpeg", "-y"]
     cmd.extend(get_hwaccel_args())
+    if rotation != 0:
+        cmd.append("-noautorotate")
     cmd.extend(
         [
             "-i",
