@@ -2095,9 +2095,15 @@ def _run_director_review(ep, meta, cfg):
 
 
 def _chat_with_director(ep, meta, cfg):
-    """Open conversational director for user-driven storyboard editing."""
+    """Open conversational director for user-driven storyboard editing.
+
+    Sessions are persisted — each confirmed edit auto-saves a new storyboard version.
+    Active sessions can be resumed.
+    """
+    from datetime import datetime, timezone
+
     from .config import ReviewBudget
-    from .models import EditorialStoryboard
+    from .models import ChatSession, EditorialStoryboard
     from .review_display import (
         print_change_diff,
         print_post_review,
@@ -2105,19 +2111,55 @@ def _chat_with_director(ep, meta, cfg):
         print_turn,
     )
     from .tracing import ProjectTracer
-    from .versioning import resolve_user_context_path
+    from .versioning import current_version, resolve_user_context_path
+
+    from .editorial_director import (
+        _next_session_id,
+        _session_dir,
+        find_active_session,
+        run_director_chat,
+        save_session,
+    )
 
     provider = meta.get("provider", "gemini")
 
-    # Load latest storyboard
-    sb_path = None
-    for p in ("gemini", "claude"):
-        candidate = ep.storyboard / f"editorial_{p}_latest.json"
-        if candidate.exists():
-            sb_path = candidate
-            provider = p
-            break
-    if not sb_path:
+    # Check for active session
+    active = find_active_session(ep)
+    session = None
+
+    if active:
+        choice = questionary.select(
+            f"Found active session: {active.session_id} "
+            f"(v{active.storyboard_version}, {active.total_edits} edits)",
+            choices=[
+                questionary.Choice("Resume session", value="resume"),
+                questionary.Choice("Start new session", value="new"),
+            ],
+            style=VX_STYLE,
+        ).ask()
+        if choice == "resume":
+            session = active
+        elif choice == "new":
+            # Archive the old session so it doesn't block the new one
+            active.status = "archived"
+            save_session(active, ep)
+
+    # Load storyboard (from session version if resuming, else latest)
+    if session:
+        # Load the storyboard at the session's current version
+        sb_path = ep.storyboard / f"editorial_{provider}_v{session.storyboard_version}.json"
+        if not sb_path.exists():
+            sb_path = ep.storyboard / f"editorial_{provider}_latest.json"
+    else:
+        sb_path = None
+        for p in ("gemini", "claude"):
+            candidate = ep.storyboard / f"editorial_{p}_latest.json"
+            if candidate.exists():
+                sb_path = candidate
+                provider = p
+                break
+
+    if not sb_path or not sb_path.exists():
         print("\n  No storyboard found. Run Phase 2 first.\n")
         return
 
@@ -2137,7 +2179,7 @@ def _chat_with_director(ep, meta, cfg):
     if ctx_path:
         user_context = json.loads(ctx_path.read_text())
 
-    # Load style guidelines
+    # Style guidelines
     style_guidelines = None
     preset_key = meta.get("style_preset")
     if preset_key:
@@ -2147,6 +2189,30 @@ def _chat_with_director(ep, meta, cfg):
         if preset:
             style_guidelines = preset.phase2_supplement
 
+    # Create new session if not resuming
+    if not session:
+        sd = _session_dir(ep)
+        sid = _next_session_id(sd)
+        # Find current storyboard version for the starting_version
+        sv = current_version(ep.root, f"editorial_{provider}")
+        if sv == 0:
+            sv = current_version(ep.root, "storyboard")
+        session = ChatSession(
+            session_id=sid,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            storyboard_version=sv,
+            starting_version=sv,
+            provider=provider,
+            style_preset=preset_key or "",
+        )
+        save_session(session, ep)
+        print(f"\n  Started session {sid}")
+        print(
+            f"  Tip: Run {_BOLD}vx preview --serve{_RESET} "
+            f"in another terminal for live-updating preview."
+        )
+
     tracer = ProjectTracer(ep.root)
     budget = ReviewBudget.from_config(cfg.review)
 
@@ -2154,7 +2220,7 @@ def _chat_with_director(ep, meta, cfg):
     from .director_prompts import build_eval_summary
     from .editorial_director import _load_transcripts
 
-    clip_ids = {s.clip_id for s in storyboard.segments}
+    clip_ids = {r.get("clip_id", "") for r in reviews} - {""}
     transcripts = _load_transcripts(ep.clips_dir, clip_ids)
     eval_summary = build_eval_summary(storyboard, reviews, user_context, transcripts)
 
@@ -2166,7 +2232,7 @@ def _chat_with_director(ep, meta, cfg):
         budget=budget,
     )
 
-    # Input callback using questionary
+    # Input callback
     def get_user_input():
         try:
             result = questionary.text(
@@ -2174,14 +2240,9 @@ def _chat_with_director(ep, meta, cfg):
                 style=VX_STYLE,
                 instruction="(type 'done' to finish, Esc to cancel)",
             ).ask()
-            return result  # None if Esc
+            return result
         except KeyboardInterrupt:
             return None
-
-    from .editorial_director import run_director_chat
-
-    # Snapshot before chat
-    original_snapshot = storyboard.model_dump()
 
     reviewed, review_log = run_director_chat(
         storyboard=storyboard,
@@ -2193,96 +2254,23 @@ def _chat_with_director(ep, meta, cfg):
         style_guidelines=style_guidelines,
         turn_callback=print_turn,
         input_callback=get_user_input,
+        editorial_paths=ep,
+        session=session,
     )
 
     tracer.print_summary("Director Chat")
 
-    # Post-review summary
-    had_changes = reviewed.model_dump() != original_snapshot
+    # Post-chat summary (edits were already auto-saved)
+    had_changes = bool(review_log.changes)
     print_post_review(review_log, had_changes)
 
-    if not had_changes:
-        return
-
-    # Save flow (same as auto-review)
-    print("  Changes are NOT saved yet.")
-    while True:
-        action = questionary.select(
-            "Save director's changes as new version?",
-            choices=[
-                questionary.Choice("Accept & save", value="accept"),
-                questionary.Choice("Show full diff", value="diff"),
-                questionary.Choice("Discard changes", value="reject"),
-            ],
-            style=VX_STYLE,
-        ).ask()
-
-        if action == "diff":
-            print_change_diff(review_log)
-            continue
-        elif action == "reject" or action is None:
-            print("\n  Changes discarded. Original storyboard unchanged.\n")
-            return
-        else:
-            break
-
-    # Save
-    from .render import render_html_preview, render_markdown
-    from .versioning import (
-        begin_version,
-        commit_version,
-        current_version,
-        update_latest_symlink,
-        versioned_dir,
-        versioned_path,
-    )
-
-    rv_version = current_version(ep.root, f"review_{provider}")
-    if rv_version == 0:
-        rv_version = current_version(ep.root, "review")
-    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
-
-    art_meta = begin_version(
-        ep.root,
-        phase="storyboard",
-        provider=provider,
-        inputs={"source": "director_chat"},
-        config_snapshot={"review_model": cfg.review.model},
-        target_dir=ep.storyboard,
-        parent_id=review_parent_id,
-    )
-    v = art_meta.version
-    base = f"editorial_{provider}"
-
-    json_path = versioned_path(ep.storyboard / f"{base}.json", v)
-    json_path.write_text(reviewed.model_dump_json(indent=2))
-    update_latest_symlink(json_path)
-
-    md_path = versioned_path(ep.storyboard / f"{base}.md", v)
-    md_path.write_text(render_markdown(reviewed))
-    update_latest_symlink(md_path)
-
-    export_dir = versioned_dir(ep.exports, v)
-    preview_html = render_html_preview(reviewed, clips_dir=ep.clips_dir, output_dir=export_dir)
-    preview_path = export_dir / "preview.html"
-    preview_path.write_text(preview_html)
-    update_latest_symlink(export_dir)
-
-    commit_version(ep.root, art_meta, output_paths=[json_path, md_path], target_dir=ep.storyboard)
-
-    print(f"\n  Storyboard updated (v{v}) with director edits.")
-    print(f"    JSON:    {json_path}")
-    print(f"    Preview: {preview_path}")
-
-    print_change_diff(review_log)
-
-    import subprocess as _sp
-
-    try:
-        _sp.run(["open", str(preview_path)], check=False)
-        print("  Preview opened in browser.")
-    except Exception:
-        pass
+    if had_changes:
+        print(
+            f"  All changes saved (v{session.starting_version} -> "
+            f"v{session.storyboard_version}, "
+            f"{session.total_edits} edits)."
+        )
+        print_change_diff(review_log)
     print()
 
 

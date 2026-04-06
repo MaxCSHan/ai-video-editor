@@ -524,6 +524,37 @@ class ReviewLog(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Chat session persistence
+# ---------------------------------------------------------------------------
+
+
+class ChatMessage(BaseModel):
+    """Serialized representation of one message in a director chat session."""
+
+    role: str  # "user" | "model"
+    text: str = ""  # concatenated text parts
+    tool_calls: list[dict] = Field(default=[])  # [{name, args}]
+    tool_responses: list[dict] = Field(default=[])  # [{name, result_summary}]
+    timestamp: str = ""
+
+
+class ChatSession(BaseModel):
+    """Persistent state for a director chat session."""
+
+    session_id: str  # "session_001"
+    created_at: str
+    updated_at: str
+    status: str = "active"  # "active" | "completed"
+    storyboard_version: int  # current storyboard version being edited
+    starting_version: int  # version when session started
+    provider: str = "gemini"
+    messages: list[ChatMessage] = Field(default=[])
+    budget_state: dict = Field(default={})  # {turns_used, fixes_used, cost_used_usd}
+    total_edits: int = 0
+    style_preset: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Versioning: artifact metadata and composition
 # ---------------------------------------------------------------------------
 

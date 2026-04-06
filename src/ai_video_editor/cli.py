@@ -962,6 +962,8 @@ def cmd_review(args, cfg: Config):
 
 def cmd_chat(args, cfg: Config):
     """Chat with Editorial Director for conversational storyboard editing."""
+    from datetime import datetime, timezone
+
     name = args.project or _infer_project(cfg)
     if not name:
         print(f"{RED}Error:{RESET} Specify a project name.")
@@ -980,19 +982,41 @@ def cmd_chat(args, cfg: Config):
     ep = cfg.editorial_project(name)
     provider = meta.get("provider", "gemini")
 
-    # Find latest storyboard
-    sb_path = None
-    for p in ("gemini", "claude"):
-        candidate = ep.storyboard / f"editorial_{p}_latest.json"
-        if candidate.exists():
-            sb_path = candidate
-            provider = p
-            break
-    if not sb_path:
+    from .editorial_director import (
+        _next_session_id,
+        _session_dir,
+        find_active_session,
+        run_director_chat,
+        save_session,
+    )
+    from .models import ChatSession, EditorialStoryboard
+    from .versioning import current_version, resolve_user_context_path
+
+    # Check for active session
+    session = None
+    resume = getattr(args, "resume", False)
+    active = find_active_session(ep)
+    if active and resume:
+        session = active
+        print(f"  Resuming session {session.session_id} (v{session.storyboard_version})")
+
+    # Load storyboard
+    if session:
+        sb_path = ep.storyboard / f"editorial_{provider}_v{session.storyboard_version}.json"
+        if not sb_path.exists():
+            sb_path = ep.storyboard / f"editorial_{provider}_latest.json"
+    else:
+        sb_path = None
+        for p in ("gemini", "claude"):
+            candidate = ep.storyboard / f"editorial_{p}_latest.json"
+            if candidate.exists():
+                sb_path = candidate
+                provider = p
+                break
+
+    if not sb_path or not sb_path.exists():
         print(f"{RED}Error:{RESET} No storyboard found. Run {BOLD}vx analyze {name}{RESET} first.")
         sys.exit(1)
-
-    from .models import EditorialStoryboard
 
     storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
 
@@ -1013,15 +1037,11 @@ def cmd_chat(args, cfg: Config):
         print(f"{RED}Error:{RESET} No clip reviews. Run {BOLD}vx analyze {name}{RESET} first.")
         sys.exit(1)
 
-    # Load user context
-    from .versioning import resolve_user_context_path
-
     user_context = None
     ctx_path = resolve_user_context_path(ep.root)
     if ctx_path:
         user_context = json.loads(ctx_path.read_text())
 
-    # Style guidelines
     style_guidelines = None
     preset_key = meta.get("style_preset")
     if preset_key:
@@ -1031,29 +1051,44 @@ def cmd_chat(args, cfg: Config):
         if preset:
             style_guidelines = preset.phase2_supplement
 
-    # Apply CLI overrides
     if getattr(args, "budget", None) is not None:
         cfg.review.max_review_cost_usd = args.budget
     if getattr(args, "max_turns", None) is not None:
         cfg.review.max_turns = args.max_turns
 
+    # Create new session if not resuming
+    if not session:
+        sd = _session_dir(ep)
+        sid = _next_session_id(sd)
+        sv = current_version(ep.root, f"editorial_{provider}")
+        if sv == 0:
+            sv = current_version(ep.root, "storyboard")
+        session = ChatSession(
+            session_id=sid,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            storyboard_version=sv,
+            starting_version=sv,
+            provider=provider,
+            style_preset=preset_key or "",
+        )
+        save_session(session, ep)
+
     from .config import ReviewBudget
-    from .editorial_director import run_director_chat
     from .review_display import print_post_review, print_pre_review, print_turn
     from .tracing import ProjectTracer
 
     tracer = ProjectTracer(ep.root)
     budget = ReviewBudget.from_config(cfg.review)
 
-    # Pre-review summary
     from .director_prompts import build_eval_summary
     from .editorial_director import _load_transcripts
 
-    clip_ids = {s.clip_id for s in storyboard.segments}
+    clip_ids = {r.get("clip_id", "") for r in reviews} - {""}
     transcripts = _load_transcripts(ep.clips_dir, clip_ids)
     eval_summary = build_eval_summary(storyboard, reviews, user_context, transcripts)
 
-    _header(f"Chat with Director: {name}")
+    _header(f"Chat with Director: {name} ({session.session_id})")
     print_pre_review(
         eval_summary=eval_summary,
         seg_count=len(storyboard.segments),
@@ -1061,14 +1096,11 @@ def cmd_chat(args, cfg: Config):
         budget=budget,
     )
 
-    # Input callback for CLI
     def get_input():
         try:
             return input("  You: ")
         except (KeyboardInterrupt, EOFError):
             return None
-
-    original_snapshot = storyboard.model_dump()
 
     reviewed, review_log = run_director_chat(
         storyboard=storyboard,
@@ -1080,63 +1112,21 @@ def cmd_chat(args, cfg: Config):
         style_guidelines=style_guidelines,
         turn_callback=print_turn,
         input_callback=get_input,
+        editorial_paths=ep,
+        session=session,
     )
 
     tracer.print_summary("Director Chat")
 
-    had_changes = reviewed.model_dump() != original_snapshot
+    had_changes = bool(review_log.changes)
     print_post_review(review_log, had_changes)
 
-    # Auto-save for CLI
     if had_changes:
-        from .render import render_html_preview, render_markdown
-        from .versioning import (
-            begin_version,
-            commit_version,
-            current_version,
-            update_latest_symlink,
-            versioned_dir,
-            versioned_path,
+        print(
+            f"{GREEN}All changes saved "
+            f"(v{session.starting_version} -> v{session.storyboard_version}, "
+            f"{session.total_edits} edits){RESET}"
         )
-
-        rv_version = current_version(ep.root, f"review_{provider}")
-        if rv_version == 0:
-            rv_version = current_version(ep.root, "review")
-        review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
-
-        art_meta = begin_version(
-            ep.root,
-            phase="storyboard",
-            provider=provider,
-            inputs={"source": "director_chat"},
-            config_snapshot={"review_model": cfg.review.model},
-            target_dir=ep.storyboard,
-            parent_id=review_parent_id,
-        )
-        v = art_meta.version
-        base = f"editorial_{provider}"
-
-        json_path = versioned_path(ep.storyboard / f"{base}.json", v)
-        json_path.write_text(reviewed.model_dump_json(indent=2))
-        update_latest_symlink(json_path)
-
-        md_path = versioned_path(ep.storyboard / f"{base}.md", v)
-        md_path.write_text(render_markdown(reviewed))
-        update_latest_symlink(md_path)
-
-        export_dir = versioned_dir(ep.exports, v)
-        html = render_html_preview(reviewed, clips_dir=ep.clips_dir, output_dir=export_dir)
-        preview_path = export_dir / "preview.html"
-        preview_path.write_text(html)
-        update_latest_symlink(export_dir)
-
-        commit_version(
-            ep.root, art_meta, output_paths=[json_path, md_path], target_dir=ep.storyboard
-        )
-
-        print(f"{GREEN}Storyboard updated (v{v}) with director edits:{RESET}")
-        print(f"    JSON:    {json_path}")
-        print(f"    Preview: {preview_path}")
 
 
 def cmd_brief(args, cfg: Config):
@@ -2087,6 +2077,11 @@ def main():
         type=int,
         metavar="N",
         help="Max LLM turns",
+    )
+    p_chat.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the most recent active chat session",
     )
 
     # --- monologue ---
