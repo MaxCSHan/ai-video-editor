@@ -988,12 +988,33 @@ def _new_project_flow(cfg):
         print("\n  Context saved. Run 'vx analyze' later.\n")
         return
 
+    # Ask about edit mode (Story vs Timeline)
+    if provider == "gemini":
+        edit_mode = questionary.select(
+            "Edit mode?",
+            choices=[
+                questionary.Choice(
+                    "Story Mode    (AI freely structures the narrative)",
+                    value="story",
+                ),
+                questionary.Choice(
+                    "Timeline Mode (scene-by-scene chronological — best for vlogs)",
+                    value="timeline",
+                ),
+            ],
+            default="story",
+            style=VX_STYLE,
+        ).ask()
+        if edit_mode == "timeline":
+            cfg.gemini.use_timeline_mode = True
+
     # Ask about visual mode
     visual = False
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
 
-    print("\n  Phase 2: Generating storyboard...\n")
+    mode_label = "Timeline" if cfg.gemini.use_timeline_mode else "Story"
+    print(f"\n  Phase 2: Generating storyboard ({mode_label} Mode)...\n")
     run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,
@@ -1862,12 +1883,33 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
 
         user_context = run_briefing(reviews, style, ep.root)
 
+    # Ask about edit mode (Story vs Timeline)
+    if provider == "gemini":
+        edit_mode = questionary.select(
+            "Edit mode?",
+            choices=[
+                questionary.Choice(
+                    "Story Mode    (AI freely structures the narrative)",
+                    value="story",
+                ),
+                questionary.Choice(
+                    "Timeline Mode (scene-by-scene chronological — best for vlogs)",
+                    value="timeline",
+                ),
+            ],
+            default="story",
+            style=VX_STYLE,
+        ).ask()
+        if edit_mode == "timeline":
+            cfg.gemini.use_timeline_mode = True
+
     # Ask about visual mode
     visual = False
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
 
-    print("\n  Phase 2: Generating storyboard...\n")
+    mode_label = "Timeline" if cfg.gemini.use_timeline_mode else "Story"
+    print(f"\n  Phase 2: Generating storyboard ({mode_label} Mode)...\n")
     run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,

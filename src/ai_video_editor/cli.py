@@ -660,16 +660,12 @@ def cmd_analyze(args, cfg: Config):
         interactive = not getattr(args, "no_interactive", False)
         visual = getattr(args, "visual", False)
 
-        # Section pipeline flags
-        if getattr(args, "sections", False):
-            cfg.gemini.use_section_pipeline = True
-        elif getattr(args, "no_sections", False):
-            cfg.gemini.use_section_pipeline = False
-        else:
-            # Auto-detect: vlog-style → sections by default
-            _section_styles = {"vlog", "travel-vlog", "family-video"}
-            if style in _section_styles:
-                cfg.gemini.use_section_pipeline = True
+        # Edit mode flags (Timeline vs Story)
+        if getattr(args, "timeline", False):
+            cfg.gemini.use_timeline_mode = True
+        elif getattr(args, "story", False):
+            cfg.gemini.use_timeline_mode = False
+        # Otherwise: auto-detect from Creative Brief in run_phase2()
 
         if getattr(args, "gap_minutes", None) is not None:
             cfg.gemini.section_gap_minutes = args.gap_minutes
@@ -677,7 +673,7 @@ def cmd_analyze(args, cfg: Config):
         # Disable split pipeline if --single flag is set
         if getattr(args, "single", False):
             cfg.gemini.use_split_pipeline = False
-            cfg.gemini.use_section_pipeline = False
+            cfg.gemini.use_timeline_mode = False
 
         # Apply review CLI overrides
         if getattr(args, "no_review", False):
@@ -2457,14 +2453,14 @@ def main():
         help="Use single-call Phase 2 instead of default multi-call split pipeline",
     )
     p_analyze.add_argument(
-        "--sections",
+        "--timeline",
         action="store_true",
-        help="Force section-based Phase 2 (Divide & Conquer) even for non-vlog styles",
+        help="Timeline Mode: scene-by-scene chronological assembly (best for vlogs)",
     )
     p_analyze.add_argument(
-        "--no-sections",
+        "--story",
         action="store_true",
-        help="Force legacy pipeline (skip section grouping)",
+        help="Story Mode: AI freely structures the narrative (default)",
     )
     p_analyze.add_argument(
         "--gap-minutes",
