@@ -1126,15 +1126,15 @@ def _run_phase2_sections(
             import questionary
 
             if not questionary.confirm("Proceed with these scenes?", default=True).ask():
-                print("  Scene grouping not approved. Edit via: vx sections <project>")
-                # Reload if user edited sections externally
+                print(
+                    "  Scene grouping not approved."
+                    " Edit sections and re-run: vx sections <project> --regroup"
+                )
+                # Save what we have so user can edit, then exit
+                sections_json = [g.model_dump() for g in section_groups]
                 sections_path = editorial_paths.storyboard / "sections_latest.json"
-                if sections_path.exists():
-                    from .models import SectionGroup as _SG
-
-                    section_groups = [
-                        _SG.model_validate(g) for g in json.loads(sections_path.read_text())
-                    ]
+                sections_path.write_text(json.dumps(sections_json, indent=2))
+                return sections_path
         except (ImportError, EOFError):
             pass  # Non-interactive environment
 
