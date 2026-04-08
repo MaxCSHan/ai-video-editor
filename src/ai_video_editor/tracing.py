@@ -358,12 +358,16 @@ def connect_phoenix(url: str | None = None) -> bool:
 
         from phoenix.otel import register
 
-        register(
+        tracer_provider = register(
             project_name="vx-pipeline",
             endpoint=f"{url}/v1/traces",
             verbose=False,
         )
         otel_logger.setLevel(prev_level)
+
+        # Register span processor to rename "GenerateContent" → phase label
+        if tracer_provider and hasattr(tracer_provider, "add_span_processor"):
+            tracer_provider.add_span_processor(_PhaseSpanRenamer())
 
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
@@ -507,12 +511,16 @@ def otel_phase_span(
     clip_id: str | None = None,
     provider: str | None = None,
     call: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
     extra_tags: list[str] | None = None,
 ):
     """Tag all auto-instrumented LLM spans within this block with pipeline metadata.
 
     Uses OpenInference ``using_attributes`` so that Gemini/Anthropic spans created
-    by their respective instrumentors automatically inherit ``metadata`` and ``tags``.
+    by their respective instrumentors inherit ``metadata`` and ``tags``.  The
+    ``annotations`` field provides a human-readable label (e.g.
+    ``phase1:review:IMG_9800``) visible in Phoenix's annotations column.
 
     Pipeline-level context (``project_name``, ``pipeline_run_id``) is automatically
     inherited from the active ``otel_pipeline_span()`` via module-level state, so
@@ -525,7 +533,7 @@ def otel_phase_span(
 
         with otel_phase_span("phase1", stage="review", provider="gemini", clip_id="C0073"):
             response = traced_gemini_generate(...)
-        # In Phoenix: metadata.phase="phase1", tags=["phase:phase1", "clip:C0073", ...]
+        # Phoenix: metadata.phase="phase1", tags=["phase:phase1","clip:C0073",...]
     """
     if not _phoenix_connected:
         yield None
@@ -558,8 +566,22 @@ def otel_phase_span(
         if call:
             metadata["call"] = call
             tags.append(f"call:{call}")
+        if model:
+            metadata["model"] = model
+        if temperature is not None:
+            metadata["temperature"] = str(temperature)
         if extra_tags:
             tags.extend(extra_tags)
+
+        # Build a human-readable label for the annotations column
+        name_parts = [phase]
+        if stage:
+            name_parts.append(stage)
+        if clip_id:
+            name_parts.append(clip_id)
+        elif call:
+            name_parts.append(call)
+        metadata["label"] = ":".join(name_parts)
 
         with using_attributes(metadata=metadata, tags=tags):
             yield
@@ -604,22 +626,41 @@ def otel_pipeline_span(project_name: str, pipeline_run_id: str):
         _pipeline_ctx = {}
 
 
-def _set_model_span_attrs(model: str, temperature: float | None) -> None:
-    """Set model name and temperature on the current OTel span (if recording).
+class _PhaseSpanRenamer:
+    """OTel SpanProcessor that renames auto-instrumented LLM spans.
 
-    This makes model and temperature visible in Phoenix as span-level attributes,
-    independent of the auto-instrumentor's own attributes.
+    When the OpenInference instrumentor creates a ``GenerateContent`` span,
+    this processor reads the ``metadata`` attribute (injected by ``using_attributes``
+    in ``otel_phase_span``) and renames the span to a human-readable label like
+    ``phase1:review:IMG_9800``.
+
+    Registered once in ``connect_phoenix()`` — never breaks the pipeline.
     """
-    try:
-        from opentelemetry import trace
 
-        span = trace.get_current_span()
-        if span and span.is_recording():
-            span.set_attribute("vx.model", model)
-            if temperature is not None:
-                span.set_attribute("vx.temperature", temperature)
-    except Exception:
-        pass  # tracing should never break the pipeline
+    def on_start(self, span, parent_context=None):
+        pass  # nothing to do at start
+
+    def on_end(self, span):
+        try:
+            attrs = span.attributes or {}
+            # OpenInference stores our metadata as "metadata" JSON string
+            raw = attrs.get("metadata")
+            if not raw:
+                return
+            import json
+
+            meta = json.loads(raw) if isinstance(raw, str) else raw
+            label = meta.get("label")
+            if label and hasattr(span, "_name"):
+                span._name = label  # ReadableSpan._name is the display name
+        except Exception:
+            pass
+
+    def shutdown(self):
+        pass
+
+    def force_flush(self, timeout_millis=30000):
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -649,9 +690,6 @@ def traced_gemini_generate(
         num_video_files=num_video_files,
         prompt_chars=prompt_chars,
     )
-
-    # Enrich the current OTel span with model/temperature so Phoenix shows them
-    _set_model_span_attrs(model, getattr(config, "temperature", None))
 
     last_exc = None
     for attempt in range(MAX_LLM_RETRIES + 1):
@@ -732,9 +770,6 @@ def traced_claude_generate(
         clip_id=clip_id,
         prompt_chars=prompt_chars,
     )
-
-    # Enrich the current OTel span with model/temperature so Phoenix shows them
-    _set_model_span_attrs(model, temperature)
 
     last_exc = None
     for attempt in range(MAX_LLM_RETRIES + 1):

@@ -898,9 +898,15 @@ def _new_project_flow(cfg):
     if len(clip_metadata) != manifest["clip_count"]:
         manifest = build_master_manifest(clip_metadata, ep, name)
 
-    from .tracing import ProjectTracer
+    import uuid
+
+    from .tracing import ProjectTracer, otel_pipeline_span
 
     tracer = ProjectTracer(ep.root)
+
+    # Start pipeline-level OTel grouping (no-op if Phoenix not connected)
+    _pipeline_ctx = otel_pipeline_span(name, str(uuid.uuid4()))
+    _pipeline_ctx.__enter__()
 
     # Resolve style supplements from preset
     p1_supplement = style_preset.phase1_supplement if style_preset else None
@@ -1029,6 +1035,7 @@ def _new_project_flow(cfg):
             )
 
     tracer.print_summary("Pipeline Total")
+    _pipeline_ctx.__exit__(None, None, None)
     print("\n  Storyboard ready!")
     _project_actions(name, cfg)
 
@@ -1740,7 +1747,9 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         run_phase2,
         _retry_failed_phase1,
     )
-    from .tracing import ProjectTracer
+    import uuid
+
+    from .tracing import ProjectTracer, otel_pipeline_span
 
     ep = cfg.editorial_project(name)
     provider = meta.get("provider", "gemini")
@@ -1748,6 +1757,10 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
     source_dir = Path(meta["source_dir"])
     offline = not source_dir.is_dir()
     tracer = ProjectTracer(ep.root)
+
+    # Start pipeline-level OTel grouping (no-op if Phoenix not connected)
+    _pipeline_ctx2 = otel_pipeline_span(name, str(uuid.uuid4()))
+    _pipeline_ctx2.__enter__()
 
     # Resolve style preset
     style_preset = None
@@ -1903,6 +1916,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
             )
 
     tracer.print_summary("Analysis Total")
+    _pipeline_ctx2.__exit__(None, None, None)
     print("\n  Storyboard ready!")
 
 
