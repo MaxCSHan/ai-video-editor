@@ -1397,9 +1397,9 @@ def _project_actions(name, cfg):
                 "Style preset:", choices=preset_choices, style=VX_STYLE
             ).ask()
             if new_key != current_preset:
-                if new_key:
+                sp = _get_preset3(new_key) if new_key else None
+                if new_key and sp:
                     meta["style_preset"] = new_key
-                    sp = _get_preset3(new_key)
                     print(f"\n  Set preset: {sp.label}")
                     if sp.has_phase3:
                         print("  This preset supports Visual Monologue (Phase 3)")
