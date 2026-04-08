@@ -533,6 +533,89 @@ class StoryPlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Section-based pipeline models (Divide & Conquer Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class Section(BaseModel):
+    """A group of clips within a single activity/scene."""
+
+    section_id: str = Field(description="Unique identifier, e.g. 'day1_scene2'")
+    label: str = Field(description="Human-readable label, e.g. 'Morning temple visit'")
+    clip_ids: list[str] = Field(
+        description="Clip IDs in this section (aesthetic order, not necessarily chronological)"
+    )
+    time_range: str = Field(default="", description="Approximate time range, e.g. '09:30-11:15'")
+    activity: str = Field(default="", description="Detected or user-assigned activity/scene type")
+
+
+class SectionGroup(BaseModel):
+    """A day containing multiple sections, in chronological order."""
+
+    group_id: str = Field(description="Unique identifier, e.g. 'day1'")
+    date: str = Field(description="ISO date string, e.g. '2026-04-05'")
+    label: str = Field(description="Human-readable label, e.g. 'Day 1 — Apr 5'")
+    sections: list[Section] = Field(description="Sections within this day, in chronological order")
+
+
+class SectionNarrative(BaseModel):
+    """Narrative assignment for one section within the storyline."""
+
+    section_id: str = Field(description="References Section.section_id")
+    narrative_role: str = Field(
+        description="What this section contributes to the overall story arc"
+    )
+    arc_phase: str = Field(
+        description="opening_context, rising_action, experience, climax, or closing_reflection"
+    )
+    energy: str = Field(description="high, medium, or low")
+    target_duration_sec: float = Field(default=0, description="Suggested duration for this section")
+
+
+class SectionPlan(BaseModel):
+    """LLM output: narrative storyline across all sections."""
+
+    title: str = Field(description="Creative title for the final video")
+    style: str = Field(description="Video style: vlog, recap, etc.")
+    story_concept: str = Field(description="2-3 sentence narrative thesis")
+    section_narratives: list[SectionNarrative] = Field(
+        description="Per-section narrative role in the overall story"
+    )
+    hook_section_id: str = Field(description="Section ID that provides the opening hook material")
+    hook_description: str = Field(description="What the hook should show and why")
+    pacing_notes: str = Field(default="")
+    music_direction: str = Field(default="")
+    constraint_satisfaction: str = Field(default="")
+
+
+class SectionStoryboard(BaseModel):
+    """Per-section LLM output: segments + narrative summary for context passing."""
+
+    section_id: str = Field(description="Which section this covers")
+    segments: list[Segment] = Field(description="Ordered segments for this section")
+    discarded: list[DiscardedClip] = Field(
+        default=[], description="Clips from this section not used"
+    )
+    cast: list[CastMember] = Field(default=[])
+    narrative_summary: str = Field(
+        description="2-3 sentence summary of what this section covers, "
+        "passed as context to subsequent sections"
+    )
+    music_cue: MusicCue | None = Field(default=None)
+    editorial_reasoning: str = Field(default="")
+
+
+class HookStoryboard(BaseModel):
+    """Opening hook LLM output."""
+
+    segments: list[Segment] = Field(
+        description="Hook segments (typically 2-5, ~10-15 seconds total)"
+    )
+    editorial_reasoning: str = Field(default="")
+    hook_concept: str = Field(description="What makes this hook compelling")
+
+
+# ---------------------------------------------------------------------------
 # Visual Monologue models (text-driven narrative overlays for silent vlog style)
 # ---------------------------------------------------------------------------
 
