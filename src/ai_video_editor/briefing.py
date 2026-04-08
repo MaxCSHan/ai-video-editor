@@ -201,6 +201,9 @@ def _edit_existing(existing: dict, project_root: Path) -> dict:
     """Let user edit existing context fields."""
     updated = {}
     for k, v in existing.items():
+        if not isinstance(v, str):
+            updated[k] = v
+            continue
         new_val = questionary.text(
             f"{k}:",
             default=v,
