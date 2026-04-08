@@ -660,9 +660,9 @@ def cmd_analyze(args, cfg: Config):
         interactive = not getattr(args, "no_interactive", False)
         visual = getattr(args, "visual", False)
 
-        # Enable split pipeline if --split flag is set
-        if getattr(args, "split", False):
-            cfg.gemini.use_split_pipeline = True
+        # Disable split pipeline if --single flag is set
+        if getattr(args, "single", False):
+            cfg.gemini.use_split_pipeline = False
 
         # Apply review CLI overrides
         if getattr(args, "no_review", False):
@@ -958,6 +958,204 @@ def cmd_review(args, cfg: Config):
         print(f"{GREEN}Storyboard updated (v{v}) with director fixes:{RESET}")
         print(f"    JSON:    {json_path}")
         print(f"    Preview: {preview_path}")
+
+
+def _load_project_for_eval(name: str, cfg: Config, track: str = "main") -> tuple | None:
+    """Load storyboard, reviews, user context, and transcripts for eval.
+
+    Returns (storyboard, reviews, user_context, transcripts_by_clip, provider)
+    or None if data is missing.
+    """
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta or meta.get("type") != "editorial":
+        return None
+
+    ep = cfg.editorial_project(name)
+    if track != "main":
+        ep = ep.with_track(track)
+
+    # Find latest storyboard
+    provider = meta.get("provider", "gemini")
+    sb_path = None
+    for p in ("gemini", "claude"):
+        candidate = ep.storyboard / f"editorial_{p}_latest.json"
+        if candidate.exists():
+            sb_path = candidate
+            provider = p
+            break
+    if not sb_path:
+        return None
+
+    from .models import EditorialStoryboard
+
+    storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
+
+    # Load clip reviews
+    reviews = []
+    for clip_id in ep.discover_clips():
+        cp = ep.clip_paths(clip_id)
+        for pattern in ["review_*_latest.json", "review_*.json"]:
+            found = [
+                f
+                for f in cp.review.glob(pattern)
+                if not f.name.endswith("_latest.json") or f.is_symlink()
+            ]
+            if found:
+                reviews.append(json.loads(found[0].read_text()))
+                break
+
+    # Load user context
+    from .versioning import resolve_user_context_path
+
+    user_context = None
+    ctx_path = resolve_user_context_path(ep.root)
+    if ctx_path:
+        user_context = json.loads(ctx_path.read_text())
+
+    # Load transcripts
+    from .editorial_director import _load_transcripts
+
+    clip_ids = {s.clip_id for s in storyboard.segments}
+    transcripts = _load_transcripts(ep.clips_dir, clip_ids)
+
+    return storyboard, reviews, user_context, transcripts, provider
+
+
+def cmd_eval(args, cfg: Config):
+    """Evaluate storyboard quality for one or all projects."""
+    from .eval import score_storyboard
+
+    run_all = getattr(args, "all", False)
+    compare_tracks = getattr(args, "compare", None)
+
+    if compare_tracks:
+        # A/B comparison mode
+        name = args.project or _infer_project(cfg)
+        if not name:
+            print(f"{RED}Error:{RESET} Specify a project name for --compare.")
+            sys.exit(1)
+
+        tracks = [t.strip() for t in compare_tracks.split(",")]
+        if len(tracks) != 2:
+            print(
+                f"{RED}Error:{RESET} --compare requires exactly two tracks"
+                " (e.g. --compare main,experiment)"
+            )
+            sys.exit(1)
+
+        from .eval import compare_reports
+
+        reports = {}
+        for track in tracks:
+            data = _load_project_for_eval(name, cfg, track=track)
+            if not data:
+                print(f"{RED}Error:{RESET} Cannot load storyboard for track '{track}' in '{name}'.")
+                sys.exit(1)
+            storyboard, reviews, user_context, transcripts, _ = data
+            reports[track] = score_storyboard(storyboard, reviews, user_context, transcripts)
+
+        print(f"\n{BOLD}A/B Comparison: {name}{RESET}")
+        print(f"  Track A: {tracks[0]}  vs  Track B: {tracks[1]}\n")
+        print(compare_reports(reports[tracks[0]], reports[tracks[1]], tracks[0], tracks[1]))
+        return
+
+    if run_all:
+        # Batch mode: eval all editorial projects
+        if not cfg.library_dir.exists():
+            print(f"{RED}Error:{RESET} No library directory found.")
+            sys.exit(1)
+
+        projects = sorted(
+            d.name
+            for d in cfg.library_dir.iterdir()
+            if d.is_dir() and _project_meta_path(d).exists()
+        )
+
+        if not projects:
+            print(f"{RED}Error:{RESET} No projects found.")
+            sys.exit(1)
+
+        print(f"\n{BOLD}Evaluation Baseline — {len(projects)} projects{RESET}\n")
+        print(
+            f"  {'Project':<35} {'Seg':>4} {'TS%':>5} {'Struct':>7}"
+            f" {'Cover':>6} {'Speech':>7} {'Constr':>7}"
+        )
+        print(f"  {'─' * 35} {'─' * 4} {'─' * 5} {'─' * 7} {'─' * 6} {'─' * 7} {'─' * 7}")
+
+        results = {}
+        for name in projects:
+            data = _load_project_for_eval(name, cfg)
+            if not data:
+                print(f"  {name:<35} {DIM}(skipped — no storyboard){RESET}")
+                continue
+            storyboard, reviews, user_context, transcripts, provider = data
+            report = score_storyboard(storyboard, reviews, user_context, transcripts)
+            results[name] = report
+
+            ts_pct = f"{report.timestamp_precision_rate():.0%}"
+            struct = f"{report.structural_completeness_score:.2f}"
+            cover = f"{report.coverage_score:.2f}"
+            speech = f"{report.speech_cut_safety_rate:.0%}"
+            constr = f"{report.constraint_satisfaction_rate():.0%}"
+            print(
+                f"  {name:<35} {report.total_segments:>4}"
+                f" {ts_pct:>5} {struct:>7}"
+                f" {cover:>6} {speech:>7} {constr:>7}"
+            )
+
+        # Save baseline
+        if results:
+            baseline = {}
+            for pname, report in results.items():
+                baseline[pname] = {
+                    "segments": report.total_segments,
+                    "timestamp_precision": report.timestamp_precision_rate(),
+                    "structural_completeness": report.structural_completeness_score,
+                    "coverage": report.coverage_score,
+                    "speech_cut_safety": report.speech_cut_safety_rate,
+                    "constraint_satisfaction": report.constraint_satisfaction_rate(),
+                }
+            baseline_path = cfg.library_dir / "eval_baseline.json"
+            baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
+            print(f"\n  {DIM}Baseline saved: {baseline_path}{RESET}")
+        return
+
+    # Single project mode
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    data = _load_project_for_eval(name, cfg)
+    if not data:
+        print(
+            f"{RED}Error:{RESET} No storyboard found for '{name}'."
+            f" Run {BOLD}vx analyze{RESET} first."
+        )
+        sys.exit(1)
+
+    storyboard, reviews, user_context, transcripts, provider = data
+    report = score_storyboard(storyboard, reviews, user_context, transcripts)
+
+    print(f"\n{BOLD}{name}{RESET} ({provider})\n")
+    print(report.summary())
+
+    # Save per-project eval
+    ep = cfg.editorial_project(name)
+    eval_path = ep.root / "eval_report.json"
+    eval_data = {
+        "project": name,
+        "segments": report.total_segments,
+        "timestamp_precision": report.timestamp_precision_rate(),
+        "structural_completeness": report.structural_completeness_score,
+        "coverage": report.coverage_score,
+        "speech_cut_safety": report.speech_cut_safety_rate,
+        "constraint_satisfaction": report.constraint_satisfaction_rate(),
+        "unsafe_cuts": report.unsafe_cuts,
+    }
+    eval_path.write_text(json.dumps(eval_data, indent=2) + "\n")
+    print(f"\n  {DIM}Report saved: {eval_path}{RESET}")
 
 
 def cmd_chat(args, cfg: Config):
@@ -2042,9 +2240,9 @@ def main():
         help="Max LLM turns for director review (default: 15)",
     )
     p_analyze.add_argument(
-        "--split",
+        "--single",
         action="store_true",
-        help="Use multi-call split pipeline for Phase 2 (reasoning → structuring → assembly)",
+        help="Use single-call Phase 2 instead of default multi-call split pipeline",
     )
 
     # --- review ---
@@ -2203,6 +2401,16 @@ def main():
     p_track.add_argument("--description", help="Track description (for create)")
 
     # --- config ---
+    # --- eval ---
+    p_eval = sub.add_parser("eval", help="Evaluate storyboard quality (scoring dimensions)")
+    p_eval.add_argument("project", nargs="?", help="Project name")
+    p_eval.add_argument("--all", action="store_true", help="Evaluate all library projects")
+    p_eval.add_argument(
+        "--compare",
+        metavar="TRACK_A,TRACK_B",
+        help="Compare two experiment tracks (e.g. --compare main,experiment)",
+    )
+
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
     p_config.add_argument("--provider", choices=["gemini", "claude"], help="Default AI provider")
     p_config.add_argument("--style", help="Default video style")
@@ -2251,6 +2459,7 @@ def main():
         "ver": cmd_versions,
         "compose": cmd_compose,
         "track": cmd_track,
+        "eval": cmd_eval,
         "config": cmd_config,
         "trace": cmd_trace,
     }

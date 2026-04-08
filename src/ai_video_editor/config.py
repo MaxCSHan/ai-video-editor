@@ -83,7 +83,7 @@ class GeminiConfig:
     temperature: float = 0.2
     phase2_temperature: float = 0.6
     phase2b_temperature: float = 0.3  # assembly is mechanical, not creative
-    use_split_pipeline: bool = False  # migration toggle for multi-call Phase 2
+    use_split_pipeline: bool = True  # multi-call Phase 2 is the default for Gemini
 
     @property
     def phase2(self) -> str:

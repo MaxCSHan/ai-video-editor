@@ -250,14 +250,15 @@ def score_timestamp_precision(
 def score_structural_completeness(storyboard) -> float:
     """Score 0.0-1.0 for structural completeness of a storyboard."""
     checks = [
-        bool(getattr(storyboard, "editorial_reasoning", "") and
-             len(getattr(storyboard, "editorial_reasoning", "")) > 50),
+        bool(
+            getattr(storyboard, "editorial_reasoning", "")
+            and len(getattr(storyboard, "editorial_reasoning", "")) > 50
+        ),
         bool(getattr(storyboard, "story_arc", [])),
         bool(getattr(storyboard, "cast", [])),
         bool(getattr(storyboard, "discarded", [])),
-        len([s.index for s in storyboard.segments]) == len(
-            set(s.index for s in storyboard.segments)
-        ),  # no duplicate indices
+        len([s.index for s in storyboard.segments])
+        == len(set(s.index for s in storyboard.segments)),  # no duplicate indices
     ]
     return sum(checks) / len(checks) if checks else 1.0
 
@@ -327,13 +328,15 @@ def score_speech_cut_safety(
         elif text and text[-1] in ".!?":
             safe_count += 1
         else:
-            unsafe_cuts.append({
-                "segment_index": seg.index,
-                "clip_id": seg.clip_id,
-                "cut_time": cut_time,
-                "speech_text": text[:80],
-                "speech_end": e_end,
-            })
+            unsafe_cuts.append(
+                {
+                    "segment_index": seg.index,
+                    "clip_id": seg.clip_id,
+                    "cut_time": cut_time,
+                    "speech_text": text[:80],
+                    "speech_end": e_end,
+                }
+            )
 
     rate = safe_count / len(storyboard.segments)
     return rate, unsafe_cuts
@@ -392,3 +395,62 @@ def score_storyboard(
         report.unsafe_cuts = unsafe
 
     return report
+
+
+def compare_reports(
+    report_a: EvalReport,
+    report_b: EvalReport,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> str:
+    """Produce a dimension-by-dimension comparison of two eval reports."""
+    dims = [
+        (
+            "Segments",
+            report_a.total_segments,
+            report_b.total_segments,
+            False,
+        ),
+        (
+            "Timestamp precision",
+            report_a.timestamp_precision_rate(),
+            report_b.timestamp_precision_rate(),
+            True,
+        ),
+        (
+            "Structural completeness",
+            report_a.structural_completeness_score,
+            report_b.structural_completeness_score,
+            True,
+        ),
+        ("Coverage", report_a.coverage_score, report_b.coverage_score, True),
+        (
+            "Speech cut safety",
+            report_a.speech_cut_safety_rate,
+            report_b.speech_cut_safety_rate,
+            True,
+        ),
+        (
+            "Constraint satisfaction",
+            report_a.constraint_satisfaction_rate(),
+            report_b.constraint_satisfaction_rate(),
+            True,
+        ),
+    ]
+
+    lines = [f"  {'Dimension':<28} {label_a:>8} {label_b:>8} {'Delta':>8}"]
+    lines.append(f"  {'─' * 28} {'─' * 8} {'─' * 8} {'─' * 8}")
+
+    for name, val_a, val_b, is_rate in dims:
+        delta = val_b - val_a
+        if is_rate:
+            a_str = f"{val_a:.0%}" if isinstance(val_a, float) else str(val_a)
+            b_str = f"{val_b:.0%}" if isinstance(val_b, float) else str(val_b)
+            d_str = f"{delta:+.0%}" if isinstance(delta, float) else str(delta)
+        else:
+            a_str = str(val_a)
+            b_str = str(val_b)
+            d_str = f"{delta:+d}" if isinstance(delta, int) else f"{delta:+.1f}"
+        lines.append(f"  {name:<28} {a_str:>8} {b_str:>8} {d_str:>8}")
+
+    return "\n".join(lines)

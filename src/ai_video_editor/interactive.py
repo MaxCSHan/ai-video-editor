@@ -964,17 +964,6 @@ def _new_project_flow(cfg):
     meta = json.loads(_pj.read_text()) if _pj.exists() else meta
     _render_tab_bar(_gather_pipeline_state(ep, meta), "P2")
 
-    # Ask about split pipeline (multi-call architecture)
-    if (
-        provider == "gemini"
-        and questionary.confirm(
-            "Use multi-call split pipeline? (experimental — better constraint-following)",
-            default=False,
-            style=VX_STYLE,
-        ).ask()
-    ):
-        cfg.gemini.use_split_pipeline = True
-
     # Phase 2
     if not questionary.confirm(
         "Generate editorial storyboard?", default=True, style=VX_STYLE
@@ -1857,17 +1846,6 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
     visual = False
     if provider == "gemini":
         visual = _ask_visual_phase2(ep, reviews)
-
-    # Ask about split pipeline (multi-call architecture)
-    if (
-        provider == "gemini"
-        and questionary.confirm(
-            "Use multi-call split pipeline? (experimental — better constraint-following)",
-            default=False,
-            style=VX_STYLE,
-        ).ask()
-    ):
-        cfg.gemini.use_split_pipeline = True
 
     print("\n  Phase 2: Generating storyboard...\n")
     run_phase2(

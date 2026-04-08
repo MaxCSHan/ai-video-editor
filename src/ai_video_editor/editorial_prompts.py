@@ -508,6 +508,10 @@ def build_phase2b_assembly_prompt(
         f"\n\nNow produce the EditorialStoryboard with precise timestamps for a compelling {style}."
         "\nUse editorial_reasoning to briefly confirm the plan is being followed, "
         "then fill in every segment with exact in_sec/out_sec within the bounded ranges."
+        "\n\nMUSIC PLAN: For each story arc section, populate one MusicCue in music_plan with:"
+        "\n- section: the arc section name (must match a story_arc title)"
+        "\n- strategy: one of upbeat_background, emotional_underscore, ambient_texture, silence, natural_audio_only"
+        "\n- notes: optional tempo/mood/genre suggestions (e.g. 'gentle acoustic, 100 BPM')"
     )
     return prompt
 
@@ -928,6 +932,10 @@ def build_editorial_assembly_prompt(
         "\n3. Note any constraints you cannot satisfy and why"
         "\n\nThen produce the segments. The filmmaker's MUST-INCLUDE and MUST-EXCLUDE "
         "items are non-negotiable requirements, not suggestions."
+        "\n\nMUSIC PLAN: For each story arc section, populate one MusicCue in music_plan with:"
+        "\n- section: the arc section name (must match a story_arc title)"
+        "\n- strategy: one of upbeat_background, emotional_underscore, ambient_texture, silence, natural_audio_only"
+        "\n- notes: optional tempo/mood/genre suggestions (e.g. 'gentle acoustic, 100 BPM')"
     )
     return prompt
 
