@@ -363,7 +363,15 @@ def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> N
     # Suppress SQLAlchemy SAWarning from Phoenix's internal DB schema reflection
     warnings.filterwarnings("ignore", message=".*Skipped unsupported reflection.*")
 
-    import phoenix as px
+    try:
+        import phoenix as px
+    except (ImportError, ModuleNotFoundError) as e:
+        raise SystemExit(
+            f"\n  Phoenix failed to import: {e}\n\n"
+            "  Try reinstalling the tracing extras:\n"
+            '    uv pip install -e ".[tracing]" --force-reinstall --no-deps\n'
+            "    uv pip install -e \".[tracing]\"\n"
+        ) from None
 
     storage = storage_dir or Path.home() / ".vx" / "phoenix"
     storage.mkdir(parents=True, exist_ok=True)
