@@ -23,6 +23,38 @@ def _escape_drawtext(text: str) -> str:
     )
 
 
+def _resolve_drawtext_font() -> str | None:
+    """Find a font file for ffmpeg drawtext (some builds have no default font)."""
+    import shutil
+
+    # Try fc-match first
+    if shutil.which("fc-match"):
+        try:
+            result = subprocess.run(
+                ["fc-match", "-f", "%{file}", "sans-serif"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            path = result.stdout.strip()
+            if path and Path(path).exists():
+                return path
+        except Exception:
+            pass
+
+    # Static fallbacks for macOS / Linux
+    for candidate in [
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ]:
+        if Path(candidate).exists():
+            return candidate
+
+    return None
+
+
 def get_video_duration(video_path: Path) -> float:
     """Get video duration in seconds via ffprobe."""
     result = subprocess.run(
@@ -603,6 +635,9 @@ def concat_proxies(
     concat_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = concat_dir / "manifest.json"
 
+    # Resolve a font for drawtext overlay (some ffmpeg builds have no default font)
+    _concat_font_path = _resolve_drawtext_font()
+
     # Gather proxy paths and metadata for sorting
     clip_infos = []
     for cid in clip_ids:
@@ -702,8 +737,12 @@ def concat_proxies(
 
             # drawtext: show filename in top-left with semi-transparent background
             label = _escape_drawtext(c["filename"])
+            font_spec = ""
+            if _concat_font_path:
+                font_spec = f":fontfile='{_concat_font_path}'"
             drawtext = (
                 f"drawtext=text='{label}'"
+                f"{font_spec}"
                 f":fontsize=14:fontcolor=white"
                 f":x=8:y=8"
                 f":box=1:boxcolor=black@0.5:boxborderw=4"
