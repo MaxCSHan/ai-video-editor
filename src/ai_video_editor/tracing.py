@@ -314,6 +314,11 @@ DEFAULT_TRACE_URL = "http://localhost:6006"
 _phoenix_connected = False
 _phoenix_url: str | None = None
 
+# Module-level pipeline context — set by otel_pipeline_span(), read by otel_phase_span().
+# This ensures worker threads (ThreadPoolExecutor) inherit project/run identity even though
+# contextvars from using_attributes() don't propagate across thread boundaries.
+_pipeline_ctx: dict[str, str] = {}
+
 
 def _probe_phoenix(url: str, timeout: float = 0.15) -> bool:
     """Check if a Phoenix server is reachable. Uses stdlib only (no extra deps)."""
@@ -509,6 +514,11 @@ def otel_phase_span(
     Uses OpenInference ``using_attributes`` so that Gemini/Anthropic spans created
     by their respective instrumentors automatically inherit ``metadata`` and ``tags``.
 
+    Pipeline-level context (``project_name``, ``pipeline_run_id``) is automatically
+    inherited from the active ``otel_pipeline_span()`` via module-level state, so
+    worker threads in ``ThreadPoolExecutor`` get pipeline identity even though
+    ``contextvars`` don't propagate across thread boundaries.
+
     No-op when Phoenix is not connected.
 
     Example::
@@ -524,17 +534,21 @@ def otel_phase_span(
     try:
         from openinference.instrumentation import using_attributes
 
+        # Inherit pipeline context from otel_pipeline_span() if not explicitly provided
+        eff_project = project_name or _pipeline_ctx.get("project_name")
+        eff_run_id = pipeline_run_id or _pipeline_ctx.get("pipeline_run_id")
+
         metadata: dict[str, str] = {"phase": phase}
         tags: list[str] = [f"phase:{phase}"]
 
         if stage:
             metadata["stage"] = stage
             tags.append(f"stage:{stage}")
-        if project_name:
-            metadata["project_name"] = project_name
-            tags.append(f"project:{project_name}")
-        if pipeline_run_id:
-            metadata["pipeline_run_id"] = pipeline_run_id
+        if eff_project:
+            metadata["project_name"] = eff_project
+            tags.append(f"project:{eff_project}")
+        if eff_run_id:
+            metadata["pipeline_run_id"] = eff_run_id
         if clip_id:
             metadata["clip_id"] = clip_id
             tags.append(f"clip:{clip_id}")
@@ -559,10 +573,20 @@ def otel_pipeline_span(project_name: str, pipeline_run_id: str):
     """Wrap an entire pipeline run so all LLM spans share a session and project tag.
 
     Uses ``session_id`` for Phoenix session grouping and ``metadata`` for filtering.
+    Also stores context in a module-level dict so worker threads (which don't inherit
+    ``contextvars`` from ``using_attributes``) can still access project/run identity
+    via ``otel_phase_span()``.
+
     No-op when Phoenix is not connected.
     """
+    global _pipeline_ctx
+    _pipeline_ctx = {"project_name": project_name, "pipeline_run_id": pipeline_run_id}
+
     if not _phoenix_connected:
-        yield None
+        try:
+            yield None
+        finally:
+            _pipeline_ctx = {}
         return
 
     try:
@@ -576,6 +600,26 @@ def otel_pipeline_span(project_name: str, pipeline_run_id: str):
             yield
     except Exception:
         yield None
+    finally:
+        _pipeline_ctx = {}
+
+
+def _set_model_span_attrs(model: str, temperature: float | None) -> None:
+    """Set model name and temperature on the current OTel span (if recording).
+
+    This makes model and temperature visible in Phoenix as span-level attributes,
+    independent of the auto-instrumentor's own attributes.
+    """
+    try:
+        from opentelemetry import trace
+
+        span = trace.get_current_span()
+        if span and span.is_recording():
+            span.set_attribute("vx.model", model)
+            if temperature is not None:
+                span.set_attribute("vx.temperature", temperature)
+    except Exception:
+        pass  # tracing should never break the pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +649,9 @@ def traced_gemini_generate(
         num_video_files=num_video_files,
         prompt_chars=prompt_chars,
     )
+
+    # Enrich the current OTel span with model/temperature so Phoenix shows them
+    _set_model_span_attrs(model, getattr(config, "temperature", None))
 
     last_exc = None
     for attempt in range(MAX_LLM_RETRIES + 1):
@@ -685,6 +732,9 @@ def traced_claude_generate(
         clip_id=clip_id,
         prompt_chars=prompt_chars,
     )
+
+    # Enrich the current OTel span with model/temperature so Phoenix shows them
+    _set_model_span_attrs(model, temperature)
 
     last_exc = None
     for attempt in range(MAX_LLM_RETRIES + 1):
