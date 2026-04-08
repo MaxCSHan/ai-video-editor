@@ -909,7 +909,10 @@ def _new_project_flow(cfg):
         )
 
     # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
-    _run_transcription(ep, clip_metadata, cfg)
+    if not questionary.confirm("Run transcription?", default=True, style=VX_STYLE).ask():
+        print("\n  Skipped transcription. Run from project menu later.\n")
+    else:
+        _run_transcription(ep, clip_metadata, cfg)
 
     # Show progress after transcription
     _pj = ep.root / "project.json"
@@ -1789,7 +1792,10 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         )
 
     # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
-    _run_transcription(ep, clip_metadata, cfg)
+    if not questionary.confirm("Run transcription?", default=True, style=VX_STYLE).ask():
+        print("\n  Skipped transcription. Run from project menu later.\n")
+    else:
+        _run_transcription(ep, clip_metadata, cfg)
 
     # Check if cached Phase 1 reviews exist — offer to force re-run
     force_phase1 = False

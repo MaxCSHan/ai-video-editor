@@ -564,12 +564,11 @@ def _review_single_clip_gemini(
 
     # Build lineage inputs
     review_lineage = {}
+    import re as _re2
     from .versioning import resolve_transcript_path as _rtp, resolve_user_context_path as _rucp
 
     _tp = _rtp(clip_paths.root)
     if _tp:
-        import re as _re2
-
         _tm = _re2.search(r"_v(\d+)\.", _tp.name)
         _prov = "gemini" if "gemini" in _tp.name else "mlx"
         if _tm:
