@@ -24,7 +24,7 @@ whisper = [
     "mlx-whisper",
 ]
 tracing = [
-    "arize-phoenix",
+    "arize-phoenix>=13.20",
     "openinference-instrumentation-google-genai",
 ]
 
