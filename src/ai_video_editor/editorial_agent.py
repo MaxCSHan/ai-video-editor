@@ -1014,7 +1014,7 @@ def _run_phase2_sections(
     """
     from google.genai import types
 
-    from .briefing import format_context_for_prompt
+    from .briefing import format_brief_for_prompt
     from .editorial_prompts import (
         build_hook_prompt,
         build_section_storyboard_prompt,
@@ -1044,7 +1044,9 @@ def _run_phase2_sections(
 
     client = _get_gemini_client()
     gemini_cfg = gemini_cfg or GeminiConfig()
-    user_context_text = format_context_for_prompt(user_context) if user_context else None
+    user_context_text = (
+        format_brief_for_prompt(user_context, phase="phase2") if user_context else None
+    )
 
     # ── Section grouping (deterministic) ──────────────────────────────────
     print("  [Sections] Grouping clips by date and time gaps...")
@@ -1816,8 +1818,15 @@ def run_phase2(
     If gemini_cfg.use_split_pipeline is True, delegates to the multi-call pipeline
     (Call 2A reasoning → Call 2A.5 structuring → Call 2B assembly).
     """
-    # Check for section-based pipeline (Divide & Conquer)
-    if gemini_cfg and gemini_cfg.use_section_pipeline and provider == "gemini":
+    # Check for Timeline Mode (scene-by-scene chronological assembly)
+    _timeline = gemini_cfg and gemini_cfg.use_timeline_mode and provider == "gemini"
+    if not _timeline and user_context is not None:
+        # Auto-detect from Creative Brief narrative structure
+        _brief = user_context
+        if hasattr(_brief, "narrative") and _brief.narrative:
+            if getattr(_brief.narrative, "structure", "") == "chronological":
+                _timeline = True
+    if _timeline:
         return _run_phase2_sections(
             clip_reviews=clip_reviews,
             editorial_paths=editorial_paths,
