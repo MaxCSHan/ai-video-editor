@@ -43,14 +43,20 @@ def extract_cast_from_reviews(clip_reviews: list[dict]) -> list[dict]:
     return list(cast_by_label.values())
 
 
-def condense_clip_for_planning(review: dict) -> dict:
+def condense_clip_for_planning(review: dict, include_editorial_hints: bool = False) -> dict:
     """Reduce a clip review to planning-essential fields only.
 
     Strips people arrays (replaced by cast reference), strips full editorial
     notes, keeps: clip_id, duration, content_type, cast_present, speakers,
     key_moments (compact), usable_segments (with index), audio_summary.
+
+    Args:
+        include_editorial_hints: When True, passes through Phase 1 editorial_notes
+            as ``editorial_hints``. Enable when the creative brief has explicit
+            narrative beats — the hints become informational rather than anchoring.
     """
-    return {
+    quality = review.get("quality", {})
+    condensed = {
         "clip_id": review.get("clip_id"),
         "total_usable_sec": sum(
             s.get("duration_sec", 0) for s in review.get("usable_segments", [])
@@ -58,6 +64,8 @@ def condense_clip_for_planning(review: dict) -> dict:
         "content_type": review.get("content_type", []),
         "cast_present": [p.get("label") for p in review.get("people", [])],
         "speakers": [p.get("label") for p in review.get("people", []) if p.get("speaking")],
+        "quality_overall": quality.get("overall", "fair"),
+        "quality_composition": quality.get("composition", "casual"),
         "key_moments": [
             {
                 "at": km.get("timestamp_sec"),
@@ -80,6 +88,9 @@ def condense_clip_for_planning(review: dict) -> dict:
         "audio_summary": review.get("audio", {}).get("speech_summary"),
         "has_speech": review.get("audio", {}).get("has_speech", False),
     }
+    if include_editorial_hints and review.get("editorial_notes"):
+        condensed["editorial_hints"] = review["editorial_notes"]
+    return condensed
 
 
 def trim_transcript_to_usable(
@@ -307,21 +318,25 @@ Your plan MUST address these points IN ORDER:
 state which clip and usable segment satisfies it. If a constraint cannot be satisfied, \
 explain why.
 
-2. STORY CONCEPT: What narrative does this footage support? What is the editorial angle?
+2. CREATIVE DIRECTION: If the filmmaker provided a CREATIVE DIRECTION section below, \
+acknowledge their intent, audience, and narrative direction. Your story concept and all \
+segment selections must serve these. If key beats are specified, map each beat to candidate clips.
 
-3. OPENING HOOK: What are the strongest first 10 seconds? Which clip and segment?
+3. STORY CONCEPT: What narrative does this footage support? What is the editorial angle?
 
-4. SEGMENT SEQUENCE: List each segment in output order:
+4. OPENING HOOK: What are the strongest first 10 seconds? Which clip and segment?
+
+5. SEGMENT SEQUENCE: List each segment in output order:
    - Clip ID (use FULL clip IDs from the list above — never abbreviate)
    - Which usable segment (by [index] number from the clip data below)
    - Purpose (hook, establishing, context, action, reaction, b_roll, climax, outro)
    - Audio strategy (preserve_dialogue, music_bed, ambient_only)
 
-5. DISCARDED CLIPS: Which clips are you cutting and why?
+6. DISCARDED CLIPS: Which clips are you cutting and why?
 
-6. PACING: Where is the edit fast vs slow? Where does it breathe?
+7. PACING: Where is the edit fast vs slow? Where does it breathe?
 
-7. MUSIC DIRECTION: What audio approach ties this together?
+8. MUSIC DIRECTION: What audio approach ties this together?
 
 Think freely. Write in natural language. Be specific about clip and segment references.
 """
@@ -806,11 +821,11 @@ def build_clip_review_prompt(
             "Match speech timestamps to key_moments and usable_segments."
         )
     if user_context:
-        from .briefing import format_context_for_prompt
+        from .briefing import format_brief_for_prompt
 
         prompt += (
             "\n\n"
-            + format_context_for_prompt(user_context)
+            + format_brief_for_prompt(user_context, phase="phase1")
             + "\nUse people names in labels and descriptions when you can identify them. "
             "Flag moments the filmmaker marked as highlights."
         )

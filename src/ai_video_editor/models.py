@@ -101,6 +101,155 @@ class QuickScanResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Creative brief models (enhanced user context for editorial direction)
+# ---------------------------------------------------------------------------
+
+
+class AudienceSpec(BaseModel):
+    """Who watches this video and where."""
+
+    platform: str = Field(
+        default="",
+        description="Target platform: youtube, tiktok, instagram, family_archive, personal",
+    )
+    viewer: str = Field(
+        default="",
+        description="Target viewer description: 'friends and family', 'travel enthusiasts', etc.",
+    )
+
+
+class NarrativeDirection(BaseModel):
+    """Story structure hints for the editor."""
+
+    story_thesis: str = Field(
+        default="",
+        description="One sentence: what is this video about? The editorial north star.",
+    )
+    story_hook: str = Field(
+        default="", description="What grabs the viewer in the first 10 seconds?"
+    )
+    key_beats: list[str] = Field(
+        default=[], description="Ordered narrative beats the editor should hit"
+    )
+    ending_note: str = Field(default="", description="How should the video end emotionally?")
+    structure: str = Field(
+        default="",
+        description="Narrative structure: chronological, thematic, circular, or vignettes",
+    )
+
+
+class StyleDirection(BaseModel):
+    """Visual and audio style preferences for the edit."""
+
+    pacing: str = Field(
+        default="",
+        description="Pacing preference: slow-contemplative, balanced, punchy, or builds-to-climax",
+    )
+    music_mood: str = Field(
+        default="",
+        description="Music direction: acoustic, lo-fi, orchestral, ambient, natural-audio-only",
+    )
+    energy_curve: str = Field(
+        default="",
+        description="Energy shape: steady, low-high-low, builds, or peaks-and-valleys",
+    )
+    transitions: str = Field(
+        default="",
+        description="Transition preference: soft-dissolves, hard-cuts, or mixed",
+    )
+    visual_tone: str = Field(
+        default="",
+        description="Visual tone: warm, cool, cinematic, bright, or natural",
+    )
+
+
+class CreativeBrief(BaseModel):
+    """Creative direction for the edit — strict superset of legacy user_context.
+
+    All legacy fields (people, activity, tone, highlights, avoid, duration, context_qa)
+    remain top-level strings for backward compatibility. Enhanced fields add structured
+    editorial direction without breaking old projects.
+
+    Loading: ``CreativeBrief(**old_user_context_dict)`` works for legacy dicts.
+    """
+
+    # --- Legacy fields (backward compatible with user_context.json) ---
+    people: str = ""
+    activity: str = ""
+    tone: str = ""
+    highlights: str = ""
+    avoid: str = ""
+    duration: str = ""
+    context_qa: list[dict] = Field(
+        default=[], description="AI-suggested Q&A pairs: [{question, answer}]"
+    )
+
+    # --- Enhanced fields ---
+    intent: str = Field(
+        default="",
+        description="What should the viewer feel or do after watching? The creative north star.",
+    )
+    audience: AudienceSpec | None = None
+    narrative: NarrativeDirection | None = None
+    style: StyleDirection | None = None
+    references: list[str] = Field(
+        default=[], description="Style inspiration: creators, videos, moods"
+    )
+    notes: str = Field(default="", description="Free-form creative notes for the editor")
+
+    # --- Metadata ---
+    brief_version: int = Field(
+        default=1, description="1 = legacy flat user_context, 2 = enhanced creative brief"
+    )
+    source: str = Field(default="tui", description="Input source: tui, file, or preset")
+    preset_key: str = Field(
+        default="", description="Creative preset key if brief was pre-filled from a preset"
+    )
+
+    def has_creative_direction(self) -> bool:
+        """Return True if any enhanced fields are populated."""
+        return bool(self.intent or self.audience or self.narrative or self.style or self.references)
+
+    def to_legacy_dict(self) -> dict:
+        """Export only legacy fields for backward-compatible serialization."""
+        d: dict = {}
+        for key in ("people", "activity", "tone", "highlights", "avoid", "duration"):
+            val = getattr(self, key)
+            if val:
+                d[key] = val
+        if self.context_qa:
+            d["context_qa"] = self.context_qa
+        return d
+
+
+class CreativePreset(BaseModel):
+    """User-defined reusable creative direction template.
+
+    Captures non-project-specific style and intent fields that can be
+    applied to new projects as a starting point for the creative brief.
+    Stored in ``~/.vx/presets/{key}.json``.
+    """
+
+    key: str = Field(description="Unique identifier: 'my-travel-style', 'family-vlogs'")
+    label: str = Field(description="Human-readable name: 'Max's Travel Style'")
+    description: str = ""
+    # Partial brief fields (no project-specific data like people/activity/highlights)
+    intent: str = ""
+    tone: str = ""
+    audience: AudienceSpec | None = None
+    narrative_defaults: NarrativeDirection | None = Field(
+        default=None,
+        description="Default narrative settings (structure, pacing — not key_beats)",
+    )
+    style: StyleDirection | None = None
+    references: list[str] = []
+    style_preset_key: str = Field(
+        default="", description="Optionally also activate a code-defined StylePreset"
+    )
+    created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Phase 1 clip review models (Gemini response_schema)
 # ---------------------------------------------------------------------------
 

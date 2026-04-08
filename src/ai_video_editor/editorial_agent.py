@@ -997,7 +997,7 @@ def _run_phase2_split(
     """
     from .models import EditorialStoryboard, StoryPlan
     from .render import render_markdown, render_html_preview
-    from .briefing import format_context_for_prompt
+    from .briefing import format_brief_for_prompt
     from .editorial_prompts import (
         extract_cast_from_reviews,
         condense_clip_for_planning,
@@ -1036,7 +1036,21 @@ def _run_phase2_split(
     # ── Pre-processing (deterministic) ──────────────────────────────────────
     print("  [2A] Pre-processing: deduplicating cast, condensing clips...")
     cast = extract_cast_from_reviews(clip_reviews)
-    condensed = [condense_clip_for_planning(r) for r in clip_reviews]
+
+    # Enable editorial hints when creative brief has explicit narrative beats
+    _has_key_beats = False
+    if user_context:
+        from .models import CreativeBrief
+
+        if isinstance(user_context, CreativeBrief):
+            _has_key_beats = bool(user_context.narrative and user_context.narrative.key_beats)
+        elif isinstance(user_context, dict):
+            _narrative = user_context.get("narrative")
+            if isinstance(_narrative, dict):
+                _has_key_beats = bool(_narrative.get("key_beats"))
+    condensed = [
+        condense_clip_for_planning(r, include_editorial_hints=_has_key_beats) for r in clip_reviews
+    ]
 
     all_transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
     trimmed_transcripts = None
@@ -1050,7 +1064,9 @@ def _run_phase2_split(
                     r.get("usable_segments", []),
                 )
 
-    user_context_text = format_context_for_prompt(user_context) if user_context else None
+    user_context_text = (
+        format_brief_for_prompt(user_context, phase="phase2") if user_context else None
+    )
 
     # ── Call 2A: Freeform editorial reasoning ───────────────────────────────
     reasoning_prompt = build_phase2a_reasoning_prompt(
@@ -1428,7 +1444,7 @@ def run_phase2(
 
     from .models import EditorialStoryboard
     from .render import render_markdown, render_html_preview
-    from .briefing import format_context_for_prompt
+    from .briefing import format_brief_for_prompt
 
     total_duration = sum(
         sum(seg.get("duration_sec", 0) for seg in r.get("usable_segments", []))
@@ -1507,7 +1523,9 @@ def run_phase2(
                 )
             visual_timeline = bundles
 
-    user_context_text = format_context_for_prompt(user_context) if user_context else None
+    user_context_text = (
+        format_brief_for_prompt(user_context, phase="phase2") if user_context else None
+    )
 
     prompt = build_editorial_assembly_prompt(
         project_name=project_name,
@@ -1740,7 +1758,7 @@ def _run_monologue_split(
         build_monologue_call2_prompt,
         validate_monologue_overlays,
     )
-    from .briefing import format_context_for_prompt
+    from .briefing import format_brief_for_prompt
     from .tracing import traced_gemini_generate, LLMSpinner
     from google.genai import types
 
@@ -1762,14 +1780,14 @@ def _run_monologue_split(
 
     user_context_text = None
     if user_context:
-        user_context_text = format_context_for_prompt(user_context)
+        user_context_text = format_brief_for_prompt(user_context, phase="phase2")
     else:
         from .versioning import resolve_user_context_path
 
         context_path = resolve_user_context_path(editorial_paths.root)
         if context_path:
             ctx = json.loads(context_path.read_text())
-            user_context_text = format_context_for_prompt(ctx)
+            user_context_text = format_brief_for_prompt(ctx, phase="phase2")
 
     client = _get_gemini_client()
 
@@ -1966,7 +1984,7 @@ def run_monologue(
 
     from .models import EditorialStoryboard, MonologuePlan
     from .editorial_prompts import build_monologue_prompt
-    from .briefing import format_context_for_prompt
+    from .briefing import format_brief_for_prompt
 
     if not style_preset or not style_preset.has_phase3:
         raise ValueError("Phase 3 requires a style preset with has_phase3=True")
@@ -1988,14 +2006,14 @@ def run_monologue(
     # Build user context text
     user_context_text = None
     if user_context:
-        user_context_text = format_context_for_prompt(user_context)
+        user_context_text = format_brief_for_prompt(user_context, phase="phase2")
     else:
         from .versioning import resolve_user_context_path
 
         context_path = resolve_user_context_path(editorial_paths.root)
         if context_path:
             ctx = json.loads(context_path.read_text())
-            user_context_text = format_context_for_prompt(ctx)
+            user_context_text = format_brief_for_prompt(ctx, phase="phase2")
 
     prompt = build_monologue_prompt(
         storyboard=storyboard,

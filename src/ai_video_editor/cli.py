@@ -1402,6 +1402,117 @@ def cmd_brief(args, cfg: Config):
         print(f"  {DIM}No answers provided.{RESET}")
 
 
+def cmd_preset(args, cfg: Config):
+    """Manage creative presets — reusable creative direction templates."""
+    sub = getattr(args, "preset_action", None)
+
+    if sub == "list" or not sub:
+        from .briefing import list_creative_presets
+
+        presets = list_creative_presets()
+        if not presets:
+            print(f"  {DIM}No creative presets found.{RESET}")
+            print(f"  Create one: {BOLD}vx preset save <key> --from <project>{RESET}")
+            return
+        print(f"\n  {'─' * 50}")
+        print("  Creative Presets")
+        print(f"  {'─' * 50}")
+        for p in presets:
+            label = p.get("label", p["key"])
+            desc = p.get("description", "")
+            intent = p.get("intent", "")
+            print(f"\n  {BOLD}{p['key']}{RESET} — {label}")
+            if desc:
+                print(f"    {desc}")
+            if intent:
+                print(f"    {DIM}Intent: {intent[:80]}{RESET}")
+            if p.get("tone"):
+                print(f"    {DIM}Tone: {p['tone']}{RESET}")
+        print()
+
+    elif sub == "save":
+        key = args.preset_key
+        from_project = getattr(args, "from_project", None)
+        if not from_project:
+            print(f"{RED}Error:{RESET} --from <project> is required.")
+            sys.exit(1)
+
+        project_root = cfg.library_dir / from_project
+        if not project_root.exists():
+            print(f"{RED}Error:{RESET} Project '{from_project}' not found.")
+            sys.exit(1)
+
+        from .briefing import extract_preset_from_project, save_creative_preset
+
+        preset = extract_preset_from_project(project_root, key, label=getattr(args, "label", ""))
+        if not preset:
+            print(f"{RED}Error:{RESET} No creative brief found in project '{from_project}'.")
+            sys.exit(1)
+
+        path = save_creative_preset(preset)
+        print(f"  {GREEN}Preset '{key}' saved to {path}{RESET}")
+        print(f"  Apply it: {BOLD}vx new my-project ~/footage/ --creative-preset {key}{RESET}")
+
+    elif sub == "new":
+        key = args.preset_key
+        from .models import CreativePreset
+        from .briefing import save_creative_preset
+
+        preset = CreativePreset(
+            key=key,
+            label=key.replace("-", " ").replace("_", " ").title(),
+            created_at=__import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+        path = save_creative_preset(preset)
+
+        editor = os.environ.get("EDITOR", "vim")
+        print(f"  Created preset template: {path}")
+        print(f"  Opening in {editor}...")
+        os.system(f'{editor} "{path}"')
+
+    elif sub == "edit":
+        key = args.preset_key
+        from .briefing import _PRESETS_DIR
+
+        path = _PRESETS_DIR / f"{key}.json"
+        if not path.exists():
+            print(f"{RED}Error:{RESET} Preset '{key}' not found.")
+            sys.exit(1)
+
+        editor = os.environ.get("EDITOR", "vim")
+        os.system(f'{editor} "{path}"')
+        print(f"  {GREEN}Preset '{key}' updated.{RESET}")
+
+    elif sub == "apply":
+        key = args.preset_key
+        project_name = getattr(args, "project", None) or _infer_project(cfg)
+        if not project_name:
+            print(f"{RED}Error:{RESET} Specify a project name.")
+            sys.exit(1)
+
+        project_root = cfg.library_dir / project_name
+        if not project_root.exists():
+            print(f"{RED}Error:{RESET} Project '{project_name}' not found.")
+            sys.exit(1)
+
+        from .briefing import (
+            get_creative_preset,
+            load_creative_brief,
+            apply_preset_to_brief,
+            save_creative_brief,
+        )
+
+        preset = get_creative_preset(key)
+        if not preset:
+            print(f"{RED}Error:{RESET} Preset '{key}' not found.")
+            sys.exit(1)
+
+        brief = load_creative_brief(project_root)
+        brief = apply_preset_to_brief(preset, brief)
+        save_creative_brief(project_root, brief)
+        print(f"  {GREEN}Preset '{key}' applied to project '{project_name}'.{RESET}")
+
+
 def _find_storyboard_json(ep) -> Path | None:
     """Find the latest structured storyboard JSON for an editorial project.
 
@@ -2160,6 +2271,11 @@ def main():
         "--preset",
         help="Style preset for creative direction (e.g., silent_vlog)",
     )
+    p_new.add_argument(
+        "--creative-preset",
+        dest="creative_preset",
+        help="Creative preset to pre-fill briefing (e.g., my-travel-style)",
+    )
 
     # --- projects ---
     sub.add_parser("projects", aliases=["ls"], help="List all projects")
@@ -2312,6 +2428,16 @@ def main():
         action="store_true",
         help="Run AI quick scan of footage before asking questions (requires GEMINI_API_KEY)",
     )
+    p_brief.add_argument(
+        "--file",
+        dest="brief_file",
+        help="Load creative brief from a markdown file",
+    )
+    p_brief.add_argument(
+        "--depth",
+        choices=["quick", "director", "deep"],
+        help="Briefing depth for TUI mode (quick/director/deep)",
+    )
 
     # --- preview ---
     p_preview = sub.add_parser("preview", help="Regenerate HTML preview (no LLM, no ffmpeg)")
@@ -2411,6 +2537,33 @@ def main():
         help="Compare two experiment tracks (e.g. --compare main,experiment)",
     )
 
+    # --- preset ---
+    p_preset = sub.add_parser(
+        "preset", help="Manage creative presets (reusable direction templates)"
+    )
+    preset_sub = p_preset.add_subparsers(dest="preset_action", metavar="action")
+
+    preset_sub.add_parser("list", help="List all creative presets")
+
+    p_preset_save = preset_sub.add_parser(
+        "save", help="Extract a preset from a project's creative brief"
+    )
+    p_preset_save.add_argument("preset_key", help="Preset identifier (e.g., my-travel-style)")
+    p_preset_save.add_argument(
+        "--from", dest="from_project", required=True, help="Source project name"
+    )
+    p_preset_save.add_argument("--label", help="Human-readable preset name")
+
+    p_preset_new = preset_sub.add_parser("new", help="Create a new preset from scratch")
+    p_preset_new.add_argument("preset_key", help="Preset identifier")
+
+    p_preset_edit = preset_sub.add_parser("edit", help="Edit an existing preset in $EDITOR")
+    p_preset_edit.add_argument("preset_key", help="Preset identifier")
+
+    p_preset_apply = preset_sub.add_parser("apply", help="Apply a preset to a project")
+    p_preset_apply.add_argument("preset_key", help="Preset identifier")
+    p_preset_apply.add_argument("project", nargs="?", help="Target project name")
+
     p_config = sub.add_parser("config", help="Show or update workspace defaults")
     p_config.add_argument("--provider", choices=["gemini", "claude"], help="Default AI provider")
     p_config.add_argument("--style", help="Default video style")
@@ -2460,6 +2613,7 @@ def main():
         "compose": cmd_compose,
         "track": cmd_track,
         "eval": cmd_eval,
+        "preset": cmd_preset,
         "config": cmd_config,
         "trace": cmd_trace,
     }
