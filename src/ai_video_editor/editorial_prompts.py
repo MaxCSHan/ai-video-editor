@@ -966,27 +966,32 @@ def build_storyline_prompt(
     user_context_text: str | None = None,
     style: str = "vlog",
     cast: list[dict] | None = None,
+    highlights: str = "",
+    avoid: str = "",
 ) -> str:
-    """Build the storyline prompt: plan narrative arc across sections.
+    """Build the storyline prompt: plan narrative arc and distribute constraints.
 
-    The LLM sees section summaries (not full clips) and creates a SectionPlan
-    with narrative roles, arc phases, target durations, and hook selection.
+    The LLM sees condensed clip reviews grouped by section so it can determine
+    which section has which footage, then assigns filmmaker constraints to the
+    sections that can actually satisfy them.
     """
-    from .section_grouping import summarize_section_for_prompt
+    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
 
     prompt = (
         "You are an editorial director planning a vlog from trip footage.\n"
         "The footage has been grouped into chronological sections. "
-        "Your job is to plan the narrative arc across these sections — "
-        "how the video flows, what role each section plays in the story, "
-        "and which section provides the best opening hook material.\n\n"
+        "Your job is to:\n"
+        "1. Plan the narrative arc across sections\n"
+        "2. Pick the opening hook material\n"
+        "3. Assign each filmmaker constraint to the section that can satisfy it\n"
+        "4. Give each section a clear editorial goal\n\n"
         "IMPORTANT: Sections are in chronological order and the final video "
         "MUST follow this order (except the hook, which can come from any section). "
         "Your narrative assignments shape HOW each section is edited, "
         "not WHETHER or WHEN it appears.\n"
     )
 
-    # User context
+    # User context (creative direction + preferences, NOT constraints)
     if user_context_text:
         prompt += f"\n## Filmmaker Context\n{user_context_text}\n"
 
@@ -998,30 +1003,62 @@ def build_storyline_prompt(
                 f"- **{c.get('label', '?')}**: {c.get('description', '')} ({c.get('role', '')})\n"
             )
 
-    # Section summaries
+    # Sections with condensed clip reviews (not just summaries)
     prompt += f"\n## Sections ({sum(len(g.sections) for g in section_groups)} total)\n\n"
     for group in section_groups:
         for section in group.sections:
-            prompt += summarize_section_for_prompt(group, section, clip_reviews)
-            prompt += "\n\n"
+            prompt += f"### {section.label} ({section.section_id})\n"
+            prompt += f"Day: {group.label} | Time: {section.time_range or 'unknown'}\n"
+            prompt += f"Clips: {len(section.clip_ids)}\n\n"
+            for clip_id in section.clip_ids:
+                review = reviews_by_id.get(clip_id, {})
+                content = review.get("content_type", [])
+                dur = review.get("duration_sec", 0)
+                prompt += f"  **{clip_id}** ({dur:.0f}s) — {content}\n"
+                for km in review.get("key_moments", []):
+                    if km.get("editorial_value") in ("high", "medium"):
+                        prompt += (
+                            f"    - [{km.get('timestamp_sec', 0):.0f}s] "
+                            f"{km.get('description', '')} "
+                            f"(value: {km.get('editorial_value')})\n"
+                        )
+                if review.get("audio", {}).get("has_speech"):
+                    summary = review.get("audio", {}).get("speech_summary", "")
+                    if summary:
+                        prompt += f"    - Speech: {summary[:100]}\n"
+            prompt += "\n"
+
+    # Constraint distribution instructions
+    if highlights or avoid:
+        prompt += "## CONSTRAINT DISTRIBUTION\n\n"
+        prompt += "The filmmaker specified these constraints:\n"
+        if highlights:
+            prompt += f"- MUST INCLUDE: {highlights}\n"
+        if avoid:
+            prompt += f"- MUST EXCLUDE: {avoid}\n"
+        prompt += (
+            "\nFor each constraint, determine WHICH SECTION can satisfy it based on "
+            "the clip reviews above. Assign it to that section's must_include or "
+            "must_exclude list. If a constraint cannot be satisfied by any section, "
+            "explain why in constraint_satisfaction.\n\n"
+            "DO NOT assign a constraint to a section that lacks the relevant footage.\n\n"
+        )
 
     prompt += (
         f"\nNow produce a SectionPlan for a {style}.\n\n"
-        "For each section, assign:\n"
+        "For each section_narrative, provide:\n"
         "- narrative_role: what this section contributes to the overall story\n"
         "- arc_phase: opening_context, rising_action, experience, climax, or closing_reflection\n"
         "- energy: high, medium, or low\n"
-        "- target_duration_sec: how long this section should be in the final edit\n\n"
-        "Pick the section that has the most visually compelling material for the "
+        "- target_duration_sec: how long this section should be in the final edit\n"
+        "- section_goal: a clear, focused editorial objective for this section\n"
+        "- must_include: only constraints this section CAN satisfy (from the list above)\n"
+        "- must_exclude: only constraints relevant to this section\n"
+        "- key_clips: specific clip_ids from this section that serve the goal\n\n"
+        "Pick the section with the most visually compelling material for the "
         "opening hook (hook_section_id). The hook is a 10-15 second cinematic "
         "opening that grabs attention before the chronological story begins.\n"
     )
-
-    if user_context_text and ("must" in (user_context_text or "").lower()):
-        prompt += (
-            "\nThe filmmaker's MUST-INCLUDE and MUST-EXCLUDE constraints are "
-            "non-negotiable. State in constraint_satisfaction how you address each one.\n"
-        )
 
     return prompt
 
@@ -1106,7 +1143,7 @@ def build_section_storyboard_prompt(
         "You are NOT bound to chronological order within this section.\n\n"
     )
 
-    # Section assignment
+    # Section assignment with goals and constraints
     prompt += f"## Your Section: {section.label} ({section.section_id})\n"
     if section_narrative:
         prompt += f"Narrative role: {section_narrative.narrative_role}\n"
@@ -1114,11 +1151,23 @@ def build_section_storyboard_prompt(
         prompt += f"Energy: {section_narrative.energy}\n"
         if section_narrative.target_duration_sec > 0:
             prompt += f"Target duration: ~{section_narrative.target_duration_sec:.0f}s\n"
+        if section_narrative.section_goal:
+            prompt += f"\n**Section Goal**: {section_narrative.section_goal}\n"
+        if section_narrative.must_include:
+            prompt += "\n**MUST INCLUDE** (assigned to this section by the editor):\n"
+            for item in section_narrative.must_include:
+                prompt += f"  - {item}\n"
+        if section_narrative.must_exclude:
+            prompt += "\n**MUST EXCLUDE**:\n"
+            for item in section_narrative.must_exclude:
+                prompt += f"  - {item}\n"
+        if section_narrative.key_clips:
+            prompt += f"\n**Key clips to prioritize**: {', '.join(section_narrative.key_clips)}\n"
     prompt += "\n"
 
-    # User context
+    # Creative direction (no global constraints — those are assigned per-section above)
     if user_context_text:
-        prompt += f"## Filmmaker Context\n{user_context_text}\n\n"
+        prompt += f"## Creative Direction\n{user_context_text}\n\n"
 
     # Cumulative context from prior sections
     if cumulative_narratives:

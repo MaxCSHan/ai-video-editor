@@ -1044,9 +1044,28 @@ def _run_phase2_sections(
 
     client = _get_gemini_client()
     gemini_cfg = gemini_cfg or GeminiConfig()
-    user_context_text = (
+
+    # Format brief WITHOUT constraints for section calls (constraints distributed by storyline)
+    section_context_text = (
+        format_brief_for_prompt(user_context, phase="phase2", skip_constraints=True)
+        if user_context
+        else None
+    )
+    # Full brief WITH constraints for the storyline planner
+    full_context_text = (
         format_brief_for_prompt(user_context, phase="phase2") if user_context else None
     )
+
+    # Extract highlights/avoid for structured constraint distribution
+    _highlights = ""
+    _avoid = ""
+    if user_context:
+        if hasattr(user_context, "highlights"):
+            _highlights = user_context.highlights or ""
+            _avoid = user_context.avoid or ""
+        elif isinstance(user_context, dict):
+            _highlights = user_context.get("highlights", "")
+            _avoid = user_context.get("avoid", "")
 
     # ── Section grouping (deterministic) ──────────────────────────────────
     print("  [Sections] Grouping clips by date and time gaps...")
@@ -1076,14 +1095,16 @@ def _run_phase2_sections(
     reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
     all_transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
-    # ── Storyline LLM call ────────────────────────────────────────────────
+    # ── Storyline LLM call (sees full reviews + constraints for distribution) ──
     print(f"  [Storyline] Planning narrative arc across {total_sections} sections...")
     storyline_prompt = build_storyline_prompt(
         section_groups=section_groups,
         clip_reviews=clip_reviews,
-        user_context_text=user_context_text,
+        user_context_text=full_context_text,
         style=style,
         cast=cast,
+        highlights=_highlights,
+        avoid=_avoid,
     )
 
     with LLMSpinner("Storyline planning", provider=provider):
@@ -1163,12 +1184,12 @@ def _run_phase2_sections(
         prompt = build_section_storyboard_prompt(
             section=section,
             section_clip_reviews=section_reviews,
-            transcripts=section_transcripts,
             section_narrative=narrative,
+            transcripts=section_transcripts,
             cumulative_narratives=cumulative_narratives if cumulative_narratives else None,
             cast=cast,
             style=style,
-            user_context_text=user_context_text,
+            user_context_text=section_context_text,  # constraints-free, goals come from narrative
             style_supplement=style_supplement,
         )
 
