@@ -493,32 +493,33 @@ def _review_single_clip_gemini(
     )
 
     print(f"  {label}: reviewing with {cfg.model}...")
-    from .tracing import traced_gemini_generate
+    from .tracing import otel_phase_span, traced_gemini_generate
 
     from .models import ClipReview
 
-    response = traced_gemini_generate(
-        client,
-        model=cfg.model,
-        contents=[
-            types.Content(
-                parts=[
-                    types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
-                    types.Part.from_text(text=prompt),
-                ]
-            )
-        ],
-        config=types.GenerateContentConfig(
-            temperature=cfg.temperature,
-            response_mime_type="application/json",
-            response_schema=ClipReview,
-        ),
-        phase="phase1",
-        clip_id=clip_id,
-        tracer=tracer,
-        num_video_files=1,
-        prompt_chars=len(prompt),
-    )
+    with otel_phase_span("phase1", stage="review", provider="gemini", clip_id=clip_id):
+        response = traced_gemini_generate(
+            client,
+            model=cfg.model,
+            contents=[
+                types.Content(
+                    parts=[
+                        types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
+                        types.Part.from_text(text=prompt),
+                    ]
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=cfg.temperature,
+                response_mime_type="application/json",
+                response_schema=ClipReview,
+            ),
+            phase="phase1",
+            clip_id=clip_id,
+            tracer=tracer,
+            num_video_files=1,
+            prompt_chars=len(prompt),
+        )
 
     review = ClipReview.model_validate_json(response.text).model_dump()
 
@@ -536,28 +537,32 @@ def _review_single_clip_gemini(
         )
         retry_prompt = prompt + f"\n\n{feedback}\nPlease fix these issues."
         print(f"  {label}: critical validation issues, retrying with feedback...")
-        retry_response = traced_gemini_generate(
-            client,
-            model=cfg.model,
-            contents=[
-                types.Content(
-                    parts=[
-                        types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
-                        types.Part.from_text(text=retry_prompt),
-                    ]
-                )
-            ],
-            config=types.GenerateContentConfig(
-                temperature=cfg.temperature,
-                response_mime_type="application/json",
-                response_schema=ClipReview,
-            ),
-            phase="phase1",
-            clip_id=clip_id,
-            tracer=tracer,
-            num_video_files=1,
-            prompt_chars=len(retry_prompt),
-        )
+        with otel_phase_span(
+            "phase1_retry", stage="review", provider="gemini",
+            clip_id=clip_id, extra_tags=["retry:true"],
+        ):
+            retry_response = traced_gemini_generate(
+                client,
+                model=cfg.model,
+                contents=[
+                    types.Content(
+                        parts=[
+                            types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
+                            types.Part.from_text(text=retry_prompt),
+                        ]
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=cfg.temperature,
+                    response_mime_type="application/json",
+                    response_schema=ClipReview,
+                ),
+                phase="phase1",
+                clip_id=clip_id,
+                tracer=tracer,
+                num_video_files=1,
+                prompt_chars=len(retry_prompt),
+            )
         review = ClipReview.model_validate_json(retry_response.text).model_dump()
         if tracer and tracer.traces:
             tracer.traces[-1].validation_retried = True
@@ -675,6 +680,7 @@ def run_phase1_claude(
     style_supplement: str | None = None,
     only_clip_ids: list[str] | None = None,
     user_context: dict | None = None,
+    tracer=None,
 ) -> tuple[list[dict], list[str]]:
     """Phase 1 via Claude: send each clip's frames, get structured JSON review.
 
@@ -768,13 +774,21 @@ def run_phase1_claude(
             )
             content.append({"type": "text", "text": prompt})
 
+            from .tracing import otel_phase_span, traced_claude_generate
+
             print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
-            response = client.messages.create(
-                model=cfg.model,
-                max_tokens=cfg.max_tokens,
-                temperature=cfg.temperature,
-                messages=[{"role": "user", "content": content}],
-            )
+            with otel_phase_span("phase1", stage="review", provider="claude", clip_id=clip_id):
+                response = traced_claude_generate(
+                    client,
+                    model=cfg.model,
+                    messages=[{"role": "user", "content": content}],
+                    max_tokens=cfg.max_tokens,
+                    temperature=cfg.temperature,
+                    phase="phase1",
+                    clip_id=clip_id,
+                    tracer=tracer,
+                    prompt_chars=len(prompt),
+                )
 
             review = parse_clip_review(response.content[0].text)
 
@@ -907,7 +921,7 @@ def _validate_constraints(
     Returns the validation report text, or None if validation was skipped.
     Prints constraint violations to the console.
     """
-    from .tracing import traced_gemini_generate
+    from .tracing import otel_phase_span, traced_gemini_generate
 
     constraints = []
     if user_context.get("highlights"):
@@ -943,15 +957,16 @@ def _validate_constraints(
         from google.genai import types
 
         print(f"  [Validate] Checking constraint satisfaction ({model})...")
-        response = traced_gemini_generate(
-            client,
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.1),
-            phase="phase2_validation",
-            tracer=tracer,
-            prompt_chars=len(prompt),
-        )
+        with otel_phase_span("phase2_validation", stage="validation", provider="gemini"):
+            response = traced_gemini_generate(
+                client,
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.1),
+                phase="phase2_validation",
+                tracer=tracer,
+                prompt_chars=len(prompt),
+            )
         report = response.text.strip()
 
         # Parse for violations and print them
@@ -1006,7 +1021,7 @@ def _run_phase2_split(
         build_phase2a_structuring_prompt,
         build_phase2b_assembly_prompt,
     )
-    from .tracing import traced_gemini_generate, LLMSpinner
+    from .tracing import otel_phase_span, traced_gemini_generate, LLMSpinner
 
     total_duration = sum(
         sum(seg.get("duration_sec", 0) for seg in r.get("usable_segments", []))
@@ -1141,19 +1156,20 @@ def _run_phase2_split(
             contents_2a = reasoning_prompt
 
         with LLMSpinner("Editorial reasoning (Call 2A)", provider=provider):
-            response_2a = traced_gemini_generate(
-                client,
-                model=gemini_cfg.phase2,
-                contents=contents_2a,
-                config=types.GenerateContentConfig(
-                    temperature=gemini_cfg.phase2_temperature,
-                    # No response_schema — freeform text output
-                ),
-                phase="phase2a_reasoning",
-                tracer=tracer,
-                prompt_chars=len(reasoning_prompt),
-                num_video_files=len(video_parts),
-            )
+            with otel_phase_span("phase2a_reasoning", stage="storyboard", provider="gemini", call="2A"):
+                response_2a = traced_gemini_generate(
+                    client,
+                    model=gemini_cfg.phase2,
+                    contents=contents_2a,
+                    config=types.GenerateContentConfig(
+                        temperature=gemini_cfg.phase2_temperature,
+                        # No response_schema — freeform text output
+                    ),
+                    phase="phase2a_reasoning",
+                    tracer=tracer,
+                    prompt_chars=len(reasoning_prompt),
+                    num_video_files=len(video_parts),
+                )
         editorial_plan_text = response_2a.text
         print(f"  [2A] Editorial plan: {len(editorial_plan_text)} chars")
 
@@ -1165,19 +1181,20 @@ def _run_phase2_split(
         )
 
         with LLMSpinner("Plan structuring (Call 2A.5)", provider=provider):
-            response_2a5 = traced_gemini_generate(
-                client,
-                model=gemini_cfg.structuring_model,
-                contents=structuring_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    response_mime_type="application/json",
-                    response_schema=StoryPlan,
-                ),
-                phase="phase2a_structuring",
-                tracer=tracer,
-                prompt_chars=len(structuring_prompt),
-            )
+            with otel_phase_span("phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5"):
+                response_2a5 = traced_gemini_generate(
+                    client,
+                    model=gemini_cfg.structuring_model,
+                    contents=structuring_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        response_mime_type="application/json",
+                        response_schema=StoryPlan,
+                    ),
+                    phase="phase2a_structuring",
+                    tracer=tracer,
+                    prompt_chars=len(structuring_prompt),
+                )
         story_plan = StoryPlan.model_validate_json(response_2a5.text)
 
         # ── Checkpoint: validate plan ──────────────────────────────────────
@@ -1220,19 +1237,20 @@ def _run_phase2_split(
             f"{len(story_plan.planned_segments)} segments)..."
         )
         with LLMSpinner("Precise assembly (Call 2B)", provider=provider):
-            response_2b = traced_gemini_generate(
-                client,
-                model=gemini_cfg.phase2,
-                contents=assembly_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=gemini_cfg.phase2b_temperature,
-                    response_mime_type="application/json",
-                    response_schema=EditorialStoryboard,
-                ),
-                phase="phase2b_assembly",
-                tracer=tracer,
-                prompt_chars=len(assembly_prompt),
-            )
+            with otel_phase_span("phase2b_assembly", stage="storyboard", provider="gemini", call="2B"):
+                response_2b = traced_gemini_generate(
+                    client,
+                    model=gemini_cfg.phase2,
+                    contents=assembly_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=gemini_cfg.phase2b_temperature,
+                        response_mime_type="application/json",
+                        response_schema=EditorialStoryboard,
+                    ),
+                    phase="phase2b_assembly",
+                    tracer=tracer,
+                    prompt_chars=len(assembly_prompt),
+                )
         storyboard = EditorialStoryboard.model_validate_json(response_2b.text)
 
     else:
@@ -1550,7 +1568,7 @@ def run_phase2(
 
             client = _get_gemini_client()
 
-        from .tracing import traced_gemini_generate
+        from .tracing import otel_phase_span, traced_gemini_generate
 
         # Build contents: text-only or multipart with concat video bundles
         num_videos = len(video_parts)
@@ -1559,38 +1577,46 @@ def run_phase2(
         else:
             contents = prompt
 
-        response = traced_gemini_generate(
-            client,
-            model=p2_model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=gemini_cfg.phase2_temperature,
-                response_mime_type="application/json",
-                response_schema=EditorialStoryboard,
-            ),
-            phase="phase2",
-            tracer=tracer,
-            prompt_chars=len(prompt),
-            num_video_files=num_videos,
-        )
+        with otel_phase_span("phase2", stage="storyboard", provider="gemini"):
+            response = traced_gemini_generate(
+                client,
+                model=p2_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2_temperature,
+                    response_mime_type="application/json",
+                    response_schema=EditorialStoryboard,
+                ),
+                phase="phase2",
+                tracer=tracer,
+                prompt_chars=len(prompt),
+                num_video_files=num_videos,
+            )
         storyboard = EditorialStoryboard.model_validate_json(response.text)
 
     elif provider == "claude":
         import anthropic
 
+        from .tracing import otel_phase_span, traced_claude_generate
+
         client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
-        response = client.messages.create(
-            model=claude_cfg.model,
-            max_tokens=claude_cfg.max_tokens * 2,
-            temperature=claude_cfg.phase2_temperature,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                    + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
-                }
-            ],
-        )
+        with otel_phase_span("phase2", stage="storyboard", provider="claude"):
+            response = traced_claude_generate(
+                client,
+                model=claude_cfg.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                        + "\n\nRespond ONLY with valid JSON matching the EditorialStoryboard schema.",
+                    }
+                ],
+                max_tokens=claude_cfg.max_tokens * 2,
+                temperature=claude_cfg.phase2_temperature,
+                phase="phase2",
+                tracer=tracer,
+                prompt_chars=len(prompt),
+            )
         text = response.content[0].text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -1759,7 +1785,7 @@ def _run_monologue_split(
         validate_monologue_overlays,
     )
     from .briefing import format_brief_for_prompt
-    from .tracing import traced_gemini_generate, LLMSpinner
+    from .tracing import otel_phase_span, traced_gemini_generate, LLMSpinner
     from google.genai import types
 
     if not style_preset or not style_preset.has_phase3:
@@ -1802,19 +1828,20 @@ def _run_monologue_split(
     print(f"  [M1] Analyzing {seg_count} segments for overlay eligibility...")
 
     with LLMSpinner("Segment analysis (Call M1)", provider=provider):
-        response_1 = traced_gemini_generate(
-            client,
-            model=gemini_cfg.model,
-            contents=call1_prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                response_mime_type="application/json",
-                response_schema=OverlayPlan,
-            ),
-            phase="phase3_analysis",
-            tracer=tracer,
-            prompt_chars=len(call1_prompt),
-        )
+        with otel_phase_span("phase3_analysis", stage="monologue", provider="gemini", call="M1"):
+            response_1 = traced_gemini_generate(
+                client,
+                model=gemini_cfg.model,
+                contents=call1_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=OverlayPlan,
+                ),
+                phase="phase3_analysis",
+                tracer=tracer,
+                prompt_chars=len(call1_prompt),
+            )
     overlay_plan = OverlayPlan.model_validate_json(response_1.text)
     eligible_count = len(overlay_plan.eligible_segments)
     print(
@@ -1837,19 +1864,20 @@ def _run_monologue_split(
     )
 
     with LLMSpinner("Creative text (Call M2)", provider=provider):
-        response_2 = traced_gemini_generate(
-            client,
-            model=gemini_cfg.model,
-            contents=call2_prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.8,  # creative writing needs variety
-                response_mime_type="application/json",
-                response_schema=OverlayDrafts,
-            ),
-            phase="phase3_creative",
-            tracer=tracer,
-            prompt_chars=len(call2_prompt),
-        )
+        with otel_phase_span("phase3_creative", stage="monologue", provider="gemini", call="M2"):
+            response_2 = traced_gemini_generate(
+                client,
+                model=gemini_cfg.model,
+                contents=call2_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.8,  # creative writing needs variety
+                    response_mime_type="application/json",
+                    response_schema=OverlayDrafts,
+                ),
+                phase="phase3_creative",
+                tracer=tracer,
+                prompt_chars=len(call2_prompt),
+            )
     drafts = OverlayDrafts.model_validate_json(response_2.text)
     print(f"  [M2] Generated {len(drafts.overlays)} overlay drafts")
 
@@ -2041,43 +2069,51 @@ def run_monologue(
 
     if provider == "gemini":
         from google.genai import types
-        from .tracing import traced_gemini_generate
+        from .tracing import otel_phase_span, traced_gemini_generate
 
         client = _get_gemini_client()
 
         with LLMSpinner("Generating visual monologue", provider="gemini"):
-            response = traced_gemini_generate(
-                client,
-                model=gemini_cfg.model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=gemini_cfg.temperature,
-                    response_mime_type="application/json",
-                    response_schema=MonologuePlan,
-                ),
-                phase="monologue",
-                tracer=tracer,
-                prompt_chars=len(prompt),
-            )
+            with otel_phase_span("monologue", stage="monologue", provider="gemini"):
+                response = traced_gemini_generate(
+                    client,
+                    model=gemini_cfg.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=gemini_cfg.temperature,
+                        response_mime_type="application/json",
+                        response_schema=MonologuePlan,
+                    ),
+                    phase="monologue",
+                    tracer=tracer,
+                    prompt_chars=len(prompt),
+                )
         monologue = MonologuePlan.model_validate_json(response.text)
 
     elif provider == "claude":
         import anthropic
 
+        from .tracing import otel_phase_span, traced_claude_generate
+
         client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
         with LLMSpinner("Generating visual monologue", provider="claude"):
-            response = client.messages.create(
-                model=claude_cfg.model,
-                max_tokens=claude_cfg.max_tokens * 2,
-                temperature=claude_cfg.temperature,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                        + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
-                    }
-                ],
-            )
+            with otel_phase_span("monologue", stage="monologue", provider="claude"):
+                response = traced_claude_generate(
+                    client,
+                    model=claude_cfg.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                            + "\n\nRespond ONLY with valid JSON matching the MonologuePlan schema.",
+                        }
+                    ],
+                    max_tokens=claude_cfg.max_tokens * 2,
+                    temperature=claude_cfg.temperature,
+                    phase="monologue",
+                    tracer=tracer,
+                    prompt_chars=len(prompt),
+                )
         text = response.content[0].text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -2283,13 +2319,16 @@ def run_editorial_pipeline(
     max_cost: float | None = None,
 ) -> Path:
     """Full editorial pipeline: discover → preprocess → Phase 1 → Phase 2 → optional Phase 3."""
-    from .tracing import ProjectTracer
+    import uuid
+
+    from .tracing import ProjectTracer, otel_pipeline_span
 
     cfg = cfg or DEFAULT_CONFIG
     editorial_paths = cfg.editorial_project(project_name)
     editorial_paths.ensure_dirs()
 
     tracer = ProjectTracer(editorial_paths.root, max_cost_usd=max_cost)
+    pipeline_run_id = str(uuid.uuid4())
 
     # Resolve style supplements from preset
     p1_supplement = style_preset.phase1_supplement if style_preset else None
@@ -2297,6 +2336,10 @@ def run_editorial_pipeline(
     has_phase3 = style_preset.has_phase3 if style_preset else False
 
     total_phases = 5 if has_phase3 else 4
+
+    # Start pipeline-level OTel grouping (no-op if Phoenix not connected)
+    _pipeline_ctx = otel_pipeline_span(project_name, pipeline_run_id)
+    _pipeline_ctx.__enter__()
 
     # Discover clips
     print(f"[1/{total_phases}] Discovering clips in {source_dir}...")
@@ -2442,4 +2485,5 @@ def run_editorial_pipeline(
         tracer.print_summary("Phase 3")
 
     tracer.print_summary("Pipeline Total")
+    _pipeline_ctx.__exit__(None, None, None)
     return output_path

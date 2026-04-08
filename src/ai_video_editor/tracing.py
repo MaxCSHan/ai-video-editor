@@ -40,6 +40,23 @@ def _is_retryable_gemini(exc: Exception) -> bool:
     return code in (429, 500, 502, 503)
 
 
+def _is_retryable_anthropic(exc: Exception) -> bool:
+    """Check if an Anthropic API error is transient and worth retrying."""
+    name = type(exc).__name__
+    if name in (
+        "RateLimitError",
+        "InternalServerError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "OverloadedError",
+    ):
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    code = getattr(exc, "status_code", None)
+    return code in (429, 500, 502, 503, 529)
+
+
 # ---------------------------------------------------------------------------
 # Cost table (per 1M tokens, USD)
 # ---------------------------------------------------------------------------
@@ -346,6 +363,14 @@ def connect_phoenix(url: str | None = None) -> bool:
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
         GoogleGenAIInstrumentor().instrument()
+
+        try:
+            from openinference.instrumentation.anthropic import AnthropicInstrumentor
+
+            AnthropicInstrumentor().instrument()
+        except ImportError:
+            pass  # anthropic instrumentor not installed
+
         _phoenix_connected = True
         _phoenix_url = url
         return True
@@ -467,6 +492,92 @@ def otel_tool_span(tool_name: str, tool_args: dict | None = None):
         yield None
 
 
+@contextmanager
+def otel_phase_span(
+    phase: str,
+    *,
+    stage: str | None = None,
+    project_name: str | None = None,
+    pipeline_run_id: str | None = None,
+    clip_id: str | None = None,
+    provider: str | None = None,
+    call: str | None = None,
+    extra_tags: list[str] | None = None,
+):
+    """Tag all auto-instrumented LLM spans within this block with pipeline metadata.
+
+    Uses OpenInference ``using_attributes`` so that Gemini/Anthropic spans created
+    by their respective instrumentors automatically inherit ``metadata`` and ``tags``.
+
+    No-op when Phoenix is not connected.
+
+    Example::
+
+        with otel_phase_span("phase1", stage="review", provider="gemini", clip_id="C0073"):
+            response = traced_gemini_generate(...)
+        # In Phoenix: metadata.phase="phase1", tags=["phase:phase1", "clip:C0073", ...]
+    """
+    if not _phoenix_connected:
+        yield None
+        return
+
+    try:
+        from openinference.instrumentation import using_attributes
+
+        metadata: dict[str, str] = {"phase": phase}
+        tags: list[str] = [f"phase:{phase}"]
+
+        if stage:
+            metadata["stage"] = stage
+            tags.append(f"stage:{stage}")
+        if project_name:
+            metadata["project_name"] = project_name
+            tags.append(f"project:{project_name}")
+        if pipeline_run_id:
+            metadata["pipeline_run_id"] = pipeline_run_id
+        if clip_id:
+            metadata["clip_id"] = clip_id
+            tags.append(f"clip:{clip_id}")
+        if provider:
+            metadata["provider"] = provider
+            tags.append(f"provider:{provider}")
+        if call:
+            metadata["call"] = call
+            tags.append(f"call:{call}")
+        if extra_tags:
+            tags.extend(extra_tags)
+
+        with using_attributes(metadata=metadata, tags=tags):
+            yield
+    except Exception:
+        # Tracing should never break the pipeline
+        yield None
+
+
+@contextmanager
+def otel_pipeline_span(project_name: str, pipeline_run_id: str):
+    """Wrap an entire pipeline run so all LLM spans share a session and project tag.
+
+    Uses ``session_id`` for Phoenix session grouping and ``metadata`` for filtering.
+    No-op when Phoenix is not connected.
+    """
+    if not _phoenix_connected:
+        yield None
+        return
+
+    try:
+        from openinference.instrumentation import using_attributes
+
+        with using_attributes(
+            session_id=pipeline_run_id,
+            metadata={"project_name": project_name, "pipeline_run_id": pipeline_run_id},
+            tags=[f"project:{project_name}"],
+        ):
+            yield
+    except Exception:
+        yield None
+
+
 # ---------------------------------------------------------------------------
 # Gemini traced wrapper
 # ---------------------------------------------------------------------------
@@ -522,6 +633,86 @@ def traced_gemini_generate(
         except Exception as e:
             last_exc = e
             if attempt < MAX_LLM_RETRIES and _is_retryable_gemini(e):
+                delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
+                print(
+                    f"  Retryable error (attempt {attempt + 1}/{MAX_LLM_RETRIES}):"
+                    f" {type(e).__name__}"
+                )
+                print(f"  Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                continue
+
+            # Non-retryable or retries exhausted
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.success = False
+            trace.error = str(e)
+            trace.retries = attempt
+            if tracer:
+                tracer.record(trace)
+            raise
+
+    # Safety net (should not reach here)
+    raise last_exc  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Claude traced wrapper
+# ---------------------------------------------------------------------------
+
+
+def traced_claude_generate(
+    client,
+    *,
+    model: str,
+    messages: list,
+    max_tokens: int,
+    temperature: float = 0.2,
+    phase: str,
+    clip_id: str | None = None,
+    tracer: "ProjectTracer | None" = None,
+    prompt_chars: int = 0,
+):
+    """Wrapper around client.messages.create with retry and tracing.
+
+    Mirrors ``traced_gemini_generate`` for the Anthropic API. Returns the full
+    ``anthropic.types.Message`` response — callers extract ``.content[0].text``.
+    """
+    start = time.time()
+    trace = LLMCallTrace(
+        phase=phase,
+        provider="claude",
+        model=model,
+        clip_id=clip_id,
+        prompt_chars=prompt_chars,
+    )
+
+    last_exc = None
+    for attempt in range(MAX_LLM_RETRIES + 1):
+        try:
+            response = client.messages.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            trace.duration_sec = round(time.time() - start, 2)
+            trace.retries = attempt
+
+            # Extract token usage from Anthropic response
+            if hasattr(response, "usage") and response.usage:
+                trace.input_tokens = response.usage.input_tokens or 0
+                trace.output_tokens = response.usage.output_tokens or 0
+                trace.total_tokens = trace.input_tokens + trace.output_tokens
+            trace.estimated_cost_usd = estimate_cost(model, trace.input_tokens, trace.output_tokens)
+            trace.success = True
+
+            if tracer:
+                tracer.record(trace)
+            return response
+
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_LLM_RETRIES and _is_retryable_anthropic(e):
                 delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
                 print(
                     f"  Retryable error (attempt {attempt + 1}/{MAX_LLM_RETRIES}):"

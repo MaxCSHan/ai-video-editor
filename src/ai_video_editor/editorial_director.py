@@ -219,7 +219,7 @@ def run_editorial_review(
         get_tool_declarations,
     )
     from .render import generate_contact_strip
-    from .tracing import estimate_cost, otel_session_span, otel_tool_span
+    from .tracing import estimate_cost, otel_phase_span, otel_session_span, otel_tool_span
 
     budget = ReviewBudget.from_config(review_config)
 
@@ -352,11 +352,12 @@ def run_editorial_review(
         # Call Gemini with tools
         turn_start = time.monotonic()
         try:
-            response = client.models.generate_content(
-                model=review_config.model,
-                contents=messages,
-                config=turn_config,
-            )
+            with otel_phase_span("editorial_review", stage="director", provider="gemini"):
+                response = client.models.generate_content(
+                    model=review_config.model,
+                    contents=messages,
+                    config=turn_config,
+                )
         except Exception as e:
             log.error("Gemini API error during review: %s", e)
             review_log.convergence_reason = "error"
@@ -630,7 +631,7 @@ def run_director_chat(
         get_chat_tool_declarations,
     )
     from .render import generate_contact_strip
-    from .tracing import estimate_cost, otel_session_span, otel_tool_span
+    from .tracing import estimate_cost, otel_phase_span, otel_session_span, otel_tool_span
 
     if print_fn is None:
         print_fn = print
@@ -900,11 +901,12 @@ def run_director_chat(
 
             turn_start = time.monotonic()
             try:
-                response = client.models.generate_content(
-                    model=review_config.model,
-                    contents=messages,
-                    config=config,
-                )
+                with otel_phase_span("director_chat", stage="director", provider="gemini"):
+                    response = client.models.generate_content(
+                        model=review_config.model,
+                        contents=messages,
+                        config=config,
+                    )
             except Exception as e:
                 log.error("Gemini API error: %s", e)
                 print_fn(f"  [Error] API error: {e}")
