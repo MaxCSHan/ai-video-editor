@@ -215,118 +215,230 @@ graph LR
 
 ---
 
-### 4. Per-Section Editor (N sequential LLM calls)
+### 4. Per-Section Editor → Merge (concrete 3-section example)
 
-Each section is edited independently with focused goals. Sections run sequentially so each receives a narrative summary from all prior sections.
+This diagram shows the exact artifacts created and consumed by each LLM call, using the rose garden project (3 sections: garden, river park, restaurant) as a concrete example.
 
 ```mermaid
 graph TD
-    subgraph "Section 1 Inputs"
-        SN1["SectionNarrative<br/><i>section_goal<br/>must_include<br/>key_clips</i>"]
-        CR1["Section 1 Clip Reviews<br/><i>full reviews + transcripts</i>"]
-        CD1["Creative Direction<br/><i>Tier 2+3 only<br/>(no global constraints)</i>"]
-    end
+    %% ── Shared artifacts (created before Phase 2) ──────────────
+    P1["<b>Phase 1 Reviews</b><br/>47 clip reviews with<br/>key_moments, usable_segments,<br/>content_type, audio"]
+    TX["<b>Transcripts</b><br/>per-clip speech text"]
+    BRIEF["<b>Creative Brief</b><br/>Tier 1: MUST INCLUDE entrance sign,<br/>event infos, flower close-ups, airplane<br/>Tier 2: intent, style, pacing<br/>Tier 3: people, activity, tone"]
 
-    subgraph "Section 1 LLM"
-        E1["Section 1 Editor<br/><i>temp: 0.3</i>"]
-    end
+    %% ── Section Grouping (deterministic) ───────────────────────
+    P1 --> SG["<b>Section Grouping</b><br/><i>deterministic</i>"]
+    SG --> SEC["<b>3 Sections</b><br/>S1: Garden (37 clips, 09:39-10:05)<br/>S2: River park (1 clip, 10:29)<br/>S3: Restaurant (9 clips, 11:00-11:45)"]
 
-    SN1 --> E1
-    CR1 --> E1
-    CD1 --> E1
+    %% ── Storyline Planner ──────────────────────────────────────
+    SEC --> SL
+    P1 -->|"condensed reviews<br/>grouped by section"| SL
+    BRIEF -->|"full brief<br/>(WITH constraints)"| SL
 
-    E1 --> SSB1["SectionStoryboard 1<br/><i>segments[]<br/>narrative_summary</i>"]
+    SL["<b>Storyline Planner</b><br/><i>LLM · temp 0.6</i>"]
 
-    SSB1 -->|"narrative_summary<br/>(2-3 sentences)"| CUM["Cumulative Context"]
+    SL --> PLAN["<b>SectionPlan</b><br/>title: 'Nostalgia and Hot Pot'<br/>story_concept: '...'<br/>hook_section_id: day1_scene1"]
 
-    subgraph "Section 2 Inputs"
-        SN2["SectionNarrative 2"]
-        CR2["Section 2 Clip Reviews"]
-        CD2["Creative Direction"]
-    end
+    SL --> SN1["<b>SectionNarrative 1</b> (Garden)<br/>goal: Establish garden atmosphere<br/>must_include: [entrance sign,<br/>  event infos, flower close-ups, airplane]<br/>key_clips: [IMG_9816, IMG_9799, IMG_9813]<br/>arc_phase: opening_context<br/>energy: high<br/>target: 35s"]
 
-    CUM --> E2["Section 2 Editor"]
-    SN2 --> E2
-    CR2 --> E2
-    CD2 --> E2
+    SL --> SN2["<b>SectionNarrative 2</b> (River park)<br/>goal: Personal reflection, childhood memory<br/>must_include: []<br/>key_clips: [IMG_9837]<br/>arc_phase: rising_action<br/>energy: low<br/>target: 20s"]
 
-    E2 --> SSB2["SectionStoryboard 2"]
-    SSB2 -->|narrative_summary| CUM2["Cumulative Context 1+2"]
+    SL --> SN3["<b>SectionNarrative 3</b> (Restaurant)<br/>goal: Capture the hotpot experience<br/>must_include: []<br/>key_clips: [IMG_9839, IMG_9847]<br/>arc_phase: experience<br/>energy: medium<br/>target: 30s"]
 
-    CUM2 --> E3["Section N Editor"]
-    E3 --> SSBN["SectionStoryboard N"]
+    %% ── Hook ───────────────────────────────────────────────────
+    PLAN -->|"story_concept<br/>hook_description"| HOOK
+    P1 -->|"high-value clips<br/>from ALL sections"| HOOK
 
-    style E1 fill:#fff3e0
-    style E2 fill:#fff3e0
-    style E3 fill:#fff3e0
+    HOOK["<b>Hook Creator</b><br/><i>LLM · temp 0.3</i>"]
+    HOOK --> HSB["<b>HookStoryboard</b><br/>4 segments, 12s<br/>[0] IMG_9799 airplane 3s<br/>[1] IMG_9803 roses 3s<br/>[2] IMG_9837 plaza 3s<br/>[3] IMG_9847 hotpot 3s"]
+
+    %% ── Section 1: Garden ──────────────────────────────────────
+    SN1 -->|"section_goal<br/>must_include<br/>key_clips"| E1
+    P1 -->|"37 garden clip<br/>reviews (full)"| E1
+    TX -->|"garden clip<br/>transcripts"| E1
+    BRIEF -->|"creative direction<br/>(NO constraints)"| E1
+
+    E1["<b>Section 1 Editor</b><br/>Garden<br/><i>LLM · temp 0.3</i>"]
+
+    E1 --> SSB1["<b>SectionStoryboard 1</b><br/>8 segments, 37s<br/>narrative_summary:<br/>'Opens with entrance sign and<br/>festival map. Flower close-ups<br/>showcase rose varieties. Airplane<br/>flyover provides dramatic moment.'"]
+
+    %% ── Section 2: River park ──────────────────────────────────
+    SN2 -->|"section_goal<br/>must_include: []<br/>key_clips"| E2
+    P1 -->|"1 river park<br/>clip review"| E2
+    TX -->|"river park<br/>transcript"| E2
+    BRIEF -->|"creative direction<br/>(NO constraints)"| E2
+    SSB1 -->|"narrative_summary<br/>from Section 1"| E2
+
+    E2["<b>Section 2 Editor</b><br/>River park<br/><i>LLM · temp 0.3</i>"]
+
+    E2 --> SSB2["<b>SectionStoryboard 2</b><br/>5 segments, 23s<br/>narrative_summary:<br/>'Max shares childhood memory of<br/>learning to ride a bike at the<br/>riverside plaza near the garden.'"]
+
+    %% ── Section 3: Restaurant ──────────────────────────────────
+    SN3 -->|"section_goal<br/>must_include: []<br/>key_clips"| E3
+    P1 -->|"9 restaurant<br/>clip reviews"| E3
+    TX -->|"restaurant<br/>transcripts"| E3
+    BRIEF -->|"creative direction<br/>(NO constraints)"| E3
+    SSB1 -->|"narrative_summary<br/>from Section 1"| E3
+    SSB2 -->|"narrative_summary<br/>from Section 2"| E3
+
+    E3["<b>Section 3 Editor</b><br/>Restaurant<br/><i>LLM · temp 0.3</i>"]
+
+    E3 --> SSB3["<b>SectionStoryboard 3</b><br/>8 segments, 37s<br/>narrative_summary:<br/>'Arrives at the famous hotpot<br/>restaurant. Raw beef close-ups<br/>and boiling pot create appetite.'"]
+
+    %% ── Merge ──────────────────────────────────────────────────
+    HSB --> MERGE
+    SSB1 --> MERGE
+    SSB2 --> MERGE
+    SSB3 --> MERGE
+    PLAN --> MERGE
+
+    MERGE["<b>Merge</b><br/><i>deterministic</i><br/>re-index segments 0..N<br/>build story_arc from narratives<br/>merge cast, discarded, music"]
+
+    MERGE --> FINAL["<b>EditorialStoryboard</b><br/>27 segments, ~118s<br/>story_arc: [Hook, Garden,<br/>  River park, Restaurant]<br/><i>same model as Story Mode</i>"]
+
+    %% ── Styling ────────────────────────────────────────────────
+    style SG fill:#e1f5fe,stroke:#0288d1
+    style SL fill:#fff3e0,stroke:#f57c00
+    style HOOK fill:#fff3e0,stroke:#f57c00
+    style E1 fill:#fff3e0,stroke:#f57c00
+    style E2 fill:#fff3e0,stroke:#f57c00
+    style E3 fill:#fff3e0,stroke:#f57c00
+    style MERGE fill:#e1f5fe,stroke:#0288d1
+    style FINAL fill:#e8f5e9,stroke:#388e3c
+    style SN1 fill:#fce4ec,stroke:#c62828
+    style SN2 fill:#fce4ec,stroke:#c62828
+    style SN3 fill:#fce4ec,stroke:#c62828
+    style HSB fill:#f3e5f5,stroke:#7b1fa2
+    style SSB1 fill:#f3e5f5,stroke:#7b1fa2
+    style SSB2 fill:#f3e5f5,stroke:#7b1fa2
+    style SSB3 fill:#f3e5f5,stroke:#7b1fa2
+    style PLAN fill:#f3e5f5,stroke:#7b1fa2
+    style SEC fill:#e1f5fe,stroke:#0288d1
 ```
 
-**What each section editor receives**:
+**Color legend**: Blue = deterministic | Orange = LLM call | Pink = LLM output (SectionNarrative) | Purple = LLM output (artifacts) | Green = final output
 
-| Input | Source | Details |
-|-------|--------|---------|
-| `section_narrative.section_goal` | Storyline output | "Establish the garden atmosphere with entrance shots and flower close-ups" |
-| `section_narrative.must_include` | Storyline output | Only constraints this section CAN satisfy |
-| `section_narrative.must_exclude` | Storyline output | Only avoidances relevant here |
-| `section_narrative.key_clips` | Storyline output | Specific clips to prioritize |
-| Section clip reviews | Phase 1 reviews, filtered | Full reviews with key_moments, usable_segments |
-| Section transcripts | Transcription, filtered | Speech text for natural cut points |
-| Creative direction | Brief (Tier 2+3) | Intent, style, pacing — NO global constraints |
-| Cumulative narratives | Prior section outputs | "Section 1 covered the garden entrance and flower beds..." |
-| Style supplement | Style preset | Additional creative guidance |
+### What each section editor actually receives in its prompt
 
-**Key instruction**: "Within YOUR section, order clips for the best aesthetic flow. B-roll, signs, and close-ups can go wherever they serve the narrative best. You are NOT bound to chronological order within this section."
+**Section 1 (Garden) — 37 clips, first to run:**
 
-**Output**: `SectionStoryboard`
+```
+## Your Section: Rose garden (day1_scene1)
+Narrative role: Establish the setting and sense of wonder
+Arc phase: opening_context
+Energy: high
+Target duration: ~35s
 
-| Field | Purpose |
-|-------|---------|
-| `segments[]` | Ordered segments with in_sec/out_sec timestamps |
-| `narrative_summary` | 2-3 sentences passed to next section as context |
-| `discarded[]` | Clips from this section not used, with reasons |
-| `cast[]` | People identified in this section |
-| `music_cue` | Music strategy for this section |
-| `editorial_reasoning` | Thinking process |
+**Section Goal**: Establish garden atmosphere with entrance shots,
+festival info, and a variety of flower close-ups. End with the
+dramatic airplane flyover as a transition moment.
 
----
+**MUST INCLUDE** (assigned to this section by the editor):
+  - the entrance sign of the rose garden
+  - event infos
+  - multiple different kinds of flower's close-up
+  - airplane fly through over the head
+
+**Key clips to prioritize**: IMG_9816, IMG_9799, IMG_9813, IMG_9804
+
+## Creative Direction                          ← Tier 2+3 only, NO constraints
+NORTH STAR: The viewer should feel the warmth of a relaxed holiday.
+PACING: balanced
+MUSIC: acoustic
+
+## Clips in This Section (37 clips)
+### IMG_9798 (5.0s) — ['landscape']
+  Key moment [2.0s]: Wide establishing shot (value: high, use: establishing)
+  Usable [0]: 0.0-5.0s (5.0s) — Wide landscape
+### IMG_9816 (8.0s) — ['establishing']
+  Key moment [3.0s]: Entrance sign with banner (value: high, use: establishing)
+  ...
+```
+
+**Section 2 (River park) — 1 clip, receives Section 1's summary:**
+
+```
+## Your Section: River park (day1_scene2)
+Narrative role: Personal reflection and childhood memory
+Arc phase: rising_action
+Energy: low
+Target duration: ~20s
+
+**Section Goal**: Personal reflection at the riverside plaza
+where Max learned to ride a bike as a child.
+
+                                          ← NO must_include (none assigned here)
+
+**Key clips to prioritize**: IMG_9837
+
+## Creative Direction
+NORTH STAR: The viewer should feel the warmth of a relaxed holiday.
+
+## Story So Far (prior sections)
+
+**day1_scene1**: Opens with entrance sign and festival map.
+Flower close-ups showcase rose varieties including reds, pinks,
+and lavenders. Airplane flyover provides dramatic moment.
+
+## Clips in This Section (1 clip)
+### IMG_9837 (42.0s) — ['landscape', 'talking_head']
+  Key moment [5.0s]: Childhood bike riding memory (value: high)
+  Usable [0]: 1.0-5.0s (4.0s) — Plaza establishing shot
+  Usable [1]: 9.0-25.0s (16.0s) — Narration about childhood
+  ...
+  Transcript: "This is the plaza where I learned to ride a bike..."
+```
+
+**Section 3 (Restaurant) — 9 clips, receives Sections 1+2 summaries:**
+
+```
+## Your Section: Restaurant (day1_scene3)
+Narrative role: Capture the hotpot dining experience
+Arc phase: experience
+Energy: medium
+Target duration: ~30s
+
+**Section Goal**: Capture the hotpot dining experience at the
+famous 牛老大 restaurant with food close-ups and conversation.
+
+                                          ← NO must_include (none assigned here)
+
+**Key clips to prioritize**: IMG_9839, IMG_9847
+
+## Creative Direction
+NORTH STAR: The viewer should feel the warmth of a relaxed holiday.
+
+## Story So Far (prior sections)
+
+**day1_scene1**: Opens with entrance sign and festival map.
+Flower close-ups showcase rose varieties. Airplane flyover
+provides dramatic moment.
+
+**day1_scene2**: Max shares childhood memory of learning to
+ride a bike at the riverside plaza near the garden.
+
+## Clips in This Section (9 clips)
+### IMG_9839 (12.0s) — ['action']
+  Key moment [3.0s]: Counter ordering (value: medium)
+  ...
+### IMG_9847 (60.0s) — ['action', 'talking_head']
+  Key moment [5.0s]: Beef swirling in hotpot (value: high)
+  ...
+  Transcript: "This is 牛老大, famous for their warm-bodied beef..."
+```
 
 ### 5. Merge (deterministic)
 
 Combines hook + all section storyboards into the final `EditorialStoryboard`.
 
-```mermaid
-graph LR
-    subgraph "Inputs"
-        H["HookStoryboard<br/><i>2-5 segments</i>"]
-        S1["SectionStoryboard 1<br/><i>segments, cast, discarded</i>"]
-        S2["SectionStoryboard 2"]
-        SN["SectionStoryboard N"]
-        SP["SectionPlan<br/><i>narratives, title, concept</i>"]
-    end
-
-    subgraph "Merge"
-        M["merge_section_storyboards()<br/><i>deterministic</i>"]
-    end
-
-    H --> M
-    S1 --> M
-    S2 --> M
-    SN --> M
-    SP --> M
-
-    M --> OUT["EditorialStoryboard<br/><i>same model as Story Mode</i>"]
-
-    style M fill:#e1f5fe
-```
-
 **Merge operations**:
-1. **Segments**: Hook first, then each section in order → re-index 0..N sequentially
-2. **Story arc**: One `StoryArcSection` per section (title from narrative_role, description from narrative_summary)
-3. **Cast**: Union all, deduplicate by normalized name
-4. **Discarded**: Union all
-5. **Music plan**: Collect all section music cues
-6. **Editorial reasoning**: Concatenate `[Hook] ...`, `[day1_scene1] ...`, `[day1_scene2] ...`
-7. **Metadata**: title, style, story_concept from SectionPlan; duration computed from segments
+1. **Segments**: Hook segments [0-3], then Section 1 [4-11], Section 2 [12-16], Section 3 [17-24] → re-indexed 0..24
+2. **Story arc**: 4 entries: "Opening Hook", "Garden atmosphere", "Personal reflection", "Hotpot experience"
+3. **Cast**: Union all section casts, deduplicate by normalized name
+4. **Discarded**: Union all section discarded clips
+5. **Music plan**: Collect music cues from each section
+6. **Editorial reasoning**: Concatenate `[Hook] ...`, `[day1_scene1] ...`, `[day1_scene2] ...`, `[day1_scene3] ...`
+7. **Metadata**: title, style, story_concept from SectionPlan; duration from segment sum
 
 **Output**: Standard `EditorialStoryboard` — fully backward compatible with Story Mode output. All downstream code (render, rough cut, FCPXML, director review, eval) works unchanged.
 
