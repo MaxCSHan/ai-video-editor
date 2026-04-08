@@ -989,7 +989,7 @@ def save_creative_brief(project_root: Path, brief) -> Path:
     return out
 
 
-def format_brief_for_prompt(brief, phase: str = "phase2") -> str:
+def format_brief_for_prompt(brief, phase: str = "phase2", skip_constraints: bool = False) -> str:
     """Format a CreativeBrief into a three-tier prompt block.
 
     Hierarchy:
@@ -1002,37 +1002,54 @@ def format_brief_for_prompt(brief, phase: str = "phase2") -> str:
     Args:
         brief: CreativeBrief instance (or dict for legacy).
         phase: "phase1" or "phase2" — controls which fields are included.
+        skip_constraints: If True, omit Tier 1 (MUST-INCLUDE/MUST-EXCLUDE).
+            Used in Timeline Mode section calls where constraints are assigned
+            per-section by the storyline planner instead.
     """
     # Dict path — upgrade v2 dicts to CreativeBrief, delegate v1 to legacy function
     if isinstance(brief, dict):
         if brief.get("brief_version", 1) >= 2:
             from .models import CreativeBrief
 
-            return format_brief_for_prompt(CreativeBrief.model_validate(brief), phase=phase)
+            return format_brief_for_prompt(
+                CreativeBrief.model_validate(brief),
+                phase=phase,
+                skip_constraints=skip_constraints,
+            )
+        if skip_constraints:
+            legacy = dict(brief)
+            legacy.pop("highlights", None)
+            legacy.pop("avoid", None)
+            return format_context_for_prompt(legacy)
         return format_context_for_prompt(brief)
 
     # v1 brief with no enhanced fields — use legacy formatting
     if not brief.has_creative_direction():
-        return format_context_for_prompt(brief.to_legacy_dict())
+        legacy = brief.to_legacy_dict()
+        if skip_constraints:
+            legacy.pop("highlights", None)
+            legacy.pop("avoid", None)
+        return format_context_for_prompt(legacy)
 
     lines: list[str] = []
 
     # --- Tier 1: CONSTRAINTS ---
-    constraints = []
-    if brief.highlights:
-        constraints.append(f"- MUST INCLUDE: {brief.highlights}")
-    if brief.avoid:
-        constraints.append(f"- MUST EXCLUDE: {brief.avoid}")
+    if not skip_constraints:
+        constraints = []
+        if brief.highlights:
+            constraints.append(f"- MUST INCLUDE: {brief.highlights}")
+        if brief.avoid:
+            constraints.append(f"- MUST EXCLUDE: {brief.avoid}")
 
-    if constraints:
-        lines.append(
-            "FILMMAKER CONSTRAINTS (non-negotiable — violating these makes the edit unusable):"
-        )
-        lines.extend(constraints)
-        lines.append(
-            "- If you cannot satisfy a constraint, you MUST explain why in editorial_reasoning."
-        )
-        lines.append("")
+        if constraints:
+            lines.append(
+                "FILMMAKER CONSTRAINTS (non-negotiable — violating these makes the edit unusable):"
+            )
+            lines.extend(constraints)
+            lines.append(
+                "- If you cannot satisfy a constraint, you MUST explain why in editorial_reasoning."
+            )
+            lines.append("")
 
     # --- Tier 2: CREATIVE DIRECTION ---
     # Freeform passthrough: if the filmmaker provided a raw creative direction

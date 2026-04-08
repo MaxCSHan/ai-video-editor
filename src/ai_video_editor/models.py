@@ -570,6 +570,22 @@ class SectionNarrative(BaseModel):
     )
     energy: str = Field(description="high, medium, or low")
     target_duration_sec: float = Field(default=0, description="Suggested duration for this section")
+    section_goal: str = Field(
+        default="",
+        description="Specific editorial goal for this section — what it must accomplish",
+    )
+    must_include: list[str] = Field(
+        default=[],
+        description="Filmmaker constraints assigned to this section (only what this section can satisfy)",
+    )
+    must_exclude: list[str] = Field(
+        default=[],
+        description="Things to avoid in this section",
+    )
+    key_clips: list[str] = Field(
+        default=[],
+        description="Specific clip_ids that should be prioritized in this section",
+    )
 
 
 class SectionPlan(BaseModel):
