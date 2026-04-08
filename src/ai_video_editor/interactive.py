@@ -773,9 +773,23 @@ def _new_project_flow(cfg):
 
     style = questionary.select(
         "Video style:",
-        choices=["vlog", "travel-vlog", "family-video", "event-recap", "cinematic", "short-form"],
+        choices=[
+            "vlog",
+            "travel-vlog",
+            "family-video",
+            "event-recap",
+            "cinematic",
+            "short-form",
+            questionary.Choice("Custom...", value="__custom__"),
+        ],
         style=VX_STYLE,
     ).ask()
+    if style == "__custom__":
+        style = questionary.text(
+            "Describe your video style:",
+            instruction="(e.g., 'lo-fi daily journal', 'drone landscape showcase')",
+            style=VX_STYLE,
+        ).ask()
     if not style:
         return
 
@@ -2617,21 +2631,45 @@ def _settings_flow(cfg):
         else {"provider": "gemini", "style": "vlog"}
     )
 
+    provider_choices = ["gemini", "claude"]
+    provider_default = ws.get("provider", "gemini")
+    if provider_default not in provider_choices:
+        provider_default = "gemini"
+
     provider = questionary.select(
         "Default AI provider:",
-        choices=["gemini", "claude"],
-        default=ws.get("provider", "gemini"),
+        choices=provider_choices,
+        default=provider_default,
         style=VX_STYLE,
     ).ask()
     if provider:
         ws["provider"] = provider
 
+    style_choices = [
+        "vlog",
+        "travel-vlog",
+        "family-video",
+        "event-recap",
+        "cinematic",
+        "short-form",
+        questionary.Choice("Custom...", value="__custom__"),
+    ]
+    style_default = ws.get("style", "vlog")
+    if style_default not in [c if isinstance(c, str) else c.value for c in style_choices]:
+        style_default = "vlog"
+
     style = questionary.select(
         "Default video style:",
-        choices=["vlog", "travel-vlog", "family-video", "event-recap", "cinematic", "short-form"],
-        default=ws.get("style", "vlog"),
+        choices=style_choices,
+        default=style_default,
         style=VX_STYLE,
     ).ask()
+    if style == "__custom__":
+        style = questionary.text(
+            "Describe your video style:",
+            instruction="(e.g., 'lo-fi daily journal', 'drone landscape showcase')",
+            style=VX_STYLE,
+        ).ask()
     if style:
         ws["style"] = style
 
