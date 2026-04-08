@@ -30,11 +30,10 @@ Review date: 2026-04-09. Applied the five design principles from the Timeline Mo
 
 ## 2. Bad Context Management
 
-### 2.1 Initial message dumps all clips
+### 2.1 ~~Initial message dumps all clips~~ — INTENTIONAL
 - **Files**: `director_prompts.py:199-240` (`build_initial_message`)
-- **Severity**: Medium
-- **Problem**: The "source material digest" lists ALL clips with usable segment counts and unused key moments (up to 10). For a 50-clip project, this is significant token waste — most clips are irrelevant to the review task.
-- **Fix**: Show only clips that: (a) have unused high-value moments, (b) are mentioned in user constraints, or (c) are adjacent to problematic segments. Filter by relevance, not enumerate everything.
+- **Severity**: N/A — by design
+- **Rationale**: The director agent needs visibility into ALL available footage to make informed decisions about adding, swapping, or expanding coverage. Filtering clips would limit the agent's flexibility — it can't suggest "add this unused high-value moment from clip X" if it doesn't know clip X exists. The token cost is acceptable given the decision quality improvement.
 
 ### 2.2 Chat session rebuild truncates tool results to 100 chars
 - **Files**: `editorial_director.py:1335` (`_rebuild_messages_from_session`)
