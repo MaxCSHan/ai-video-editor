@@ -112,24 +112,28 @@ def render_markdown(sb: EditorialStoryboard) -> str:
 def _extract_thumbnail(source_path: Path, timestamp_sec: float, output_path: Path) -> bool:
     if output_path.exists():
         return True
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(timestamp_sec),
-            "-i",
-            str(source_path),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "5",
-            str(output_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(timestamp_sec),
+                "-i",
+                str(source_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "5",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _resolve_clip_source(clip_id: str, clips_dir: Path) -> Path | None:
@@ -163,32 +167,36 @@ def _extract_thumbnail_to_bytes(
     source_path: Path, timestamp_sec: float, width: int = THUMB_WIDTH, height: int = THUMB_HEIGHT
 ) -> bytes | None:
     """Extract a single frame as JPEG bytes, scaled to width×height."""
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(max(0, timestamp_sec)),
-            "-i",
-            str(source_path),
-            "-frames:v",
-            "1",
-            "-vf",
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
-            "-q:v",
-            "5",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "pipe:1",
-        ],
-        capture_output=True,
-    )
-    if result.returncode == 0 and result.stdout:
-        return result.stdout
-    return None
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(max(0, timestamp_sec)),
+                "-i",
+                str(source_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+                "-q:v",
+                "5",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+        return None
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def generate_contact_strip(
