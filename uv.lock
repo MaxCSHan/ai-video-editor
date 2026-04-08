@@ -32,6 +32,8 @@ scene = [
 ]
 tracing = [
     { name = "arize-phoenix" },
+    { name = "arize-phoenix-evals" },
+    { name = "openinference-instrumentation-anthropic" },
     { name = "openinference-instrumentation-google-genai" },
 ]
 whisper = [
@@ -41,9 +43,11 @@ whisper = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
-    { name = "arize-phoenix", marker = "extra == 'tracing'" },
+    { name = "arize-phoenix", marker = "extra == 'tracing'", specifier = ">=13.20" },
+    { name = "arize-phoenix-evals", marker = "extra == 'tracing'", specifier = ">=2.12" },
     { name = "google-genai", specifier = ">=1.0" },
     { name = "mlx-whisper", marker = "extra == 'whisper'" },
+    { name = "openinference-instrumentation-anthropic", marker = "extra == 'tracing'" },
     { name = "openinference-instrumentation-google-genai", marker = "extra == 'tracing'" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'" },
@@ -1659,6 +1663,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/64/8d/9b76b43e8b2ee2ccf1fe15b21c924095f9c0e4839919bcd4951b1c99c2ab/openinference_instrumentation-0.1.46.tar.gz", hash = "sha256:0b520002a1c682c525dcab49005c209bfd71611e8e4e4933b49779d5e899e6db", size = 23937, upload-time = "2026-03-04T10:13:48.883Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/25/d1/f6668492152a4180492044313e2dc427fbc237904f6bb1629abd030e3469/openinference_instrumentation-0.1.46-py3-none-any.whl", hash = "sha256:f7b63ccd5f93ce82e4e40035c9faa6b021984cbe06ad791f4cf033551533bc48", size = 30124, upload-time = "2026-03-04T10:13:47.613Z" },
+]
+
+[[package]]
+name = "openinference-instrumentation-anthropic"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "openinference-instrumentation" },
+    { name = "openinference-semantic-conventions" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-instrumentation" },
+    { name = "opentelemetry-semantic-conventions" },
+    { name = "typing-extensions" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/15/8f/e99ec5a162024f9034aeeeb135b2acd07edd3aa6794f924fa9437bf9fd15/openinference_instrumentation_anthropic-1.0.0.tar.gz", hash = "sha256:e6d7aa4fac5f6851eae2510a1b4b8299ee90dfef1c9364f380c4f7f14d2e454b", size = 15635, upload-time = "2026-03-06T06:00:43.525Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/3a/7495fb013a38ecdcd5527d3d4b764ceed170248c248b2356255523ab7b17/openinference_instrumentation_anthropic-1.0.0-py3-none-any.whl", hash = "sha256:ad2209d4006751af3e86fcc8ef1acaf94853ddb46fdd4310638500dedb6f544b", size = 18873, upload-time = "2026-03-06T06:00:41.86Z" },
 ]
 
 [[package]]

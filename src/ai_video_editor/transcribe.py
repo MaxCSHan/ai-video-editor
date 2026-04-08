@@ -277,7 +277,7 @@ def _transcribe_short_clip_gemini(
     from google.genai import types
 
     from .models import GeminiTranscript
-    from .tracing import traced_gemini_generate
+    from .tracing import otel_phase_span, traced_gemini_generate
 
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
@@ -301,28 +301,29 @@ def _transcribe_short_clip_gemini(
 
     prompt = _build_gemini_prompt(speaker_context)
 
-    response = traced_gemini_generate(
-        client,
-        model=cfg.gemini_model,
-        contents=[
-            types.Content(
-                parts=[
-                    types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
-                    types.Part.from_text(text=prompt),
-                ]
-            )
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-            response_schema=GeminiTranscript,
-        ),
-        phase="transcribe",
-        clip_id=clip_id,
-        tracer=tracer,
-        num_video_files=1,
-        prompt_chars=len(prompt),
-    )
+    with otel_phase_span("transcribe", stage="transcription", provider="gemini", clip_id=clip_id):
+        response = traced_gemini_generate(
+            client,
+            model=cfg.gemini_model,
+            contents=[
+                types.Content(
+                    parts=[
+                        types.Part.from_uri(file_uri=file_uri, mime_type="video/mp4"),
+                        types.Part.from_text(text=prompt),
+                    ]
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=GeminiTranscript,
+            ),
+            phase="transcribe",
+            clip_id=clip_id,
+            tracer=tracer,
+            num_video_files=1,
+            prompt_chars=len(prompt),
+        )
 
     gemini_result = getattr(response, "parsed", None)
     if gemini_result is None:
@@ -352,7 +353,7 @@ def _transcribe_single_chunk_gemini(
     from google.genai import types
 
     from .models import GeminiTranscript
-    from .tracing import traced_gemini_generate
+    from .tracing import otel_phase_span, traced_gemini_generate
 
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
@@ -362,28 +363,32 @@ def _transcribe_single_chunk_gemini(
 
     prompt = _build_gemini_prompt(speaker_context)
 
-    response = traced_gemini_generate(
-        client,
-        model=cfg.gemini_model,
-        contents=[
-            types.Content(
-                parts=[
-                    types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
-                    types.Part.from_text(text=prompt),
-                ]
-            )
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-            response_schema=GeminiTranscript,
-        ),
-        phase="transcribe",
+    with otel_phase_span(
+        "transcribe", stage="transcription", provider="gemini",
         clip_id=f"{clip_id_tag}/{chunk_label}",
-        tracer=tracer,
-        num_video_files=1,
-        prompt_chars=len(prompt),
-    )
+    ):
+        response = traced_gemini_generate(
+            client,
+            model=cfg.gemini_model,
+            contents=[
+                types.Content(
+                    parts=[
+                        types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"),
+                        types.Part.from_text(text=prompt),
+                    ]
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=GeminiTranscript,
+            ),
+            phase="transcribe",
+            clip_id=f"{clip_id_tag}/{chunk_label}",
+            tracer=tracer,
+            num_video_files=1,
+            prompt_chars=len(prompt),
+        )
 
     gemini_result = getattr(response, "parsed", None)
     if gemini_result is None:

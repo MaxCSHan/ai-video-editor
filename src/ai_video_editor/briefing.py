@@ -264,7 +264,7 @@ def run_quick_scan(
     from google.genai import types
 
     from .models import QuickScanResult
-    from .tracing import traced_gemini_generate
+    from .tracing import otel_phase_span, traced_gemini_generate
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -329,20 +329,21 @@ def run_quick_scan(
     )
 
     print(f"  Running quick scan ({gemini_model})...")
-    response = traced_gemini_generate(
-        client,
-        model=gemini_model,
-        contents=[types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])],
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            response_mime_type="application/json",
-            response_schema=QuickScanResult,
-        ),
-        phase="briefing_scan",
-        tracer=tracer,
-        num_video_files=len(video_parts),
-        prompt_chars=len(prompt),
-    )
+    with otel_phase_span("briefing_scan", stage="briefing", provider="gemini"):
+        response = traced_gemini_generate(
+            client,
+            model=gemini_model,
+            contents=[types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                response_mime_type="application/json",
+                response_schema=QuickScanResult,
+            ),
+            phase="briefing_scan",
+            tracer=tracer,
+            num_video_files=len(video_parts),
+            prompt_chars=len(prompt),
+        )
 
     scan = QuickScanResult.model_validate_json(response.text)
     result = scan.model_dump()

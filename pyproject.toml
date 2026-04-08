@@ -27,6 +27,7 @@ tracing = [
     "arize-phoenix>=13.20",
     "arize-phoenix-evals>=2.12",
     "openinference-instrumentation-google-genai",
+    "openinference-instrumentation-anthropic",
 ]
 
 [project.scripts]

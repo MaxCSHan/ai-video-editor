@@ -44,6 +44,7 @@ def analyze_frame_batch(
     batch_index: int,
     total_batches: int,
     cfg: ClaudeConfig,
+    tracer=None,
 ) -> str:
     """Analyze a batch of frames (up to max_images_per_batch). Returns text analysis."""
     content = []
@@ -71,12 +72,19 @@ def analyze_frame_batch(
         }
     )
 
-    response = client.messages.create(
-        model=cfg.model,
-        max_tokens=cfg.max_tokens,
-        temperature=cfg.temperature,
-        messages=[{"role": "user", "content": content}],
-    )
+    from .tracing import otel_phase_span, traced_claude_generate
+
+    with otel_phase_span("descriptive_batch", stage="descriptive", provider="claude"):
+        response = traced_claude_generate(
+            client,
+            model=cfg.model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=cfg.max_tokens,
+            temperature=cfg.temperature,
+            phase="descriptive_batch",
+            tracer=tracer,
+            prompt_chars=sum(len(str(c.get("text", ""))) for c in content),
+        )
     return response.content[0].text
 
 
@@ -86,6 +94,7 @@ def synthesize_storyboard(
     video_info: dict,
     scenes: list[dict],
     cfg: ClaudeConfig,
+    tracer=None,
 ) -> str:
     """Combine batch analyses into a unified storyboard markdown."""
     duration_str = format_duration(video_info["duration_sec"])
@@ -113,12 +122,19 @@ def synthesize_storyboard(
         f"{storyboard_template}"
     )
 
-    response = client.messages.create(
-        model=cfg.model,
-        max_tokens=cfg.max_tokens * 2,
-        temperature=cfg.temperature,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    from .tracing import otel_phase_span, traced_claude_generate
+
+    with otel_phase_span("descriptive_synthesis", stage="descriptive", provider="claude"):
+        response = traced_claude_generate(
+            client,
+            model=cfg.model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=cfg.max_tokens * 2,
+            temperature=cfg.temperature,
+            phase="descriptive_synthesis",
+            tracer=tracer,
+            prompt_chars=len(prompt),
+        )
     return response.content[0].text
 
 
