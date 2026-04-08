@@ -42,8 +42,8 @@ graph TD
 
     CB -->|"speaker names"| TR
     CB -->|"Tier 1-3 prompt block"| P1
-    CB -->|"Tier 1-3 prompt block"| P2
-    CB -->|"Tier 3 preferences"| P3
+    CB -->|"Tier 1-3 prompt block<br/>(Call 2A only)"| P2
+    CB -->|"user_context_text<br/>(Call M1 only)"| P3
     SUPP -->|"phase1_supplement"| P1
     SUPP -->|"phase2_supplement"| P2
     SUPP -->|"phase3_prompt template"| P3
@@ -428,7 +428,7 @@ graph LR
     end
 
     subgraph "LLM Call"
-        P1LLM["<b>Phase 1 Review</b><br/><i>model: gemini-1.5-pro / claude</i><br/><i>schema: ClipReview</i>"]
+        P1LLM["<b>Phase 1 Review</b><br/><i>model: gemini-3-flash-preview<br/>or claude-sonnet-4</i><br/><i>temp: 0.2</i><br/><i>schema: ClipReview</i>"]
     end
 
     PROXY --> BUILD
@@ -466,22 +466,22 @@ graph TD
     TIMELINE --> C2A
     CAST --> C2A
 
-    C2A["<b>Call 2A: Editorial Reasoning</b><br/><i>model: gemini-1.5-pro</i><br/><i>temp: 0.3</i><br/><i>output: freeform text</i><br/>constraint checks, story concept,<br/>segment sequence, discarded clips"]
+    C2A["<b>Call 2A: Editorial Reasoning</b><br/><i>model: cfg.gemini.phase2<br/>(default: gemini-3-flash-preview)</i><br/><i>temp: 0.6</i><br/><i>output: freeform text</i><br/>constraint checks, story concept,<br/>segment sequence, discarded clips"]
 
-    C2A --> PLAN["<b>editorial_plan_v{N}.txt</b><br/>freeform editorial reasoning"]
+    C2A --> PLAN["<b>editorial_plan_{provider}_v{N}.txt</b><br/>freeform editorial reasoning"]
 
     %% ── Call 2A.5 ──────────────────────────────────────────────
-    PLAN -->|"editorial plan text"| C2A5
-    C2A5["<b>Call 2A.5: Structuring</b><br/><i>model: gemini-1.5-flash</i><br/><i>temp: 0.2</i><br/><i>schema: StoryPlan</i>"]
+    PLAN -->|"editorial plan text<br/>+ full clip ID list"| C2A5
+    C2A5["<b>Call 2A.5: Structuring</b><br/><i>model: cfg.gemini.structuring_model<br/>(default: gemini-3-flash-preview)</i><br/><i>temp: 0.2</i><br/><i>schema: StoryPlan</i><br/>NO style/brief — pure structuring"]
 
-    C2A5 --> SPLAN["<b>story_plan_v{N}.json</b><br/>title, style, story_concept,<br/>cast, story_arc,<br/>planned_segments[]:<br/>  clip_id, segment_index,<br/>  purpose, arc_phase,<br/>  audio_strategy"]
+    C2A5 --> SPLAN["<b>storyplan_{provider}_v{N}.json</b><br/>title, style, story_concept,<br/>cast, story_arc,<br/>planned_segments[]:<br/>  clip_id, segment_index,<br/>  purpose, arc_phase,<br/>  audio_strategy"]
 
     %% ── Call 2B ────────────────────────────────────────────────
     SPLAN -->|"story plan context<br/>(title, concept, pacing)"| C2B
     REVIEWS -->|"per-segment bounded<br/>time windows"| C2B
     TRANS2 -->|"per-segment inline<br/>transcripts"| C2B
 
-    C2B["<b>Call 2B: Assembly</b><br/><i>model: gemini-1.5-pro</i><br/><i>temp: 0.3</i><br/><i>schema: EditorialStoryboard</i>"]
+    C2B["<b>Call 2B: Assembly</b><br/><i>model: cfg.gemini.phase2<br/>(default: gemini-3-flash-preview)</i><br/><i>temp: 0.3</i><br/><i>schema: EditorialStoryboard</i><br/>NO style/brief — operates from StoryPlan"]
 
     C2B --> FINAL2["<b>EditorialStoryboard</b><br/>editorial_reasoning,<br/>title, style, story_concept,<br/>cast[], story_arc[],<br/>segments[] (precise in/out timestamps),<br/>discarded[], music_plan[],<br/>pacing_notes, technical_notes"]
 
@@ -508,23 +508,22 @@ graph TD
     SB["<b>EditorialStoryboard</b><br/>title, style, story_concept,<br/>cast, story_arc, segments[]"]
     TRANS3["<b>Transcripts</b><br/>per-clip (detect speech segments)"]
     CTX3["<b>CreativeBrief</b><br/><i>format_brief_for_prompt()</i>"]
-    P3TMPL["<b>StylePreset.phase3_prompt</b><br/><i>template with placeholders:</i><br/>{title}, {duration}, {style},<br/>{story_concept}, {cast},<br/>{story_arc}, {segments_table},<br/>{transcripts}, {user_context}"]
+    P3TMPL["<b>StylePreset.phase3_prompt</b><br/><i>(used in single-call fallback only,<br/>not in the split pipeline shown here)</i>"]
 
     %% ── Call M1 ────────────────────────────────────────────────
     SB -->|"segments table:<br/>index, clip_id, duration,<br/>purpose, audio_note,<br/>[HAS SPEECH] flag"| M1
     TRANS3 -->|"verify speech<br/>presence"| M1
     CTX3 --> M1
 
-    M1["<b>Call M1: Segment Analysis</b><br/><i>model: gemini-1.5-pro</i><br/><i>temp: 0.2</i><br/><i>schema: OverlayPlan</i>"]
+    M1["<b>Call M1: Segment Analysis</b><br/><i>model: cfg.gemini.model<br/>(default: gemini-3-flash-preview)</i><br/><i>temp: 0.2</i><br/><i>schema: OverlayPlan</i>"]
 
     M1 --> OPLAN["<b>OverlayPlan</b><br/>persona_recommendation<br/>persona_rationale<br/>eligible_segments[]:<br/>  segment_index, duration,<br/>  arc_phase, intent,<br/>  max_overlay_count"]
 
     %% ── Call M2 ────────────────────────────────────────────────
     SB --> M2
-    TRANS3 --> M2
     OPLAN -->|"eligible segments<br/>+ persona + tone"| M2
 
-    M2["<b>Call M2: Creative Text</b><br/><i>model: gemini-1.5-pro</i><br/><i>temp: 0.8 (creative variance)</i><br/><i>schema: OverlayDrafts</i><br/>Rules: ALL LOWERCASE,<br/>5-8 words, two-breath rule,<br/>ONLY scenery segments,<br/>lower_third position"]
+    M2["<b>Call M2: Creative Text</b><br/><i>model: cfg.gemini.model<br/>(default: gemini-3-flash-preview)</i><br/><i>temp: 0.8 (creative variance)</i><br/><i>schema: OverlayDrafts</i><br/>Rules: ALL LOWERCASE,<br/>5-8 words, two-breath rule,<br/>ONLY scenery segments,<br/>lower_third position"]
 
     M2 --> DRAFTS["<b>OverlayDrafts</b><br/>overlays[]:<br/>  segment_index, text,<br/>  appear_at, duration_sec,<br/>  word_count, arc_phase"]
 
