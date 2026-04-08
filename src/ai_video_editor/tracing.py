@@ -365,9 +365,24 @@ def connect_phoenix(url: str | None = None) -> bool:
         )
         otel_logger.setLevel(prev_level)
 
-        # Register span processor to rename "GenerateContent" → phase label
+        # Register span processor to rename "GenerateContent" → phase label.
+        # Try the returned provider first, fall back to the global SDK provider.
+        _renamer = _PhaseSpanRenamer()
+        _added = False
         if tracer_provider and hasattr(tracer_provider, "add_span_processor"):
-            tracer_provider.add_span_processor(_PhaseSpanRenamer())
+            tracer_provider.add_span_processor(_renamer)
+            _added = True
+        if not _added:
+            try:
+                from opentelemetry import trace as _trace_api
+
+                _tp = _trace_api.get_tracer_provider()
+                # Unwrap ProxyTracerProvider if needed
+                real_tp = getattr(_tp, "_real_provider", _tp)
+                if hasattr(real_tp, "add_span_processor"):
+                    real_tp.add_span_processor(_renamer)
+            except Exception:
+                pass
 
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
@@ -573,7 +588,7 @@ def otel_phase_span(
         if extra_tags:
             tags.extend(extra_tags)
 
-        # Build a human-readable label for the annotations column
+        # Build a human-readable label for span renaming + metadata
         name_parts = [phase]
         if stage:
             name_parts.append(stage)
@@ -581,10 +596,16 @@ def otel_phase_span(
             name_parts.append(clip_id)
         elif call:
             name_parts.append(call)
-        metadata["label"] = ":".join(name_parts)
+        label = ":".join(name_parts)
+        metadata["label"] = label
 
-        with using_attributes(metadata=metadata, tags=tags):
-            yield
+        # Set ContextVar so _PhaseSpanRenamer.on_start() can rename the span
+        token = _phase_label_var.set(label)
+        try:
+            with using_attributes(metadata=metadata, tags=tags):
+                yield
+        finally:
+            _phase_label_var.reset(token)
     except Exception:
         # Tracing should never break the pipeline
         yield None
@@ -626,36 +647,37 @@ def otel_pipeline_span(project_name: str, pipeline_run_id: str):
         _pipeline_ctx = {}
 
 
+import contextvars
+
+# ContextVar for phase label — set by otel_phase_span(), read by _PhaseSpanRenamer.
+# ContextVars propagate correctly within the same thread, so on_start() can read
+# the label set by the enclosing otel_phase_span() context manager.
+_phase_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "vx_phase_label", default=""
+)
+
+
 class _PhaseSpanRenamer:
-    """OTel SpanProcessor that renames auto-instrumented LLM spans.
+    """OTel SpanProcessor that renames auto-instrumented LLM spans on creation.
 
-    When the OpenInference instrumentor creates a ``GenerateContent`` span,
-    this processor reads the ``metadata`` attribute (injected by ``using_attributes``
-    in ``otel_phase_span``) and renames the span to a human-readable label like
-    ``phase1:review:IMG_9800``.
+    Reads the phase label from a ``ContextVar`` (set by ``otel_phase_span``)
+    and calls ``span.update_name()`` during ``on_start()`` while the span is
+    still mutable.  This turns ``GenerateContent`` into
+    ``phase1:review:IMG_9800`` in Phoenix.
 
-    Registered once in ``connect_phoenix()`` — never breaks the pipeline.
+    Registered once in ``connect_phoenix()``.
     """
 
     def on_start(self, span, parent_context=None):
-        pass  # nothing to do at start
-
-    def on_end(self, span):
         try:
-            attrs = span.attributes or {}
-            # OpenInference stores our metadata as "metadata" JSON string
-            raw = attrs.get("metadata")
-            if not raw:
-                return
-            import json
-
-            meta = json.loads(raw) if isinstance(raw, str) else raw
-            label = meta.get("label")
-            if label and hasattr(span, "_name"):
-                span._name = label  # ReadableSpan._name is the display name
+            label = _phase_label_var.get()
+            if label:
+                span.update_name(label)
         except Exception:
             pass
 
+    def on_end(self, span):
+        pass
     def shutdown(self):
         pass
 
