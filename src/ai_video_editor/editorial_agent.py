@@ -497,7 +497,10 @@ def _review_single_clip_gemini(
 
     from .models import ClipReview
 
-    with otel_phase_span("phase1", stage="review", provider="gemini", clip_id=clip_id):
+    with otel_phase_span(
+        "phase1", stage="review", provider="gemini", clip_id=clip_id,
+        model=cfg.model, temperature=cfg.temperature,
+    ):
         response = traced_gemini_generate(
             client,
             model=cfg.model,
@@ -777,7 +780,10 @@ def run_phase1_claude(
             from .tracing import otel_phase_span, traced_claude_generate
 
             print(f"    Reviewing with {cfg.model} ({len(frames_to_send)} frames)...")
-            with otel_phase_span("phase1", stage="review", provider="claude", clip_id=clip_id):
+            with otel_phase_span(
+                "phase1", stage="review", provider="claude", clip_id=clip_id,
+                model=cfg.model, temperature=cfg.temperature,
+            ):
                 response = traced_claude_generate(
                     client,
                     model=cfg.model,
@@ -1156,7 +1162,10 @@ def _run_phase2_split(
             contents_2a = reasoning_prompt
 
         with LLMSpinner("Editorial reasoning (Call 2A)", provider=provider):
-            with otel_phase_span("phase2a_reasoning", stage="storyboard", provider="gemini", call="2A"):
+            with otel_phase_span(
+                "phase2a_reasoning", stage="storyboard", provider="gemini", call="2A",
+                model=gemini_cfg.phase2, temperature=gemini_cfg.phase2_temperature,
+            ):
                 response_2a = traced_gemini_generate(
                     client,
                     model=gemini_cfg.phase2,
@@ -1181,7 +1190,10 @@ def _run_phase2_split(
         )
 
         with LLMSpinner("Plan structuring (Call 2A.5)", provider=provider):
-            with otel_phase_span("phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5"):
+            with otel_phase_span(
+                "phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5",
+                model=gemini_cfg.structuring_model, temperature=0.2,
+            ):
                 response_2a5 = traced_gemini_generate(
                     client,
                     model=gemini_cfg.structuring_model,
@@ -1237,7 +1249,10 @@ def _run_phase2_split(
             f"{len(story_plan.planned_segments)} segments)..."
         )
         with LLMSpinner("Precise assembly (Call 2B)", provider=provider):
-            with otel_phase_span("phase2b_assembly", stage="storyboard", provider="gemini", call="2B"):
+            with otel_phase_span(
+                "phase2b_assembly", stage="storyboard", provider="gemini", call="2B",
+                model=gemini_cfg.phase2, temperature=gemini_cfg.phase2b_temperature,
+            ):
                 response_2b = traced_gemini_generate(
                     client,
                     model=gemini_cfg.phase2,
