@@ -1,8 +1,8 @@
-"""Section grouping and merge for Divide & Conquer Phase 2.
+"""Section grouping and merge for Timeline Mode Phase 2.
 
-Groups clips into hierarchical sections (day → scene) using creation_time
-metadata and time-gap splitting. Provides deterministic merge of per-section
-storyboards into a single EditorialStoryboard.
+Date-only deterministic grouping (the only hard boundary). Scene splitting
+within each date is handled by the Scene Planner LLM. Provides deterministic
+merge of per-section storyboards into a single EditorialStoryboard.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from .models import (
     EditorialStoryboard,
     HookStoryboard,
     MusicCue,
+    ScenePlan,
     Section,
     SectionGroup,
     SectionPlan,
@@ -25,24 +26,22 @@ from .models import (
 
 
 # ---------------------------------------------------------------------------
-# Section grouping (deterministic)
+# Date grouping (deterministic — the only hard boundary)
 # ---------------------------------------------------------------------------
 
 
-def group_clips_into_sections(
+def group_clips_by_date(
     manifest: dict,
     clip_reviews: list[dict],
-    gap_threshold_minutes: float = 30.0,
 ) -> list[SectionGroup]:
-    """Group clips into hierarchical day → scene sections.
+    """Group clips by calendar date only.
 
-    Tier 1: group by date (from creation_time in manifest).
-    Tier 2: within each date, split by time gaps exceeding the threshold.
+    Each date becomes a SectionGroup with a single Section containing ALL clips
+    for that date. Scene splitting within dates is the Scene Planner LLM's job.
 
     Clips without creation_time are placed in an "unknown" group at the end.
     """
     clips_data = manifest.get("clips", [])
-    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
 
     # Parse creation_time and group by date
     date_groups: dict[str, list[dict]] = defaultdict(list)
@@ -67,9 +66,25 @@ def group_clips_into_sections(
     groups: list[SectionGroup] = []
     for day_idx, date_key in enumerate(sorted_dates, 1):
         day_clips = sorted(date_groups[date_key], key=lambda c: c.get("_parsed_dt", ""))
-        sections = _split_by_gap(day_clips, gap_threshold_minutes, day_idx, reviews_by_id)
+        clip_ids = [c.get("clip_id", "") for c in day_clips]
 
-        # Format label
+        # Build time range from first/last clip
+        time_range = ""
+        first_dt = day_clips[0].get("_parsed_dt")
+        last_dt = day_clips[-1].get("_parsed_dt")
+        if first_dt and last_dt:
+            time_range = f"{first_dt.strftime('%H:%M')}-{last_dt.strftime('%H:%M')}"
+
+        # One section per day — Scene Planner will subdivide
+        sections = [
+            Section(
+                section_id=f"day{day_idx}_all",
+                label="All clips",
+                clip_ids=clip_ids,
+                time_range=time_range,
+            )
+        ]
+
         try:
             dt = datetime.strptime(date_key, "%Y-%m-%d")
             label = f"Day {day_idx} — {dt.strftime('%b %d')}"
@@ -90,7 +105,7 @@ def group_clips_into_sections(
         day_idx = len(groups) + 1
         sections = [
             Section(
-                section_id=f"day{day_idx}_scene1",
+                section_id=f"day{day_idx}_all",
                 label="Unknown time",
                 clip_ids=[c.get("clip_id", "") for c in no_date],
                 activity="unknown",
@@ -105,120 +120,37 @@ def group_clips_into_sections(
             )
         )
 
-    # Label sections from review content
-    groups = label_sections_from_reviews(groups, clip_reviews)
     return groups
 
 
-def _split_by_gap(
-    day_clips: list[dict],
-    gap_minutes: float,
-    day_idx: int,
-    reviews_by_id: dict[str, dict],
-) -> list[Section]:
-    """Split a day's clips into sections by time gaps."""
-    if not day_clips:
-        return []
-
-    gap_seconds = gap_minutes * 60
-    sections: list[Section] = []
-    current_group: list[dict] = [day_clips[0]]
-
-    for i in range(1, len(day_clips)):
-        prev_dt = day_clips[i - 1].get("_parsed_dt")
-        curr_dt = day_clips[i].get("_parsed_dt")
-
-        if prev_dt and curr_dt:
-            # Account for previous clip's duration
-            prev_dur = day_clips[i - 1].get("duration_sec", 0)
-            gap = (curr_dt - prev_dt).total_seconds() - prev_dur
-            if gap > gap_seconds:
-                sections.append(_make_section(current_group, day_idx, len(sections) + 1))
-                current_group = []
-
-        current_group.append(day_clips[i])
-
-    if current_group:
-        sections.append(_make_section(current_group, day_idx, len(sections) + 1))
-
-    return sections
-
-
-def _make_section(clips: list[dict], day_idx: int, scene_idx: int) -> Section:
-    """Create a Section from a list of clip dicts."""
-    clip_ids = [c.get("clip_id", "") for c in clips]
-
-    # Build time range from first/last creation_time
-    time_range = ""
-    first_dt = clips[0].get("_parsed_dt")
-    last_dt = clips[-1].get("_parsed_dt")
-    if first_dt and last_dt:
-        time_range = f"{first_dt.strftime('%H:%M')}-{last_dt.strftime('%H:%M')}"
-
-    return Section(
-        section_id=f"day{day_idx}_scene{scene_idx}",
-        label=f"Scene {scene_idx}",
-        clip_ids=clip_ids,
-        time_range=time_range,
-    )
-
-
-def label_sections_from_reviews(
-    groups: list[SectionGroup],
-    clip_reviews: list[dict],
+def build_section_groups_from_scene_plan(
+    date_groups: list[SectionGroup],
+    scene_plan: ScenePlan,
 ) -> list[SectionGroup]:
-    """Enrich section labels using Phase 1 review content (content_type, key_moments)."""
-    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
+    """Replace date-only groups with Scene Planner's scene assignments.
 
-    for group in groups:
-        for section in group.sections:
-            # Collect content types and key moment descriptions from this section's clips
-            content_types: list[str] = []
-            descriptions: list[str] = []
+    Maps each scene from the ScenePlan back into the correct SectionGroup
+    by matching section_id prefixes (e.g., "day1_scene2" → day1).
+    """
+    groups_by_id = {g.group_id: g for g in date_groups}
 
-            for clip_id in section.clip_ids:
-                review = reviews_by_id.get(clip_id, {})
-                ct = review.get("content_type", [])
-                if isinstance(ct, list):
-                    content_types.extend(ct)
-                for km in review.get("key_moments", []):
-                    desc = km.get("description", "")
-                    if desc and km.get("editorial_value") in ("high", "medium"):
-                        descriptions.append(desc)
+    # Clear existing sections and replace with scene plan output
+    for g in date_groups:
+        g.sections = []
 
-            # Pick the best label from available data
-            label = _infer_label(content_types, descriptions, section.time_range)
-            if label:
-                section.activity = label
-                section.label = label
+    for section in scene_plan.sections:
+        # Extract day prefix from section_id (e.g., "day1_scene2" → "day1")
+        parts = section.section_id.split("_", 1)
+        day_id = parts[0] if parts else ""
 
-    return groups
+        if day_id in groups_by_id:
+            groups_by_id[day_id].sections.append(section)
+        elif date_groups:
+            # Fallback: put in last group
+            date_groups[-1].sections.append(section)
 
-
-def _infer_label(
-    content_types: list[str],
-    descriptions: list[str],
-    time_range: str,
-) -> str:
-    """Infer a human-readable section label from review content."""
-    # Use the most common non-generic content type
-    generic = {"b_roll", "establishing", "transition", "unknown"}
-    specific = [ct for ct in content_types if ct not in generic]
-
-    if descriptions:
-        # Use the shortest key moment description as the label
-        best = min(descriptions, key=len)
-        if len(best) <= 50:
-            return best
-
-    if specific:
-        # Use the most common specific content type
-        from collections import Counter
-
-        most_common = Counter(specific).most_common(1)[0][0]
-        return most_common.replace("_", " ").title()
-
-    return ""
+    # Remove empty groups (shouldn't happen, but defensive)
+    return [g for g in date_groups if g.sections]
 
 
 # ---------------------------------------------------------------------------

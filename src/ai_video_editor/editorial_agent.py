@@ -1017,19 +1017,22 @@ def _run_phase2_sections(
     from .briefing import format_brief_for_prompt
     from .editorial_prompts import (
         build_hook_prompt,
+        build_narrative_planner_prompt,
+        build_scene_planner_prompt,
         build_section_storyboard_prompt,
-        build_storyline_prompt,
         extract_cast_from_reviews,
     )
     from .models import (
         HookStoryboard,
+        ScenePlan,
         SectionPlan,
         SectionStoryboard,
     )
     from .render import render_html_preview, render_markdown
     from .section_grouping import (
+        build_section_groups_from_scene_plan,
         format_sections_for_display,
-        group_clips_into_sections,
+        group_clips_by_date,
         merge_section_storyboards,
     )
     from .tracing import LLMSpinner, traced_gemini_generate
@@ -1067,37 +1070,82 @@ def _run_phase2_sections(
             _highlights = user_context.get("highlights", "")
             _avoid = user_context.get("avoid", "")
 
-    # ── Section grouping (deterministic) ──────────────────────────────────
-    print("  [Sections] Grouping clips by date and time gaps...")
+    # ── Date grouping (deterministic — the only hard boundary) ─────────────
+    print("  [Dates] Grouping clips by date...")
     manifest_file = editorial_paths.master_manifest
     if not manifest_file.exists():
         raise RuntimeError(f"No manifest found: {manifest_file}")
     manifest_data = json.loads(manifest_file.read_text())
 
-    section_groups = group_clips_into_sections(
-        manifest_data,
-        clip_reviews,
-        gap_threshold_minutes=gemini_cfg.section_gap_minutes,
-    )
+    date_groups = group_clips_by_date(manifest_data, clip_reviews)
+    total_clips = sum(len(cid) for g in date_groups for s in g.sections for cid in [s.clip_ids])
+    print(f"  [Dates] {len(date_groups)} days, {total_clips} clips")
 
-    total_sections = sum(len(g.sections) for g in section_groups)
-    print(f"  [Sections] {len(section_groups)} days, {total_sections} sections")
-    print(format_sections_for_display(section_groups, clip_reviews))
-
-    # Save sections artifact
-    sections_json = [g.model_dump() for g in section_groups]
-    sections_path = editorial_paths.storyboard / "sections_latest.json"
     editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
-    sections_path.write_text(json.dumps(sections_json, indent=2))
 
     # ── Pre-processing ────────────────────────────────────────────────────
     cast = extract_cast_from_reviews(clip_reviews)
     reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
     all_transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
 
-    # ── Storyline LLM call (sees full reviews + constraints for distribution) ──
-    print(f"  [Storyline] Planning narrative arc across {total_sections} sections...")
-    storyline_prompt = build_storyline_prompt(
+    # ── Scene Planner LLM call (groups clips into scenes within each date) ──
+    print("  [Scene Planner] Identifying scenes within each date...")
+    scene_prompt = build_scene_planner_prompt(
+        date_groups=date_groups,
+        clip_reviews=clip_reviews,
+    )
+
+    with LLMSpinner("Scene planning", provider=provider):
+        response_scene = traced_gemini_generate(
+            client,
+            model=gemini_cfg.phase2,
+            contents=scene_prompt,
+            config=types.GenerateContentConfig(
+                temperature=gemini_cfg.phase2_temperature,
+                response_mime_type="application/json",
+                response_schema=ScenePlan,
+            ),
+            phase="phase2_scene_planner",
+            tracer=tracer,
+            prompt_chars=len(scene_prompt),
+        )
+    scene_plan = ScenePlan.model_validate_json(response_scene.text)
+    section_groups = build_section_groups_from_scene_plan(date_groups, scene_plan)
+
+    total_sections = sum(len(g.sections) for g in section_groups)
+    print(f"  [Scene Planner] {total_sections} scenes identified")
+    print(format_sections_for_display(section_groups, clip_reviews))
+
+    # Save scene plan artifact
+    scene_plan_path = editorial_paths.storyboard / "scene_plan_latest.json"
+    scene_plan_path.write_text(scene_plan.model_dump_json(indent=2))
+
+    # ── HITL 1: Review scene grouping ─────────────────────────────────────
+    if interactive:
+        try:
+            import questionary
+
+            if not questionary.confirm("Proceed with these scenes?", default=True).ask():
+                print("  Scene grouping not approved. Edit via: vx sections <project>")
+                # Reload if user edited sections externally
+                sections_path = editorial_paths.storyboard / "sections_latest.json"
+                if sections_path.exists():
+                    from .models import SectionGroup as _SG
+
+                    section_groups = [
+                        _SG.model_validate(g) for g in json.loads(sections_path.read_text())
+                    ]
+        except (ImportError, EOFError):
+            pass  # Non-interactive environment
+
+    # Save confirmed sections
+    sections_json = [g.model_dump() for g in section_groups]
+    sections_path = editorial_paths.storyboard / "sections_latest.json"
+    sections_path.write_text(json.dumps(sections_json, indent=2))
+
+    # ── Narrative Planner LLM call (arc + constraint distribution) ────────
+    print(f"  [Narrative] Planning story arc across {total_sections} scenes...")
+    narrative_prompt = build_narrative_planner_prompt(
         section_groups=section_groups,
         clip_reviews=clip_reviews,
         user_context_text=full_context_text,
@@ -1107,24 +1155,41 @@ def _run_phase2_sections(
         avoid=_avoid,
     )
 
-    with LLMSpinner("Storyline planning", provider=provider):
-        response_sl = traced_gemini_generate(
+    with LLMSpinner("Narrative planning", provider=provider):
+        response_narr = traced_gemini_generate(
             client,
             model=gemini_cfg.phase2,
-            contents=storyline_prompt,
+            contents=narrative_prompt,
             config=types.GenerateContentConfig(
                 temperature=gemini_cfg.phase2_temperature,
                 response_mime_type="application/json",
                 response_schema=SectionPlan,
             ),
-            phase="phase2_storyline",
+            phase="phase2_narrative_planner",
             tracer=tracer,
-            prompt_chars=len(storyline_prompt),
+            prompt_chars=len(narrative_prompt),
         )
-    section_plan = SectionPlan.model_validate_json(response_sl.text)
-    print(f'  [Storyline] "{section_plan.title}" — hook from {section_plan.hook_section_id}')
+    section_plan = SectionPlan.model_validate_json(response_narr.text)
+    print(f'  [Narrative] "{section_plan.title}" — hook from {section_plan.hook_section_id}')
 
-    # Save storyline artifact
+    # Display narrative plan
+    for sn in section_plan.section_narratives:
+        goal_str = f" — {sn.section_goal[:60]}" if sn.section_goal else ""
+        constraints_str = f" [must: {', '.join(sn.must_include)}]" if sn.must_include else ""
+        print(f"    {sn.section_id}: {sn.arc_phase}, {sn.energy}{goal_str}{constraints_str}")
+
+    # ── HITL 2: Review narrative plan ─────────────────────────────────────
+    if interactive:
+        try:
+            import questionary
+
+            if not questionary.confirm("Proceed with this narrative plan?", default=True).ask():
+                print("  Narrative plan not approved. Adjust briefing and re-run.")
+                return editorial_paths.storyboard / "sections_latest.json"
+        except (ImportError, EOFError):
+            pass
+
+    # Save narrative plan artifact
     storyline_path = editorial_paths.storyboard / "storyline_latest.json"
     storyline_path.write_text(section_plan.model_dump_json(indent=2))
 

@@ -604,6 +604,16 @@ class SectionPlan(BaseModel):
     constraint_satisfaction: str = Field(default="")
 
 
+class ScenePlan(BaseModel):
+    """Scene Planner LLM output: how clips group into scenes within each date."""
+
+    sections: list[Section] = Field(
+        description="Scenes identified across all dates, in chronological order. "
+        "Each scene groups clips that belong to the same activity or location."
+    )
+    reasoning: str = Field(default="", description="Overall grouping strategy and rationale")
+
+
 class SectionStoryboard(BaseModel):
     """Per-section LLM output: segments + narrative summary for context passing."""
 

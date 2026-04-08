@@ -667,9 +667,6 @@ def cmd_analyze(args, cfg: Config):
             cfg.gemini.use_timeline_mode = False
         # Otherwise: auto-detect from Creative Brief in run_phase2()
 
-        if getattr(args, "gap_minutes", None) is not None:
-            cfg.gemini.section_gap_minutes = args.gap_minutes
-
         # Disable split pipeline if --single flag is set
         if getattr(args, "single", False):
             cfg.gemini.use_split_pipeline = False
@@ -1052,7 +1049,6 @@ def cmd_sections(args, cfg: Config):
 
     ep = cfg.editorial_project(name)
     regroup = getattr(args, "regroup", False)
-    gap_minutes = getattr(args, "gap_minutes", None) or cfg.gemini.section_gap_minutes
 
     # Check for existing sections
     sections_path = ep.storyboard / "sections_latest.json"
@@ -1062,7 +1058,7 @@ def cmd_sections(args, cfg: Config):
         data = json.loads(sections_path.read_text())
         section_groups = [SectionGroup.model_validate(g) for g in data]
     else:
-        # Generate from manifest + reviews
+        # Generate date-only grouping from manifest
         manifest_file = ep.master_manifest
         if not manifest_file.exists():
             print(f"{RED}Error:{RESET} No manifest found. Run {BOLD}vx preprocess{RESET} first.")
@@ -1084,15 +1080,15 @@ def cmd_sections(args, cfg: Config):
                     reviews.append(json.loads(found[0].read_text()))
                     break
 
-        from .section_grouping import group_clips_into_sections
+        from .section_grouping import group_clips_by_date
 
-        section_groups = group_clips_into_sections(manifest, reviews, gap_minutes)
+        section_groups = group_clips_by_date(manifest, reviews)
 
         # Save
         ep.storyboard.mkdir(parents=True, exist_ok=True)
         sections_path.write_text(json.dumps([g.model_dump() for g in section_groups], indent=2))
         if regroup:
-            print(f"  {GREEN}Sections regrouped with {gap_minutes:.0f}min gap threshold{RESET}\n")
+            print(f"  {GREEN}Sections regrouped (date-only){RESET}\n")
 
     from .section_grouping import format_sections_for_display
 
@@ -2462,12 +2458,6 @@ def main():
         action="store_true",
         help="Story Mode: AI freely structures the narrative (default)",
     )
-    p_analyze.add_argument(
-        "--gap-minutes",
-        type=float,
-        metavar="N",
-        help="Time gap threshold for section splitting (default: 30 minutes)",
-    )
 
     # --- sections ---
     p_sections = sub.add_parser("sections", help="View or edit section grouping for a project")
@@ -2475,13 +2465,7 @@ def main():
     p_sections.add_argument(
         "--regroup",
         action="store_true",
-        help="Re-run section grouping from manifest (discards manual edits)",
-    )
-    p_sections.add_argument(
-        "--gap-minutes",
-        type=float,
-        metavar="N",
-        help="Time gap threshold for section splitting (default: 30 minutes)",
+        help="Re-run date grouping from manifest (discards manual edits)",
     )
 
     # --- review ---
