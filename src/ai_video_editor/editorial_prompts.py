@@ -956,6 +956,237 @@ def build_editorial_assembly_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Section-based Phase 2 — Divide & Conquer prompt builders
+# ---------------------------------------------------------------------------
+
+
+def build_storyline_prompt(
+    section_groups: list,
+    clip_reviews: list[dict],
+    user_context_text: str | None = None,
+    style: str = "vlog",
+    cast: list[dict] | None = None,
+) -> str:
+    """Build the storyline prompt: plan narrative arc across sections.
+
+    The LLM sees section summaries (not full clips) and creates a SectionPlan
+    with narrative roles, arc phases, target durations, and hook selection.
+    """
+    from .section_grouping import summarize_section_for_prompt
+
+    prompt = (
+        "You are an editorial director planning a vlog from trip footage.\n"
+        "The footage has been grouped into chronological sections. "
+        "Your job is to plan the narrative arc across these sections — "
+        "how the video flows, what role each section plays in the story, "
+        "and which section provides the best opening hook material.\n\n"
+        "IMPORTANT: Sections are in chronological order and the final video "
+        "MUST follow this order (except the hook, which can come from any section). "
+        "Your narrative assignments shape HOW each section is edited, "
+        "not WHETHER or WHEN it appears.\n"
+    )
+
+    # User context
+    if user_context_text:
+        prompt += f"\n## Filmmaker Context\n{user_context_text}\n"
+
+    # Cast
+    if cast:
+        prompt += "\n## Cast\n"
+        for c in cast:
+            prompt += (
+                f"- **{c.get('label', '?')}**: {c.get('description', '')} ({c.get('role', '')})\n"
+            )
+
+    # Section summaries
+    prompt += f"\n## Sections ({sum(len(g.sections) for g in section_groups)} total)\n\n"
+    for group in section_groups:
+        for section in group.sections:
+            prompt += summarize_section_for_prompt(group, section, clip_reviews)
+            prompt += "\n\n"
+
+    prompt += (
+        f"\nNow produce a SectionPlan for a {style}.\n\n"
+        "For each section, assign:\n"
+        "- narrative_role: what this section contributes to the overall story\n"
+        "- arc_phase: opening_context, rising_action, experience, climax, or closing_reflection\n"
+        "- energy: high, medium, or low\n"
+        "- target_duration_sec: how long this section should be in the final edit\n\n"
+        "Pick the section that has the most visually compelling material for the "
+        "opening hook (hook_section_id). The hook is a 10-15 second cinematic "
+        "opening that grabs attention before the chronological story begins.\n"
+    )
+
+    if user_context_text and ("must" in (user_context_text or "").lower()):
+        prompt += (
+            "\nThe filmmaker's MUST-INCLUDE and MUST-EXCLUDE constraints are "
+            "non-negotiable. State in constraint_satisfaction how you address each one.\n"
+        )
+
+    return prompt
+
+
+def build_hook_prompt(
+    high_value_clips: list[dict],
+    section_plan,
+    cast: list[dict] | None = None,
+    style: str = "vlog",
+) -> str:
+    """Build the opening hook prompt: create 10-15s cinematic opening.
+
+    Receives only high-value clips from across all sections.
+    """
+    prompt = (
+        "You are creating the opening hook for a vlog — the first 10-15 seconds "
+        "that grab the viewer's attention before the chronological story begins.\n\n"
+        "The hook should be visually compelling: quick cuts, striking moments, "
+        "energy teasers from the trip. It does NOT need to follow chronological order — "
+        "it's a cinematic teaser.\n\n"
+        f"Story concept: {section_plan.story_concept}\n"
+        f"Hook direction: {section_plan.hook_description}\n"
+    )
+
+    if cast:
+        prompt += "\n## Cast\n"
+        for c in cast:
+            prompt += f"- **{c.get('label', '?')}**: {c.get('description', '')}\n"
+
+    prompt += f"\n## Available High-Value Clips ({len(high_value_clips)} clips)\n\n"
+    for r in high_value_clips:
+        clip_id = r.get("clip_id", "")
+        prompt += f"### {clip_id}\n"
+        for km in r.get("key_moments", []):
+            if km.get("editorial_value") == "high":
+                prompt += (
+                    f"  - [{km.get('timestamp_sec', 0):.1f}s] "
+                    f"{km.get('description', '')} "
+                    f"(suggested: {km.get('suggested_use', '')})\n"
+                )
+        for us in r.get("usable_segments", []):
+            prompt += (
+                f"  - Usable: {us.get('in_sec', 0):.1f}-{us.get('out_sec', 0):.1f}s "
+                f"({us.get('duration_sec', 0):.1f}s) — {us.get('description', '')}\n"
+            )
+        prompt += "\n"
+
+    prompt += (
+        "Create a HookStoryboard with 2-5 segments totaling ~10-15 seconds.\n"
+        "Use the most visually striking moments. Prefer quick cuts (2-4s each).\n"
+        "Each segment must have valid in_sec/out_sec within the clip's usable ranges.\n"
+        "audio_note should be 'music_bed' for most hook segments.\n"
+        "transition should be 'cut' between hook segments for energy.\n"
+    )
+    return prompt
+
+
+def build_section_storyboard_prompt(
+    section,
+    section_clip_reviews: list[dict],
+    section_narrative,
+    transcripts: dict[str, str] | None = None,
+    cumulative_narratives: list[tuple[str, str]] | None = None,
+    cast: list[dict] | None = None,
+    style: str = "vlog",
+    user_context_text: str | None = None,
+    style_supplement: str | None = None,
+) -> str:
+    """Build the per-section storyboard prompt.
+
+    Each section call receives:
+    - Its own clips (full reviews + transcripts)
+    - The storyline role assigned to this section
+    - Cumulative narrative summaries from all prior sections
+    """
+    prompt = (
+        f"You are editing one section of a {style}. "
+        "Chronological order between sections is handled by the pipeline — "
+        "your section comes in a fixed position.\n\n"
+        "Within YOUR section, order clips for the best aesthetic flow. "
+        "B-roll, signs, and close-ups can go wherever they serve the narrative best. "
+        "You are NOT bound to chronological order within this section.\n\n"
+    )
+
+    # Section assignment
+    prompt += f"## Your Section: {section.label} ({section.section_id})\n"
+    if section_narrative:
+        prompt += f"Narrative role: {section_narrative.narrative_role}\n"
+        prompt += f"Arc phase: {section_narrative.arc_phase}\n"
+        prompt += f"Energy: {section_narrative.energy}\n"
+        if section_narrative.target_duration_sec > 0:
+            prompt += f"Target duration: ~{section_narrative.target_duration_sec:.0f}s\n"
+    prompt += "\n"
+
+    # User context
+    if user_context_text:
+        prompt += f"## Filmmaker Context\n{user_context_text}\n\n"
+
+    # Cumulative context from prior sections
+    if cumulative_narratives:
+        prompt += "## Story So Far (prior sections)\n\n"
+        for sid, summary in cumulative_narratives:
+            prompt += f"**{sid}**: {summary}\n\n"
+        prompt += (
+            "Use this context to maintain narrative continuity — "
+            "don't repeat content covered in prior sections, "
+            "and consider transition flow from the previous section.\n\n"
+        )
+
+    # Cast
+    if cast:
+        prompt += "## Cast\n"
+        for c in cast:
+            prompt += (
+                f"- **{c.get('label', '?')}**: {c.get('description', '')} ({c.get('role', '')})\n"
+            )
+        prompt += "\n"
+
+    # This section's clips with full reviews
+    prompt += f"## Clips in This Section ({len(section_clip_reviews)} clips)\n\n"
+    for r in section_clip_reviews:
+        clip_id = r.get("clip_id", "")
+        dur = r.get("duration_sec", 0)
+        content = r.get("content_type", [])
+        prompt += f"### {clip_id} ({dur:.1f}s) — {content}\n"
+
+        # Key moments
+        for km in r.get("key_moments", []):
+            prompt += (
+                f"  Key moment [{km.get('timestamp_sec', 0):.1f}s]: "
+                f"{km.get('description', '')} "
+                f"(value: {km.get('editorial_value', '?')}, "
+                f"use: {km.get('suggested_use', '?')})\n"
+            )
+
+        # Usable segments with bounded ranges
+        for i, us in enumerate(r.get("usable_segments", [])):
+            prompt += (
+                f"  Usable [{i}]: {us.get('in_sec', 0):.1f}-{us.get('out_sec', 0):.1f}s "
+                f"({us.get('duration_sec', 0):.1f}s) — {us.get('description', '')}\n"
+            )
+
+        # Transcript
+        if transcripts and clip_id in transcripts:
+            prompt += f"  Transcript: {transcripts[clip_id][:500]}\n"
+
+        prompt += "\n"
+
+    # Style supplement
+    if style_supplement:
+        prompt += f"\n## Style Guidelines\n{style_supplement}\n\n"
+
+    prompt += (
+        "Now produce a SectionStoryboard.\n\n"
+        "For each segment, select precise in_sec/out_sec within the usable ranges above.\n"
+        "Write a narrative_summary (2-3 sentences) describing what this section covers — "
+        "this will be passed as context to the next section's editor.\n\n"
+        "Populate editorial_reasoning with your thinking: which clips you chose, "
+        "why you ordered them this way, and how this section connects to the story.\n\n"
+        "Optionally provide a music_cue with section, strategy, and notes.\n"
+    )
+    return prompt
+
+
+# ---------------------------------------------------------------------------
 # Multi-call Phase 3 — Visual Monologue prompt builders
 # ---------------------------------------------------------------------------
 

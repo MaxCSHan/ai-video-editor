@@ -660,9 +660,24 @@ def cmd_analyze(args, cfg: Config):
         interactive = not getattr(args, "no_interactive", False)
         visual = getattr(args, "visual", False)
 
+        # Section pipeline flags
+        if getattr(args, "sections", False):
+            cfg.gemini.use_section_pipeline = True
+        elif getattr(args, "no_sections", False):
+            cfg.gemini.use_section_pipeline = False
+        else:
+            # Auto-detect: vlog-style → sections by default
+            _section_styles = {"vlog", "travel-vlog", "family-video"}
+            if style in _section_styles:
+                cfg.gemini.use_section_pipeline = True
+
+        if getattr(args, "gap_minutes", None) is not None:
+            cfg.gemini.section_gap_minutes = args.gap_minutes
+
         # Disable split pipeline if --single flag is set
         if getattr(args, "single", False):
             cfg.gemini.use_split_pipeline = False
+            cfg.gemini.use_section_pipeline = False
 
         # Apply review CLI overrides
         if getattr(args, "no_review", False):
@@ -1020,6 +1035,87 @@ def _load_project_for_eval(name: str, cfg: Config, track: str = "main") -> tuple
     transcripts = _load_transcripts(ep.clips_dir, clip_ids)
 
     return storyboard, reviews, user_context, transcripts, provider
+
+
+def cmd_sections(args, cfg: Config):
+    """View or edit section grouping for a project."""
+    name = args.project or _infer_project(cfg)
+    if not name:
+        print(f"{RED}Error:{RESET} Specify a project name.")
+        sys.exit(1)
+
+    project_root = cfg.library_dir / name
+    meta = _read_project_meta(project_root)
+    if not meta:
+        print(f"{RED}Error:{RESET} Project '{name}' not found.")
+        sys.exit(1)
+
+    if meta["type"] != "editorial":
+        print(f"{RED}Error:{RESET} Sections only supported for editorial projects.")
+        sys.exit(1)
+
+    ep = cfg.editorial_project(name)
+    regroup = getattr(args, "regroup", False)
+    gap_minutes = getattr(args, "gap_minutes", None) or cfg.gemini.section_gap_minutes
+
+    # Check for existing sections
+    sections_path = ep.storyboard / "sections_latest.json"
+    if sections_path.exists() and not regroup:
+        from .models import SectionGroup
+
+        data = json.loads(sections_path.read_text())
+        section_groups = [SectionGroup.model_validate(g) for g in data]
+    else:
+        # Generate from manifest + reviews
+        manifest_file = ep.master_manifest
+        if not manifest_file.exists():
+            print(f"{RED}Error:{RESET} No manifest found. Run {BOLD}vx preprocess{RESET} first.")
+            sys.exit(1)
+
+        manifest = json.loads(manifest_file.read_text())
+
+        # Load reviews
+        reviews = []
+        for clip_id in ep.discover_clips():
+            cp = ep.clip_paths(clip_id)
+            for pattern in ["review_*_latest.json", "review_*.json"]:
+                found = [
+                    f
+                    for f in cp.review.glob(pattern)
+                    if not f.name.endswith("_latest.json") or f.is_symlink()
+                ]
+                if found:
+                    reviews.append(json.loads(found[0].read_text()))
+                    break
+
+        from .section_grouping import group_clips_into_sections
+
+        section_groups = group_clips_into_sections(manifest, reviews, gap_minutes)
+
+        # Save
+        ep.storyboard.mkdir(parents=True, exist_ok=True)
+        sections_path.write_text(json.dumps([g.model_dump() for g in section_groups], indent=2))
+        if regroup:
+            print(f"  {GREEN}Sections regrouped with {gap_minutes:.0f}min gap threshold{RESET}\n")
+
+    from .section_grouping import format_sections_for_display
+
+    # Load reviews for display
+    reviews = []
+    for clip_id in ep.discover_clips():
+        cp = ep.clip_paths(clip_id)
+        for pattern in ["review_*_latest.json", "review_*.json"]:
+            found = [
+                f
+                for f in cp.review.glob(pattern)
+                if not f.name.endswith("_latest.json") or f.is_symlink()
+            ]
+            if found:
+                reviews.append(json.loads(found[0].read_text()))
+                break
+
+    _header(f"Sections: {name}")
+    print(format_sections_for_display(section_groups, reviews))
 
 
 def cmd_eval(args, cfg: Config):
@@ -2360,6 +2456,37 @@ def main():
         action="store_true",
         help="Use single-call Phase 2 instead of default multi-call split pipeline",
     )
+    p_analyze.add_argument(
+        "--sections",
+        action="store_true",
+        help="Force section-based Phase 2 (Divide & Conquer) even for non-vlog styles",
+    )
+    p_analyze.add_argument(
+        "--no-sections",
+        action="store_true",
+        help="Force legacy pipeline (skip section grouping)",
+    )
+    p_analyze.add_argument(
+        "--gap-minutes",
+        type=float,
+        metavar="N",
+        help="Time gap threshold for section splitting (default: 30 minutes)",
+    )
+
+    # --- sections ---
+    p_sections = sub.add_parser("sections", help="View or edit section grouping for a project")
+    p_sections.add_argument("project", nargs="?", help="Project name")
+    p_sections.add_argument(
+        "--regroup",
+        action="store_true",
+        help="Re-run section grouping from manifest (discards manual edits)",
+    )
+    p_sections.add_argument(
+        "--gap-minutes",
+        type=float,
+        metavar="N",
+        help="Time gap threshold for section splitting (default: 30 minutes)",
+    )
 
     # --- review ---
     p_review = sub.add_parser("review", help="Run Editorial Director review on existing storyboard")
@@ -2612,6 +2739,7 @@ def main():
         "ver": cmd_versions,
         "compose": cmd_compose,
         "track": cmd_track,
+        "sections": cmd_sections,
         "eval": cmd_eval,
         "preset": cmd_preset,
         "config": cmd_config,

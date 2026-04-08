@@ -992,6 +992,358 @@ def _validate_constraints(
         return None
 
 
+def _run_phase2_sections(
+    clip_reviews: list[dict],
+    editorial_paths: EditorialProjectPaths,
+    project_name: str,
+    provider: str,
+    gemini_cfg: GeminiConfig | None = None,
+    claude_cfg: ClaudeConfig | None = None,
+    style: str = "vlog",
+    user_context: dict | None = None,
+    tracer=None,
+    visual: bool = False,
+    style_supplement: str | None = None,
+    review_config: "ReviewConfig | None" = None,
+    interactive: bool = False,
+) -> Path:
+    """Section-based Phase 2: Group → Storyline → Hook → Per-Section → Merge.
+
+    Divide & Conquer pipeline that enforces chronological section order
+    while allowing aesthetic freedom within each section.
+    """
+    from google.genai import types
+
+    from .briefing import format_context_for_prompt
+    from .editorial_prompts import (
+        build_hook_prompt,
+        build_section_storyboard_prompt,
+        build_storyline_prompt,
+        extract_cast_from_reviews,
+    )
+    from .models import (
+        HookStoryboard,
+        SectionPlan,
+        SectionStoryboard,
+    )
+    from .render import render_html_preview, render_markdown
+    from .section_grouping import (
+        format_sections_for_display,
+        group_clips_into_sections,
+        merge_section_storyboards,
+    )
+    from .tracing import LLMSpinner, traced_gemini_generate
+    from .versioning import (
+        begin_version,
+        commit_version,
+        current_version,
+        update_latest_symlink,
+        versioned_dir,
+        versioned_path,
+    )
+
+    client = _get_gemini_client()
+    gemini_cfg = gemini_cfg or GeminiConfig()
+    user_context_text = format_context_for_prompt(user_context) if user_context else None
+
+    # ── Section grouping (deterministic) ──────────────────────────────────
+    print("  [Sections] Grouping clips by date and time gaps...")
+    manifest_file = editorial_paths.master_manifest
+    if not manifest_file.exists():
+        raise RuntimeError(f"No manifest found: {manifest_file}")
+    manifest_data = json.loads(manifest_file.read_text())
+
+    section_groups = group_clips_into_sections(
+        manifest_data,
+        clip_reviews,
+        gap_threshold_minutes=gemini_cfg.section_gap_minutes,
+    )
+
+    total_sections = sum(len(g.sections) for g in section_groups)
+    print(f"  [Sections] {len(section_groups)} days, {total_sections} sections")
+    print(format_sections_for_display(section_groups, clip_reviews))
+
+    # Save sections artifact
+    sections_json = [g.model_dump() for g in section_groups]
+    sections_path = editorial_paths.storyboard / "sections_latest.json"
+    editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
+    sections_path.write_text(json.dumps(sections_json, indent=2))
+
+    # ── Pre-processing ────────────────────────────────────────────────────
+    cast = extract_cast_from_reviews(clip_reviews)
+    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
+    all_transcripts = _load_all_transcripts_for_prompt(clip_reviews, editorial_paths)
+
+    # ── Storyline LLM call ────────────────────────────────────────────────
+    print(f"  [Storyline] Planning narrative arc across {total_sections} sections...")
+    storyline_prompt = build_storyline_prompt(
+        section_groups=section_groups,
+        clip_reviews=clip_reviews,
+        user_context_text=user_context_text,
+        style=style,
+        cast=cast,
+    )
+
+    with LLMSpinner("Storyline planning", provider=provider):
+        response_sl = traced_gemini_generate(
+            client,
+            model=gemini_cfg.phase2,
+            contents=storyline_prompt,
+            config=types.GenerateContentConfig(
+                temperature=gemini_cfg.phase2_temperature,
+                response_mime_type="application/json",
+                response_schema=SectionPlan,
+            ),
+            phase="phase2_storyline",
+            tracer=tracer,
+            prompt_chars=len(storyline_prompt),
+        )
+    section_plan = SectionPlan.model_validate_json(response_sl.text)
+    print(f'  [Storyline] "{section_plan.title}" — hook from {section_plan.hook_section_id}')
+
+    # Save storyline artifact
+    storyline_path = editorial_paths.storyboard / "storyline_latest.json"
+    storyline_path.write_text(section_plan.model_dump_json(indent=2))
+
+    # ── Opening Hook LLM call ─────────────────────────────────────────────
+    print("  [Hook] Creating opening hook from best clips...")
+    high_value_clips = [
+        r
+        for r in clip_reviews
+        if any(km.get("editorial_value") == "high" for km in r.get("key_moments", []))
+    ]
+    if not high_value_clips:
+        high_value_clips = clip_reviews[:5]  # fallback: first 5 clips
+
+    hook_prompt = build_hook_prompt(
+        high_value_clips=high_value_clips,
+        section_plan=section_plan,
+        cast=cast,
+        style=style,
+    )
+
+    with LLMSpinner("Opening hook", provider=provider):
+        response_hook = traced_gemini_generate(
+            client,
+            model=gemini_cfg.phase2,
+            contents=hook_prompt,
+            config=types.GenerateContentConfig(
+                temperature=gemini_cfg.phase2b_temperature,
+                response_mime_type="application/json",
+                response_schema=HookStoryboard,
+            ),
+            phase="phase2_hook",
+            tracer=tracer,
+            prompt_chars=len(hook_prompt),
+        )
+    hook_sb = HookStoryboard.model_validate_json(response_hook.text)
+    hook_dur = sum(s.duration_sec for s in hook_sb.segments)
+    print(f"  [Hook] {len(hook_sb.segments)} segments, {hook_dur:.1f}s")
+
+    # ── Per-section storyboarding (sequential) ────────────────────────────
+    narrative_by_id = {sn.section_id: sn for sn in section_plan.section_narratives}
+    cumulative_narratives: list[tuple[str, str]] = []
+    section_storyboards: list[SectionStoryboard] = []
+
+    flat_sections = [(group, section) for group in section_groups for section in group.sections]
+
+    for idx, (group, section) in enumerate(flat_sections, 1):
+        narrative = narrative_by_id.get(section.section_id)
+        section_reviews = [reviews_by_id[cid] for cid in section.clip_ids if cid in reviews_by_id]
+
+        # Prepare section transcripts
+        section_transcripts = None
+        if all_transcripts:
+            section_transcripts = {
+                cid: all_transcripts[cid] for cid in section.clip_ids if cid in all_transcripts
+            }
+
+        prompt = build_section_storyboard_prompt(
+            section=section,
+            section_clip_reviews=section_reviews,
+            transcripts=section_transcripts,
+            section_narrative=narrative,
+            cumulative_narratives=cumulative_narratives if cumulative_narratives else None,
+            cast=cast,
+            style=style,
+            user_context_text=user_context_text,
+            style_supplement=style_supplement,
+        )
+
+        label = section.label or section.section_id
+        print(f"  [Section {idx}/{len(flat_sections)}] {label}...")
+
+        with LLMSpinner(f"Section: {label}", provider=provider):
+            response_sec = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2b_temperature,
+                    response_mime_type="application/json",
+                    response_schema=SectionStoryboard,
+                ),
+                phase=f"phase2_section_{section.section_id}",
+                tracer=tracer,
+                prompt_chars=len(prompt),
+            )
+
+        ssb = SectionStoryboard.model_validate_json(response_sec.text)
+        section_storyboards.append(ssb)
+        cumulative_narratives.append((section.section_id, ssb.narrative_summary))
+
+        seg_dur = sum(s.duration_sec for s in ssb.segments)
+        print(f"    ✓ {len(ssb.segments)} segments, {seg_dur:.1f}s")
+
+    # ── Programmatic merge ────────────────────────────────────────────────
+    print("  [Merge] Combining sections into final storyboard...")
+    storyboard = merge_section_storyboards(
+        hook=hook_sb,
+        section_storyboards=section_storyboards,
+        section_plan=section_plan,
+        section_groups=section_groups,
+    )
+
+    total_dur = sum(s.duration_sec for s in storyboard.segments)
+    print(f"  [Merge] {len(storyboard.segments)} segments, {total_dur:.1f}s total")
+
+    # ── Resolve clip IDs and validate ─────────────────────────────────────
+    known_clip_ids = {r["clip_id"] for r in clip_reviews}
+    _resolve_clip_id_refs(storyboard, known_clip_ids)
+
+    # Auto-clamp timestamps
+    fix_log = []
+    for seg in storyboard.segments:
+        review = reviews_by_id.get(seg.clip_id)
+        if not review:
+            continue
+        usable = review.get("usable_segments", [])
+        best = None
+        best_overlap = -1
+        for us in usable:
+            us_in = us.get("in_sec", 0)
+            us_out = us.get("out_sec", 0)
+            overlap = min(seg.out_sec, us_out) - max(seg.in_sec, us_in)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = us
+        if best:
+            if seg.in_sec < best.get("in_sec", 0):
+                fix_log.append(
+                    f"Seg {seg.index}: clamped in_sec {seg.in_sec:.1f} → {best['in_sec']:.1f}"
+                )
+                seg.in_sec = best["in_sec"]
+            if seg.out_sec > best.get("out_sec", 0):
+                fix_log.append(
+                    f"Seg {seg.index}: clamped out_sec {seg.out_sec:.1f} → {best['out_sec']:.1f}"
+                )
+                seg.out_sec = best["out_sec"]
+
+    val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
+    if fix_log:
+        print(f"  [Fix] Auto-clamped {len(fix_log)} timestamps:")
+        for f in fix_log[:5]:
+            print(f"    {f}")
+    if val_warnings:
+        for w in val_warnings[:5]:
+            print(f"  WARN: {w}")
+
+    # ── Editorial Director review ─────────────────────────────────────────
+    if review_config and review_config.enabled:
+        from .editorial_director import run_editorial_review
+
+        storyboard, _review_log = run_editorial_review(
+            storyboard=storyboard,
+            clip_reviews=clip_reviews,
+            user_context=user_context,
+            clips_dir=editorial_paths.clips_dir,
+            review_config=review_config,
+            tracer=tracer,
+            interactive=interactive,
+            style_guidelines=style_supplement,
+        )
+
+    # ── Version and save outputs ──────────────────────────────────────────
+    editorial_paths.storyboard.mkdir(parents=True, exist_ok=True)
+
+    review_inputs = {}
+    for r in clip_reviews:
+        cid = r.get("clip_id", "")
+        review_inputs[f"review:{cid}"] = cid
+    from .versioning import resolve_user_context_path as _rucp_sec
+
+    _uc_sec = _rucp_sec(editorial_paths.root)
+    if _uc_sec and "_v" in _uc_sec.name:
+        import re as _re_sec
+
+        _um_sec = _re_sec.search(r"_v(\d+)\.", _uc_sec.name)
+        if _um_sec:
+            review_inputs["user_context"] = f"user_context:user:v{_um_sec.group(1)}"
+    cfg_snap = {
+        "model": gemini_cfg.phase2,
+        "pipeline": "sections",
+        "gap_minutes": gemini_cfg.section_gap_minutes,
+    }
+
+    rv_version = current_version(editorial_paths.root, f"review_{provider}")
+    if rv_version == 0:
+        rv_version = current_version(editorial_paths.root, "review")
+    review_parent_id = f"rv.{rv_version}" if rv_version > 0 else None
+
+    art_meta = begin_version(
+        editorial_paths.root,
+        phase="storyboard",
+        provider=provider,
+        inputs=review_inputs,
+        config_snapshot=cfg_snap,
+        target_dir=editorial_paths.storyboard,
+        parent_id=review_parent_id,
+    )
+    v = art_meta.version
+    base = f"editorial_{provider}"
+
+    # Primary: structured JSON
+    json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
+    json_path.write_text(storyboard.model_dump_json(indent=2))
+    update_latest_symlink(json_path)
+
+    # Rendered: markdown
+    md_path = versioned_path(editorial_paths.storyboard / f"{base}.md", v)
+    md_path.write_text(render_markdown(storyboard))
+    update_latest_symlink(md_path)
+
+    # Rendered: HTML preview
+    export_dir = versioned_dir(editorial_paths.exports, v)
+    html = render_html_preview(
+        storyboard,
+        clips_dir=editorial_paths.clips_dir,
+        output_dir=export_dir,
+    )
+    preview_path = export_dir / "preview.html"
+    preview_path.write_text(html)
+    update_latest_symlink(export_dir)
+
+    # Save fix log
+    if fix_log:
+        fix_path = editorial_paths.storyboard / f"fixlog_{provider}_v{v}.txt"
+        fix_path.write_text("\n".join(fix_log))
+
+    commit_version(
+        editorial_paths.root,
+        art_meta,
+        output_paths=[json_path, md_path, preview_path],
+        target_dir=editorial_paths.storyboard,
+    )
+
+    print(f"  v{v} outputs (section pipeline):")
+    print(f"    Sections:  {sections_path}")
+    print(f"    Storyline: {storyline_path}")
+    print(f"    JSON:      {json_path}")
+    print(f"    MD:        {md_path}")
+    print(f"    Preview:   {preview_path}")
+    return json_path
+
+
 def _run_phase2_split(
     clip_reviews: list[dict],
     editorial_paths: EditorialProjectPaths,
@@ -1464,6 +1816,24 @@ def run_phase2(
     If gemini_cfg.use_split_pipeline is True, delegates to the multi-call pipeline
     (Call 2A reasoning → Call 2A.5 structuring → Call 2B assembly).
     """
+    # Check for section-based pipeline (Divide & Conquer)
+    if gemini_cfg and gemini_cfg.use_section_pipeline and provider == "gemini":
+        return _run_phase2_sections(
+            clip_reviews=clip_reviews,
+            editorial_paths=editorial_paths,
+            project_name=project_name,
+            provider=provider,
+            gemini_cfg=gemini_cfg,
+            claude_cfg=claude_cfg,
+            style=style,
+            user_context=user_context,
+            tracer=tracer,
+            visual=visual,
+            style_supplement=style_supplement,
+            review_config=review_config,
+            interactive=interactive,
+        )
+
     # Check for split pipeline mode
     if gemini_cfg and gemini_cfg.use_split_pipeline and provider == "gemini":
         return _run_phase2_split(
@@ -2480,6 +2850,15 @@ def run_editorial_pipeline(
         from .briefing import run_briefing
 
         user_context = run_briefing(reviews, style, editorial_paths.root)
+
+    # Fallback: load existing user_context from disk if not gathered this run
+    if user_context is None:
+        from .versioning import resolve_user_context_path as _rucp_fallback
+
+        _ctx_path = _rucp_fallback(editorial_paths.root)
+        if _ctx_path:
+            user_context = json.loads(_ctx_path.read_text())
+            print(f"  Loaded existing user context: {_ctx_path.name}")
 
     # Phase 2 — editorial assembly
     print(f"[4/{total_phases}] Phase 2: Generating editorial storyboard...")
