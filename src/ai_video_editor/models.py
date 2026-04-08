@@ -196,6 +196,11 @@ class CreativeBrief(BaseModel):
         default=[], description="Style inspiration: creators, videos, moods"
     )
     notes: str = Field(default="", description="Free-form creative notes for the editor")
+    creative_direction_text: str = Field(
+        default="",
+        description="Raw freeform creative direction from a file. When present, injected "
+        "as-is into the CREATIVE DIRECTION prompt tier — the LLM extracts what it needs.",
+    )
 
     # --- Metadata ---
     brief_version: int = Field(
@@ -208,7 +213,14 @@ class CreativeBrief(BaseModel):
 
     def has_creative_direction(self) -> bool:
         """Return True if any enhanced fields are populated."""
-        return bool(self.intent or self.audience or self.narrative or self.style or self.references)
+        return bool(
+            self.intent
+            or self.audience
+            or self.narrative
+            or self.style
+            or self.references
+            or self.creative_direction_text
+        )
 
     def to_legacy_dict(self) -> dict:
         """Export only legacy fields for backward-compatible serialization."""

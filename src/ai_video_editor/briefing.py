@@ -761,13 +761,14 @@ def _ask_brief_questions(scan: dict, depth: str):
 
 
 def _brief_from_file(editorial_paths, scan: dict | None = None) -> dict | None:
-    """Load or generate a creative_brief.md file, open in editor, parse results."""
+    """Load a creative direction file — any .md, freeform text passed through to LLM."""
     brief_md_path = editorial_paths.root / "creative_brief.md"
 
     if not brief_md_path.exists():
+        # Generate a lightweight guide (not a form) to help the user get started
         md_content = generate_creative_brief_md(scan=scan)
         brief_md_path.write_text(md_content, encoding="utf-8")
-        print(f"  Generated template: {brief_md_path}")
+        print(f"  Generated guide: {brief_md_path}")
 
     editor = os.environ.get("EDITOR", "vim")
     print(f"  Opening {brief_md_path.name} in {editor}...")
@@ -783,329 +784,95 @@ def _brief_from_file(editorial_paths, scan: dict | None = None) -> dict | None:
 
     result = brief.model_dump()
     save_creative_brief(editorial_paths.root, brief)
-    print("  Creative brief loaded from file")
+    print("  Creative direction loaded from file")
     return result
 
 
 # ---------------------------------------------------------------------------
-# File-based creative brief — markdown template generation and parsing
+# File-based creative direction — freeform passthrough to LLM
 # ---------------------------------------------------------------------------
 
-_BRIEF_TEMPLATE = """\
-# Creative Brief
-<!-- Generated from AI scan. Edit freely. Empty sections are skipped. -->
-<!-- Lines starting with <!-- are comments and will be ignored by the parser. -->
 
-## Intent
-<!-- What should the viewer feel or do after watching? This is your north star. -->
-<!-- Examples: "feel the warmth of a perfect family day", "want to visit Myanmar" -->
-{intent}
+def generate_creative_brief_md(scan: dict | None = None) -> str:
+    """Generate a lightweight guide to help the creator get started.
 
-## People
-{people_hint}
-{people}
-
-## Activity
-{activity_hint}
-{activity}
-
-## Audience
-<!-- Who is this for? friends-and-family | youtube | tiktok | instagram | personal -->
-{audience}
-
-## Tone
-<!-- warm-nostalgic | cinematic | energetic | chill | fun | or describe your own -->
-{tone}
-
-## Story
-
-### Thesis
-<!-- One sentence: what is this video about? -->
-{story_thesis}
-
-### Key Beats
-<!-- The moments that define the story, in order. One per line. -->
-{key_beats}
-
-### Hook
-<!-- What grabs the viewer in the first 10 seconds? -->
-{story_hook}
-
-### Ending
-<!-- How should it end emotionally? -->
-{ending}
-
-### Structure
-<!-- chronological | thematic | circular | vignettes -->
-{structure}
-
-## Style
-
-### Pacing
-<!-- slow-contemplative | balanced | punchy | builds-to-climax -->
-{pacing}
-
-### Music
-<!-- acoustic | lo-fi | orchestral | ambient | natural-audio-only | or describe -->
-{music}
-
-### Energy
-<!-- steady | low-high-low | builds | peaks-and-valleys -->
-{energy}
-
-### Visual Tone
-<!-- warm | cool | cinematic | bright | natural -->
-{visual_tone}
-
-### Transitions
-<!-- soft-dissolves | hard-cuts | mixed -->
-{transitions}
-
-## Must Include
-<!-- Moments the editor must not skip. Be specific. -->
-{highlights}
-
-## Must Exclude
-<!-- Moments to cut. Be specific. -->
-{avoid}
-
-## Duration
-<!-- Target length. Leave empty for AI to decide. -->
-{duration}
-
-## References
-<!-- Style inspiration. Creators, videos, or vibes. One per line. -->
-{references}
-
-## Notes
-<!-- Anything else the editor should know. -->
-{notes}
-"""
-
-
-def generate_creative_brief_md(
-    scan: dict | None = None,
-    existing=None,
-) -> str:
-    """Generate a creative_brief.md template with AI scan hints and optional pre-fill.
-
-    Args:
-        scan: QuickScanResult dict from quick scan (for AI observation comments).
-        existing: Existing CreativeBrief or dict to pre-fill fields.
+    This is NOT a form to fill out — it's inspiration. The creator can write
+    anything they want in any format. The entire text is passed as-is to the
+    LLM, which extracts what it needs.
     """
-    # Build AI hint comments from scan
-    people_hint = ""
-    activity_hint = ""
+    lines = ["# Creative Direction\n"]
+    lines.append("Write your vision for the edit below. Any format works — prose,")
+    lines.append("bullet points, stream of consciousness. The AI editor will read")
+    lines.append("this and use it to guide every creative decision.\n")
+
+    # Show AI observations as context
     if scan:
+        lines.append("---")
+        lines.append("**What the AI saw in your footage:**\n")
+        if scan.get("overall_summary"):
+            lines.append(f"{scan['overall_summary']}\n")
         if scan.get("people"):
-            descs = [p["description"] for p in scan["people"]]
-            people_hint = "<!-- AI spotted: " + "; ".join(descs) + " -->"
+            lines.append("**People spotted:**")
+            for p in scan["people"]:
+                role = f" ({p['role_guess']})" if p.get("role_guess") else ""
+                lines.append(f"- {p['description']}{role}")
+            lines.append("")
         if scan.get("activities"):
-            activity_hint = "<!-- AI observed: " + ", ".join(scan["activities"]) + " -->"
+            lines.append(f"**Activities/locations:** {', '.join(scan['activities'])}\n")
+        if scan.get("mood"):
+            lines.append(f"**Overall mood:** {scan['mood']}\n")
+        lines.append("---\n")
 
-    # Pre-fill from existing brief
-    vals = {}
-    if existing:
-        if hasattr(existing, "model_dump"):
-            d = existing.model_dump()
-        else:
-            d = existing
-        vals = {
-            "intent": d.get("intent", ""),
-            "people": d.get("people", ""),
-            "activity": d.get("activity", ""),
-            "audience": (d.get("audience") or {}).get("platform", ""),
-            "tone": d.get("tone", ""),
-            "highlights": d.get("highlights", ""),
-            "avoid": d.get("avoid", ""),
-            "duration": d.get("duration", ""),
-            "notes": d.get("notes", ""),
-        }
-        narrative = d.get("narrative") or {}
-        vals["story_thesis"] = narrative.get("story_thesis", "")
-        vals["story_hook"] = narrative.get("story_hook", "")
-        vals["ending"] = narrative.get("ending_note", "")
-        vals["structure"] = narrative.get("structure", "")
-        beats = narrative.get("key_beats", [])
-        vals["key_beats"] = "\n".join(f"- {b}" for b in beats) if beats else ""
+    lines.append("## Your vision\n")
+    lines.append("Some things you might want to cover (but don't have to):\n")
+    lines.append("- What should viewers feel after watching?")
+    lines.append("- Who are the people in the footage?")
+    lines.append("- What's the story you want to tell?")
+    lines.append("- What moments must be included? What should be cut?")
+    lines.append("- What's the vibe — pacing, music, energy?")
+    lines.append("- Any style references (creators, films, moods)?")
+    lines.append("- Target length?\n")
+    lines.append("Delete everything above and write freely, or just start below:\n")
+    lines.append("")
 
-        style_d = d.get("style") or {}
-        vals["pacing"] = style_d.get("pacing", "")
-        vals["music"] = style_d.get("music_mood", "")
-        vals["energy"] = style_d.get("energy_curve", "")
-        vals["visual_tone"] = style_d.get("visual_tone", "")
-        vals["transitions"] = style_d.get("transitions", "")
-
-        refs = d.get("references", [])
-        vals["references"] = "\n".join(f"- {r}" for r in refs) if refs else ""
-
-    # Fill template
-    return _BRIEF_TEMPLATE.format(
-        intent=vals.get("intent", ""),
-        people_hint=people_hint,
-        people=vals.get("people", ""),
-        activity_hint=activity_hint,
-        activity=vals.get("activity", ""),
-        audience=vals.get("audience", ""),
-        tone=vals.get("tone", ""),
-        story_thesis=vals.get("story_thesis", ""),
-        key_beats=vals.get("key_beats", ""),
-        story_hook=vals.get("story_hook", ""),
-        ending=vals.get("ending", ""),
-        structure=vals.get("structure", ""),
-        pacing=vals.get("pacing", ""),
-        music=vals.get("music", ""),
-        energy=vals.get("energy", ""),
-        visual_tone=vals.get("visual_tone", ""),
-        transitions=vals.get("transitions", ""),
-        highlights=vals.get("highlights", ""),
-        avoid=vals.get("avoid", ""),
-        duration=vals.get("duration", ""),
-        references=vals.get("references", ""),
-        notes=vals.get("notes", ""),
-    )
+    return "\n".join(lines)
 
 
 def parse_creative_brief_md(text: str):
-    """Parse a creative_brief.md file into a CreativeBrief.
+    """Parse a creative direction file — freeform passthrough.
 
-    Returns CreativeBrief or None if the file has no usable content.
+    Strips the template boilerplate if present, stores the raw creative text
+    in creative_direction_text. The LLM extracts what it needs.
+
+    Returns CreativeBrief or None if the file is empty.
     """
     import re
-    from .models import CreativeBrief, AudienceSpec, NarrativeDirection, StyleDirection
 
-    # Strip HTML comments
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    from .models import CreativeBrief
 
-    # Split into sections by ## headers
-    sections: dict[str, str] = {}
-    current_section = ""
-    current_subsection = ""
-    subsections: dict[str, dict[str, str]] = {}
+    # Strip HTML comments (if any remain from old templates)
+    cleaned = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
 
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("## ") and not stripped.startswith("### "):
-            current_section = stripped[3:].strip().lower()
-            current_subsection = ""
-            sections[current_section] = ""
-            subsections[current_section] = {}
-        elif stripped.startswith("### "):
-            current_subsection = stripped[4:].strip().lower()
-            if current_section:
-                subsections.setdefault(current_section, {})[current_subsection] = ""
-        elif current_section:
-            if current_subsection and current_section in subsections:
-                subsections[current_section][current_subsection] += line + "\n"
-            else:
-                sections[current_section] += line + "\n"
+    # Strip the heading line
+    cleaned = re.sub(r"^#\s+Creative (?:Direction|Brief)\s*\n", "", cleaned, flags=re.MULTILINE)
 
-    def clean(s: str) -> str:
-        """Strip whitespace and blank lines."""
-        return s.strip()
+    # Strip the template boilerplate guide text (everything before user content)
+    # Look for the marker that ends the guide section
+    marker = "Delete everything above and write freely"
+    if marker in cleaned:
+        cleaned = cleaned.split(marker, 1)[1]
 
-    def clean_list(s: str) -> list[str]:
-        """Parse bullet list or comma-separated values."""
-        items = []
-        for line in s.strip().split("\n"):
-            line = line.strip().lstrip("-").lstrip("*").strip()
-            if line:
-                items.append(line)
-        return items
+    # Clean up
+    cleaned = cleaned.strip()
 
-    # Map sections to CreativeBrief fields
-    brief = CreativeBrief(brief_version=2, source="file")
+    if not cleaned:
+        return None
 
-    if "intent" in sections:
-        brief.intent = clean(sections["intent"])
-    if "people" in sections:
-        brief.people = clean(sections["people"])
-    if "activity" in sections:
-        brief.activity = clean(sections["activity"])
-    if "audience" in sections:
-        platform = clean(sections["audience"])
-        if platform:
-            brief.audience = AudienceSpec(platform=platform)
-    if "tone" in sections:
-        brief.tone = clean(sections["tone"])
-    if "must include" in sections:
-        brief.highlights = clean(sections["must include"])
-    if "must exclude" in sections:
-        brief.avoid = clean(sections["must exclude"])
-    if "duration" in sections:
-        brief.duration = clean(sections["duration"])
-    if "notes" in sections:
-        brief.notes = clean(sections["notes"])
-    if "references" in sections:
-        refs = clean_list(sections["references"])
-        if refs:
-            brief.references = refs
-
-    # Story subsections
-    story_subs = subsections.get("story", {})
-    has_narrative = False
-    narrative = NarrativeDirection()
-    if "thesis" in story_subs and clean(story_subs["thesis"]):
-        narrative.story_thesis = clean(story_subs["thesis"])
-        has_narrative = True
-    if "key beats" in story_subs:
-        beats = clean_list(story_subs["key beats"])
-        if beats:
-            narrative.key_beats = beats
-            has_narrative = True
-    if "hook" in story_subs and clean(story_subs["hook"]):
-        narrative.story_hook = clean(story_subs["hook"])
-        has_narrative = True
-    if "ending" in story_subs and clean(story_subs["ending"]):
-        narrative.ending_note = clean(story_subs["ending"])
-        has_narrative = True
-    if "structure" in story_subs and clean(story_subs["structure"]):
-        narrative.structure = clean(story_subs["structure"])
-        has_narrative = True
-    if has_narrative:
-        brief.narrative = narrative
-
-    # Style subsections
-    style_subs = subsections.get("style", {})
-    has_style = False
-    style_dir = StyleDirection()
-    if "pacing" in style_subs and clean(style_subs["pacing"]):
-        style_dir.pacing = clean(style_subs["pacing"])
-        has_style = True
-    if "music" in style_subs and clean(style_subs["music"]):
-        style_dir.music_mood = clean(style_subs["music"])
-        has_style = True
-    if "energy" in style_subs and clean(style_subs["energy"]):
-        style_dir.energy_curve = clean(style_subs["energy"])
-        has_style = True
-    if "visual tone" in style_subs and clean(style_subs["visual tone"]):
-        style_dir.visual_tone = clean(style_subs["visual tone"])
-        has_style = True
-    if "transitions" in style_subs and clean(style_subs["transitions"]):
-        style_dir.transitions = clean(style_subs["transitions"])
-        has_style = True
-    if has_style:
-        brief.style = style_dir
-
-    # Check if anything was actually filled
-    has_content = any(
-        [
-            brief.intent,
-            brief.people,
-            brief.activity,
-            brief.tone,
-            brief.highlights,
-            brief.avoid,
-            brief.duration,
-            brief.notes,
-            brief.audience,
-            brief.narrative,
-            brief.style,
-            brief.references,
-        ]
+    return CreativeBrief(
+        brief_version=2,
+        source="file",
+        creative_direction_text=cleaned,
     )
-
-    return brief if has_content else None
 
 
 def format_context_for_prompt(user_context: dict) -> str:
@@ -1262,62 +1029,75 @@ def format_brief_for_prompt(brief, phase: str = "phase2") -> str:
         lines.append("")
 
     # --- Tier 2: CREATIVE DIRECTION ---
-    direction = []
-
-    if brief.intent:
-        direction.append(
-            f"- NORTH STAR: The viewer should {brief.intent}. "
-            "Every editorial decision must serve this intent."
+    # Freeform passthrough: if the filmmaker provided a raw creative direction
+    # document, inject it as-is. The LLM extracts what it needs.
+    if brief.creative_direction_text:
+        lines.append(
+            "CREATIVE DIRECTION (the filmmaker's vision for this edit — "
+            "read carefully and let it guide every editorial decision):"
         )
-
-    if brief.audience and (brief.audience.platform or brief.audience.viewer):
-        parts = []
-        if brief.audience.platform:
-            parts.append(brief.audience.platform)
-        if brief.audience.viewer:
-            parts.append(f"for {brief.audience.viewer}")
-        direction.append(
-            f"- AUDIENCE: {' '.join(parts)}. Tailor hooks, pacing, and content density."
-        )
-
-    if brief.narrative:
-        n = brief.narrative
-        if n.story_thesis:
-            direction.append(f"- STORY THESIS: {n.story_thesis}")
-        if n.structure:
-            direction.append(f"- STRUCTURE: {n.structure}")
-        # Key beats and full narrative details only for Phase 2
-        if phase == "phase2":
-            if n.key_beats:
-                beats = "\n".join(f"  {i}. {b}" for i, b in enumerate(n.key_beats, 1))
-                direction.append(f"- KEY NARRATIVE BEATS (in suggested order):\n{beats}")
-            if n.story_hook:
-                direction.append(f"- OPENING: {n.story_hook}")
-            if n.ending_note:
-                direction.append(f"- ENDING: {n.ending_note}")
-
-    if brief.style:
-        s = brief.style
-        if s.pacing:
-            direction.append(f"- PACING: {s.pacing}")
-        if s.music_mood:
-            direction.append(f"- MUSIC: {s.music_mood}")
-        if s.energy_curve:
-            direction.append(f"- ENERGY ARC: {s.energy_curve}")
-        # Transitions and visual tone only for Phase 2
-        if phase == "phase2":
-            if s.transitions:
-                direction.append(f"- TRANSITIONS: {s.transitions}")
-            if s.visual_tone:
-                direction.append(f"- VISUAL TONE: {s.visual_tone}")
-
-    if brief.references:
-        direction.append(f"- REFERENCE STYLE: {', '.join(brief.references)}")
-
-    if direction:
-        lines.append("CREATIVE DIRECTION (strong guidance — the filmmaker's vision for this edit):")
-        lines.extend(direction)
+        lines.append(brief.creative_direction_text.strip())
         lines.append("")
+    else:
+        # Structured fields from TUI input
+        direction = []
+
+        if brief.intent:
+            direction.append(
+                f"- NORTH STAR: The viewer should {brief.intent}. "
+                "Every editorial decision must serve this intent."
+            )
+
+        if brief.audience and (brief.audience.platform or brief.audience.viewer):
+            parts = []
+            if brief.audience.platform:
+                parts.append(brief.audience.platform)
+            if brief.audience.viewer:
+                parts.append(f"for {brief.audience.viewer}")
+            direction.append(
+                f"- AUDIENCE: {' '.join(parts)}. Tailor hooks, pacing, and content density."
+            )
+
+        if brief.narrative:
+            n = brief.narrative
+            if n.story_thesis:
+                direction.append(f"- STORY THESIS: {n.story_thesis}")
+            if n.structure:
+                direction.append(f"- STRUCTURE: {n.structure}")
+            # Key beats and full narrative details only for Phase 2
+            if phase == "phase2":
+                if n.key_beats:
+                    beats = "\n".join(f"  {i}. {b}" for i, b in enumerate(n.key_beats, 1))
+                    direction.append(f"- KEY NARRATIVE BEATS (in suggested order):\n{beats}")
+                if n.story_hook:
+                    direction.append(f"- OPENING: {n.story_hook}")
+                if n.ending_note:
+                    direction.append(f"- ENDING: {n.ending_note}")
+
+        if brief.style:
+            s = brief.style
+            if s.pacing:
+                direction.append(f"- PACING: {s.pacing}")
+            if s.music_mood:
+                direction.append(f"- MUSIC: {s.music_mood}")
+            if s.energy_curve:
+                direction.append(f"- ENERGY ARC: {s.energy_curve}")
+            # Transitions and visual tone only for Phase 2
+            if phase == "phase2":
+                if s.transitions:
+                    direction.append(f"- TRANSITIONS: {s.transitions}")
+                if s.visual_tone:
+                    direction.append(f"- VISUAL TONE: {s.visual_tone}")
+
+        if brief.references:
+            direction.append(f"- REFERENCE STYLE: {', '.join(brief.references)}")
+
+        if direction:
+            lines.append(
+                "CREATIVE DIRECTION (strong guidance — the filmmaker's vision for this edit):"
+            )
+            lines.extend(direction)
+            lines.append("")
 
     # --- Tier 3: PREFERENCES ---
     preferences = []
