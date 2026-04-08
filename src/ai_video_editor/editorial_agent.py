@@ -538,8 +538,11 @@ def _review_single_clip_gemini(
         retry_prompt = prompt + f"\n\n{feedback}\nPlease fix these issues."
         print(f"  {label}: critical validation issues, retrying with feedback...")
         with otel_phase_span(
-            "phase1_retry", stage="review", provider="gemini",
-            clip_id=clip_id, extra_tags=["retry:true"],
+            "phase1_retry",
+            stage="review",
+            provider="gemini",
+            clip_id=clip_id,
+            extra_tags=["retry:true"],
         ):
             retry_response = traced_gemini_generate(
                 client,
@@ -1190,6 +1193,8 @@ def _run_phase2_split(
                         temperature=0.2,
                         response_mime_type="application/json",
                         response_schema=StoryPlan,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        max_output_tokens=65536,
                     ),
                     phase="phase2a_structuring",
                     tracer=tracer,
@@ -1240,12 +1245,14 @@ def _run_phase2_split(
             with otel_phase_span("phase2b_assembly", stage="storyboard", provider="gemini", call="2B"):
                 response_2b = traced_gemini_generate(
                     client,
-                    model=gemini_cfg.phase2,
+                    model=gemini_cfg.phase2b,
                     contents=assembly_prompt,
                     config=types.GenerateContentConfig(
                         temperature=gemini_cfg.phase2b_temperature,
                         response_mime_type="application/json",
                         response_schema=EditorialStoryboard,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        max_output_tokens=65536,
                     ),
                     phase="phase2b_assembly",
                     tracer=tracer,
@@ -1319,6 +1326,11 @@ def _run_phase2_split(
     if review_config and review_config.enabled:
         from .editorial_director import run_editorial_review
 
+        print(
+            f"  [Director] Starting editorial review ({review_config.model}, "
+            f"up to {review_config.max_turns} turns, "
+            f"{review_config.wall_clock_timeout_sec:.0f}s timeout)..."
+        )
         storyboard, _review_log = run_editorial_review(
             storyboard=storyboard,
             clip_reviews=clip_reviews,
@@ -1328,6 +1340,11 @@ def _run_phase2_split(
             tracer=tracer,
             interactive=interactive,
             style_guidelines=style_supplement,
+        )
+        print(
+            f"  [Director] Review complete: {_review_log.convergence_reason} "
+            f"({_review_log.total_turns} turns, {_review_log.total_fixes} fixes, "
+            f"${_review_log.total_cost_usd:.3f}, {_review_log.total_duration_sec:.1f}s)"
         )
 
     # ── Version and save outputs ───────────────────────────────────────────
@@ -1346,7 +1363,12 @@ def _run_phase2_split(
         _um2 = _re3.search(r"_v(\d+)\.", _uc2.name)
         if _um2:
             review_inputs["user_context"] = f"user_context:user:v{_um2.group(1)}"
-    cfg_snap = {"model": gemini_cfg.phase2, "temperature": gemini_cfg.phase2_temperature}
+    cfg_snap = {
+        "model_2a": gemini_cfg.phase2,
+        "model_2a5": gemini_cfg.structuring_model,
+        "model_2b": gemini_cfg.phase2b,
+        "temperature": gemini_cfg.phase2_temperature,
+    }
 
     from .versioning import current_version
 
@@ -1586,6 +1608,7 @@ def run_phase2(
                     temperature=gemini_cfg.phase2_temperature,
                     response_mime_type="application/json",
                     response_schema=EditorialStoryboard,
+                    max_output_tokens=65536,
                 ),
                 phase="phase2",
                 tracer=tracer,
@@ -1651,9 +1674,7 @@ def run_phase2(
                 storyboard=storyboard,
                 user_context=user_context,
                 client=client,
-                model=gemini_cfg.structuring_model
-                if hasattr(gemini_cfg, "structuring_model")
-                else "gemini-3-flash-preview",
+                model=gemini_cfg.structuring_model,
                 tracer=tracer,
             )
 
@@ -1661,6 +1682,11 @@ def run_phase2(
     if review_config and review_config.enabled:
         from .editorial_director import run_editorial_review
 
+        print(
+            f"  [Director] Starting editorial review ({review_config.model}, "
+            f"up to {review_config.max_turns} turns, "
+            f"{review_config.wall_clock_timeout_sec:.0f}s timeout)..."
+        )
         storyboard, _review_log = run_editorial_review(
             storyboard=storyboard,
             clip_reviews=clip_reviews,
@@ -1670,6 +1696,11 @@ def run_phase2(
             tracer=tracer,
             interactive=interactive,
             style_guidelines=style_supplement,
+        )
+        print(
+            f"  [Director] Review complete: {_review_log.convergence_reason} "
+            f"({_review_log.total_turns} turns, {_review_log.total_fixes} fixes, "
+            f"${_review_log.total_cost_usd:.3f}, {_review_log.total_duration_sec:.1f}s)"
         )
 
     # Version and save outputs

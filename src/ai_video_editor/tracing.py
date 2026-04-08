@@ -14,6 +14,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .config import (
+    MODEL_CLAUDE_HAIKU,
+    MODEL_CLAUDE_SONNET,
+    MODEL_GEMINI_25_FLASH,
+    MODEL_GEMINI_25_FLASH_LITE,
+    MODEL_GEMINI_25_PRO,
+    MODEL_GEMINI_3_FLASH,
+)
+
 
 # ---------------------------------------------------------------------------
 # Retry configuration
@@ -72,14 +81,14 @@ COST_PER_1M_TOKENS = {
     # Gemini 3.x (2026-04 pricing)
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
     "gemini-3.1-flash-lite-preview": {"input": 0.25, "output": 1.50},
-    "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+    MODEL_GEMINI_3_FLASH: {"input": 0.50, "output": 3.00},
     # Gemini 2.5
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+    MODEL_GEMINI_25_FLASH: {"input": 0.30, "output": 2.50},
+    MODEL_GEMINI_25_FLASH_LITE: {"input": 0.10, "output": 0.40},
+    MODEL_GEMINI_25_PRO: {"input": 1.25, "output": 10.00},
     # Claude
-    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+    MODEL_CLAUDE_SONNET: {"input": 3.00, "output": 15.00},
+    MODEL_CLAUDE_HAIKU: {"input": 0.80, "output": 4.00},
 }
 
 # Gemini video token estimation: ~263 tokens per second of video at 1fps
@@ -395,7 +404,7 @@ def start_phoenix_server(port: int = 6006, storage_dir: Path | None = None) -> N
             f"\n  Phoenix failed to import: {e}\n\n"
             "  Try reinstalling the tracing extras:\n"
             '    uv pip install -e ".[tracing]" --force-reinstall --no-deps\n'
-            "    uv pip install -e \".[tracing]\"\n"
+            '    uv pip install -e ".[tracing]"\n'
         ) from None
 
     storage = storage_dir or Path.home() / ".vx" / "phoenix"
@@ -743,7 +752,7 @@ def traced_claude_generate(
 def estimate_phase1_cost(
     clip_count: int,
     avg_clip_duration_sec: float,
-    model: str = "gemini-3-flash-preview",
+    model: str = MODEL_GEMINI_3_FLASH,
 ) -> dict:
     """Estimate Phase 1 cost (one LLM call per clip with video)."""
     video_tokens = int(avg_clip_duration_sec * GEMINI_VIDEO_TOKENS_PER_SEC)
@@ -766,7 +775,7 @@ def estimate_phase1_cost(
 def estimate_phase2_cost(
     clip_count: int,
     reviews_chars: int,
-    model: str = "gemini-3-flash-preview",
+    model: str = MODEL_GEMINI_3_FLASH,
     visual: bool = False,
     total_video_duration_sec: float = 0,
 ) -> dict:
@@ -791,7 +800,7 @@ def estimate_phase2_cost(
 def estimate_transcription_cost(
     clip_count: int,
     avg_clip_duration_sec: float,
-    model: str = "gemini-2.5-flash",
+    model: str = MODEL_GEMINI_25_FLASH,
 ) -> dict:
     """Estimate Gemini transcription cost (one call per clip with video)."""
     video_tokens = int(avg_clip_duration_sec * GEMINI_VIDEO_TOKENS_PER_SEC)
@@ -813,7 +822,7 @@ def estimate_transcription_cost(
 
 def estimate_monologue_cost(
     clip_count: int,
-    model: str = "gemini-3-flash-preview",
+    model: str = MODEL_GEMINI_3_FLASH,
 ) -> dict:
     """Estimate Phase 3 (Visual Monologue) cost — single text-only LLM call."""
     # Input: storyboard JSON (~3K tokens) + transcripts (~1K per clip) + prompt (~2K)

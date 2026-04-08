@@ -687,6 +687,24 @@ class TestConfig:
 
         assert GeminiConfig().structuring_model == "gemini-2.5-flash-lite"
 
+    def test_assembly_model_configured(self):
+        from ai_video_editor.config import GeminiConfig
+
+        g = GeminiConfig()
+        assert g.assembly_model == "gemini-2.5-flash"
+        assert g.phase2b == "gemini-2.5-flash"
+
+    def test_phase2_model_configured(self):
+        from ai_video_editor.config import GeminiConfig
+
+        assert GeminiConfig().phase2 == "gemini-2.5-pro"
+
+    def test_phase2b_fallback(self):
+        from ai_video_editor.config import GeminiConfig
+
+        g = GeminiConfig(assembly_model=None)
+        assert g.phase2b == g.phase2
+
 
 # ---------------------------------------------------------------------------
 # Integration: full prompt chain dry-run

@@ -10,6 +10,16 @@ LIBRARY_DIR = Path("library")
 # Supported video extensions for clip discovery
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".mts", ".m4v"}
 
+# ---------------------------------------------------------------------------
+# Model constants — single source of truth for all LLM model name strings
+# ---------------------------------------------------------------------------
+MODEL_GEMINI_3_FLASH = "gemini-3-flash-preview"
+MODEL_GEMINI_25_PRO = "gemini-2.5-pro"
+MODEL_GEMINI_25_FLASH = "gemini-2.5-flash"
+MODEL_GEMINI_25_FLASH_LITE = "gemini-2.5-flash-lite"
+MODEL_CLAUDE_SONNET = "claude-sonnet-4-20250514"
+MODEL_CLAUDE_HAIKU = "claude-haiku-4-5-20251001"
+
 
 @dataclass
 class PreprocessConfig:
@@ -68,7 +78,7 @@ class OutputFormat:
 
 @dataclass
 class ClaudeConfig:
-    model: str = "claude-sonnet-4-20250514"
+    model: str = MODEL_CLAUDE_SONNET
     max_images_per_batch: int = 20
     temperature: float = 0.2
     phase2_temperature: float = 0.6
@@ -77,9 +87,10 @@ class ClaudeConfig:
 
 @dataclass
 class GeminiConfig:
-    model: str = "gemini-3-flash-preview"
-    phase2_model: str | None = "gemini-3-flash-preview"
-    structuring_model: str = "gemini-3-flash-preview"  # cheap model for Call 2A.5
+    model: str = MODEL_GEMINI_3_FLASH  # Phase 1 review
+    phase2_model: str | None = MODEL_GEMINI_25_PRO  # Call 2A (creative reasoning)
+    structuring_model: str = MODEL_GEMINI_25_FLASH_LITE  # Call 2A.5 (JSON structuring)
+    assembly_model: str | None = MODEL_GEMINI_25_FLASH  # Call 2B (precise assembly)
     temperature: float = 0.2
     phase2_temperature: float = 0.6
     phase2b_temperature: float = 0.3  # assembly is mechanical, not creative
@@ -87,8 +98,13 @@ class GeminiConfig:
 
     @property
     def phase2(self) -> str:
-        """Model to use for Phase 2 (editorial assembly). Falls back to self.model."""
+        """Model for Call 2A (creative reasoning). Falls back to self.model."""
         return self.phase2_model or self.model
+
+    @property
+    def phase2b(self) -> str:
+        """Model for Call 2B (precise assembly). Falls back to phase2."""
+        return self.assembly_model or self.phase2
 
 
 @dataclass
@@ -100,7 +116,7 @@ class TranscribeConfig:
     # Provider selection: "auto" | "mlx" | "gemini"
     provider: str = "auto"
     # Gemini transcription settings (cloud)
-    gemini_model: str = "gemini-3-flash-preview"
+    gemini_model: str = MODEL_GEMINI_3_FLASH
 
 
 @dataclass
@@ -248,7 +264,7 @@ class ReviewConfig:
     """Configuration for the Editorial Director review loop."""
 
     enabled: bool = True
-    model: str = "gemini-3-flash-preview"
+    model: str = MODEL_GEMINI_3_FLASH
     max_turns: int = 50
     max_fixes: int = 40
     max_review_cost_usd: float = 0.50
