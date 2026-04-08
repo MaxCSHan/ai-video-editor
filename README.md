@@ -67,13 +67,18 @@ Raw Clips                       You shot 17 clips on your trip.
        │                        Uses briefing context (people names, intent).
        │                        One LLM call per clip. Cached per clip.
        ▼
-┌─────────────┐                 The AI acts as creative editor. It sees ALL
-│  Phase 2    │                 clip reviews + transcripts + your briefing
-│  Editorial  │                 context. For ≤10 clips, can also see proxy
-│  Assembly   │                 videos (--visual). Produces a complete edit
-└──────┬──────┘                 plan: story arc, cast, EDL with precise
-       │                        in/out timestamps (seconds), pacing, music.
-       │                        One LLM call. Structured output (Pydantic).
+┌─────────────┐                 The AI acts as creative editor. Two modes:
+│  Phase 2    │
+│  Editorial  │                 STORY MODE (default):
+│  Assembly   │                 Sees ALL reviews + transcripts + brief.
+└──────┬──────┘                 Freely structures the narrative. Best for
+       │                        highlights, recaps, cinematic montages.
+       │
+       │                        TIMELINE MODE (for vlogs):
+       │                        Groups clips by date/scene, then edits
+       │                        each section independently in chronological
+       │                        order. Best for trip vlogs, day-in-the-life,
+       │                        event coverage. See "Edit Modes" below.
        │
        ├──→ editorial.json       The structured data. Source of truth.
        ├──→ editorial.md         Human-readable rendered view.
@@ -107,6 +112,86 @@ cp .env.example .env   # Add your GEMINI_API_KEY
 vx                     # Launch interactive mode
 ```
 
+## Edit Modes
+
+VX offers two editing approaches for Phase 2 (editorial assembly). Everything before Phase 2 — preprocessing, briefing, transcription, clip reviews — is shared between both modes.
+
+### Story Mode (default)
+
+The AI sees all your clips at once and freely structures the narrative. It picks the opening hook, decides the story arc, and may reorder clips for dramatic effect.
+
+**Best for:** highlight reels, event recaps, cinematic montages, thematic edits, any project where creative reordering improves the video.
+
+**How it works:**
+1. All clip reviews, transcripts, and your creative brief go into a single editorial call
+2. The AI plans the narrative freely — it can pull a climax moment to the front, interleave locations, or build thematic progressions
+3. Output: one `EditorialStoryboard` with story arc, cast, and timed segments
+
+### Timeline Mode
+
+The AI edits scene-by-scene in chronological order. Your footage is automatically grouped into sections (by date and shooting gaps), then each section is edited independently. The result preserves the natural timeline of your trip while still making aesthetic decisions within each scene.
+
+**Best for:** travel vlogs, trip diaries, day-in-the-life videos, family videos, event coverage — anything where "what happened when" is the story.
+
+**How it works:**
+1. Clips are grouped into sections by date and time gaps (configurable threshold, default 30 minutes)
+2. A storyline call plans the narrative arc across sections and picks the opening hook
+3. A hook call creates a 10-15 second cinematic opening from the best moments
+4. Each section is edited independently — the AI receives only that section's clips plus a running narrative summary from prior sections
+5. Sections are merged deterministically into the final storyboard
+
+**Why this exists:** When given 20-50 clips at once, LLMs consistently break chronological order in vlogs — reordering scenes "creatively" in ways that destroy the narrative timeline. Timeline Mode enforces chronological order structurally (by the pipeline, not by hoping the LLM complies) while still giving the AI full aesthetic freedom within each scene. B-roll, entrance shots, and close-ups that were filmed out of order can still be placed wherever they serve the story best within their section.
+
+### How to select
+
+There are three ways to choose your edit mode:
+
+**1. Interactive TUI** — When you run `vx` and reach Phase 2, you'll be prompted:
+```
+Edit mode?
+  ○ Story Mode    (AI freely structures the narrative)
+  ● Timeline Mode (scene-by-scene chronological — best for vlogs)
+```
+
+**2. CLI flag** — Override directly:
+```bash
+vx analyze my-trip --timeline          # Force Timeline Mode
+vx analyze my-trip --story             # Force Story Mode
+vx analyze my-trip --timeline --gap-minutes 15  # Timeline with tighter scene splits
+```
+
+**3. Creative Brief** — Set `structure: chronological` in your creative brief (via the deep briefing depth or `creative_brief.md` file), and Timeline Mode activates automatically.
+
+### Viewing and editing sections (Timeline Mode)
+
+Before the AI edits your footage, you can review how clips were grouped:
+
+```bash
+vx sections my-trip                    # View current section grouping
+vx sections my-trip --regroup          # Re-run grouping from manifest
+vx sections my-trip --gap-minutes 15   # Use tighter time gap threshold
+```
+
+Example output:
+```
+Sections for "myanmar" (158 clips, 9 days, 53 sections)
+
+Day 1 — Jun 23 (12 clips)
+  ├── Airport departure (4 clips, 20:05-20:15)
+  │   ├── IMG_1818 — Bus to airport
+  │   ├── IMG_1819 — Elevator selfie
+  │   └── ...
+  ├── Bus to Yangon (3 clips, 21:04-21:14)
+  └── Yangon arrival (3 clips, 22:21-22:43)
+
+Day 2 — Jun 24 (20 clips)
+  ├── Flight landing (4 clips, 02:26-03:24)
+  ├── Drive to hotel (4 clips, 04:31-04:42)
+  ...
+```
+
+In the interactive TUI, you can merge, split, or rename sections before the AI starts editing.
+
 ## CLI
 
 ### Interactive mode (recommended)
@@ -124,7 +209,10 @@ vx transcribe my-trip --provider gemini  # Gemini: speaker ID + sound events
 vx transcribe my-trip --provider mlx  # mlx-whisper: local, fast, no API cost
 vx transcribe my-trip --force --srt   # Overwrite cached + generate SRT/VTT
 vx brief my-trip --scan               # AI-guided briefing (quick scan + questions)
-vx analyze my-trip                    # Briefing + Phase 1 + Phase 2
+vx analyze my-trip                    # Briefing + Phase 1 + Phase 2 (Story Mode)
+vx analyze my-trip --timeline         # Use Timeline Mode (chronological scenes)
+vx analyze my-trip --story            # Use Story Mode (free narrative, default)
+vx analyze my-trip --timeline --gap-minutes 15  # Timeline with tighter scene splits
 vx analyze my-trip --visual           # Phase 2 sees proxy videos (richer edits)
 vx analyze my-trip --dry-run          # Estimate token usage and cost
 vx analyze my-trip --force            # Re-run Phase 1 reviews from scratch
@@ -133,6 +221,11 @@ vx cut my-trip                        # Assemble rough cut (no LLM)
 vx export-xml my-trip                 # Export FCPXML for DaVinci Resolve / FCP
 vx export-xml my-trip --no-srt        # FCPXML only, skip subtitle export
 
+vx sections my-trip                   # View section grouping (Timeline Mode)
+vx sections my-trip --regroup         # Re-group from manifest
+vx eval my-trip                       # Score storyboard quality (7 dimensions)
+vx eval --all                         # Batch score all library projects
+vx eval my-trip --compare main,exp    # A/B compare two experiment tracks
 vx projects                           # List all projects
 vx status my-trip                     # Per-clip cache, versions, LLM usage
 vx config --provider gemini           # Set defaults
@@ -241,8 +334,9 @@ src/ai_video_editor/
   config.py             # Settings, paths, provider configs, OutputFormat, track-aware paths
   preprocess.py         # ffmpeg: proxy, frames, scenes, audio (parallel, cached, hwaccel)
   format_analyzer.py    # Source format detection, Live Photo filter, output recommendation
-  editorial_prompts.py  # Phase 1 + 2 prompt engineering
+  editorial_prompts.py  # Phase 1 + 2 prompt engineering (Story + Timeline modes)
   editorial_agent.py    # Multi-clip orchestrator (transcribe, review, assemble)
+  section_grouping.py   # Timeline Mode: clip grouping, section labeling, merge
   render.py             # Markdown + interactive HTML from Pydantic models
   rough_cut.py          # Validation + format-normalized ffmpeg assembly (no LLM)
   fcpxml_export.py      # FCPXML v1.9 export for DaVinci Resolve / Final Cut Pro
@@ -258,7 +352,8 @@ src/ai_video_editor/
 | Quick Scan | All proxy videos | Quick overview for smart briefing | Yes — one call (Gemini) |
 | Briefing | AI scan + user answers | user_context.json | Interactive (AI-guided or manual) |
 | Phase 1 | Proxy video + transcript | Structured review JSON | Yes — per clip, cached |
-| Phase 2 | Reviews + transcripts + briefing (+ videos with --visual) | EditorialStoryboard (Pydantic JSON) | Yes — one call |
+| Phase 2 (Story) | Reviews + transcripts + briefing (+ videos with --visual) | EditorialStoryboard (Pydantic JSON) | Yes — 3 calls (reasoning → structuring → assembly) |
+| Phase 2 (Timeline) | Reviews + transcripts + briefing, grouped by section | EditorialStoryboard (Pydantic JSON) | Yes — 2 + N calls (storyline + hook + one per section) |
 | Render | Structured JSON | Markdown + HTML preview (with transcript overlay) | No — templates |
 | Cut | Structured JSON | rough_cut.mp4 | No — ffmpeg |
 | Export XML | Structured JSON + manifest | .fcpxml + .srt files | No — XML generation |
