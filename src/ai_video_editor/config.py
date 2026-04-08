@@ -96,7 +96,6 @@ class GeminiConfig:
     phase2b_temperature: float = 0.3  # assembly is mechanical, not creative
     use_split_pipeline: bool = True  # multi-call Phase 2 is the default for Gemini
     use_timeline_mode: bool = False  # Timeline Mode: scene-by-scene chronological assembly
-    section_gap_minutes: float = 30.0  # time gap threshold for section splitting
 
     @property
     def phase2(self) -> str:

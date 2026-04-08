@@ -956,11 +956,83 @@ def build_editorial_assembly_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Section-based Phase 2 — Divide & Conquer prompt builders
+# Timeline Mode Phase 2 — Scene Planner + Narrative Planner prompt builders
 # ---------------------------------------------------------------------------
 
 
-def build_storyline_prompt(
+def build_scene_planner_prompt(
+    date_groups: list,
+    clip_reviews: list[dict],
+) -> str:
+    """Build the Scene Planner prompt: group clips into scenes within each date.
+
+    The LLM sees condensed clip reviews grouped by date and decides how to
+    split them into logical scenes/activities. No narrative arc, no constraints —
+    just content-based grouping.
+    """
+    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
+
+    prompt = (
+        "You are a video editor organizing footage into scenes.\n\n"
+        "The clips below are grouped by shooting date. Within each date, "
+        "group the clips into logical scenes based on location, activity, "
+        "and content coherence. Each scene should represent one distinct "
+        "activity or place.\n\n"
+        "Guidelines:\n"
+        "- Clips shot at the same location/activity belong together even if "
+        "there are time gaps (e.g., walking to an entrance and filming the sign "
+        "30 minutes later are the same scene)\n"
+        "- B-roll, close-ups, and establishing shots belong with the main "
+        "activity they document\n"
+        "- A scene change means a different location OR a clearly different activity\n"
+        "- Keep scenes in chronological order within each date\n"
+        "- Use section_id format: 'day{N}_scene{M}' (e.g., day1_scene1, day1_scene2)\n\n"
+    )
+
+    for group in date_groups:
+        prompt += f"## {group.label} ({group.date})\n\n"
+        # Show all clips for this date
+        all_clip_ids = []
+        for section in group.sections:
+            all_clip_ids.extend(section.clip_ids)
+
+        prompt += f"{len(all_clip_ids)} clips:\n\n"
+        for clip_id in all_clip_ids:
+            review = reviews_by_id.get(clip_id, {})
+            content = review.get("content_type", [])
+            dur = review.get("duration_sec", 0)
+            summary = review.get("summary", "")
+            prompt += f"  **{clip_id}** ({dur:.0f}s) — {content}\n"
+            if summary:
+                prompt += f"    {summary[:120]}\n"
+            for km in review.get("key_moments", []):
+                if km.get("editorial_value") in ("high", "medium"):
+                    prompt += (
+                        f"    - [{km.get('timestamp_sec', 0):.0f}s] "
+                        f"{km.get('description', '')} "
+                        f"(value: {km.get('editorial_value')})\n"
+                    )
+            if review.get("audio", {}).get("has_speech"):
+                speech = review.get("audio", {}).get("speech_summary", "")
+                if speech:
+                    prompt += f"    - Speech: {speech[:100]}\n"
+        prompt += "\n"
+
+    prompt += (
+        "Now produce a ScenePlan.\n\n"
+        "For each scene, provide:\n"
+        "- section_id: unique ID (day{N}_scene{M} format)\n"
+        "- label: a short human-readable name for the scene (e.g., 'Temple visit')\n"
+        "- clip_ids: the clips that belong to this scene\n"
+        "- activity: the main activity type\n"
+        "- time_range: approximate time range (HH:MM-HH:MM)\n\n"
+        "In reasoning, explain your overall grouping strategy.\n"
+    )
+
+    return prompt
+
+
+def build_narrative_planner_prompt(
     section_groups: list,
     clip_reviews: list[dict],
     user_context_text: str | None = None,
@@ -969,29 +1041,27 @@ def build_storyline_prompt(
     highlights: str = "",
     avoid: str = "",
 ) -> str:
-    """Build the storyline prompt: plan narrative arc and distribute constraints.
+    """Build the Narrative Planner prompt: plan arc and distribute constraints.
 
-    The LLM sees condensed clip reviews grouped by section so it can determine
-    which section has which footage, then assigns filmmaker constraints to the
-    sections that can actually satisfy them.
+    Receives confirmed sections (from Scene Planner + HITL review) and the full
+    creative brief. Assigns narrative roles, distributes constraints to sections,
+    and sets per-section editorial goals.
     """
-    reviews_by_id = {r.get("clip_id", ""): r for r in clip_reviews}
+    from .section_grouping import summarize_section_for_prompt
 
     prompt = (
         "You are an editorial director planning a vlog from trip footage.\n"
-        "The footage has been grouped into chronological sections. "
+        "The footage has been organized into scenes (confirmed by the filmmaker). "
         "Your job is to:\n"
-        "1. Plan the narrative arc across sections\n"
+        "1. Plan the narrative arc across scenes\n"
         "2. Pick the opening hook material\n"
-        "3. Assign each filmmaker constraint to the section that can satisfy it\n"
-        "4. Give each section a clear editorial goal\n\n"
-        "IMPORTANT: Sections are in chronological order and the final video "
-        "MUST follow this order (except the hook, which can come from any section). "
-        "Your narrative assignments shape HOW each section is edited, "
-        "not WHETHER or WHEN it appears.\n"
+        "3. Assign each filmmaker constraint to the scene that can satisfy it\n"
+        "4. Give each scene a clear editorial goal\n\n"
+        "IMPORTANT: Scenes are in chronological order and the final video "
+        "MUST follow this order (except the hook, which can come from any scene).\n"
     )
 
-    # User context (creative direction + preferences, NOT constraints)
+    # Creative direction
     if user_context_text:
         prompt += f"\n## Filmmaker Context\n{user_context_text}\n"
 
@@ -1003,32 +1073,15 @@ def build_storyline_prompt(
                 f"- **{c.get('label', '?')}**: {c.get('description', '')} ({c.get('role', '')})\n"
             )
 
-    # Sections with condensed clip reviews (not just summaries)
-    prompt += f"\n## Sections ({sum(len(g.sections) for g in section_groups)} total)\n\n"
+    # Sections with summaries (Scene Planner already grouped them)
+    total_sections = sum(len(g.sections) for g in section_groups)
+    prompt += f"\n## Scenes ({total_sections} total)\n\n"
     for group in section_groups:
         for section in group.sections:
-            prompt += f"### {section.label} ({section.section_id})\n"
-            prompt += f"Day: {group.label} | Time: {section.time_range or 'unknown'}\n"
-            prompt += f"Clips: {len(section.clip_ids)}\n\n"
-            for clip_id in section.clip_ids:
-                review = reviews_by_id.get(clip_id, {})
-                content = review.get("content_type", [])
-                dur = review.get("duration_sec", 0)
-                prompt += f"  **{clip_id}** ({dur:.0f}s) — {content}\n"
-                for km in review.get("key_moments", []):
-                    if km.get("editorial_value") in ("high", "medium"):
-                        prompt += (
-                            f"    - [{km.get('timestamp_sec', 0):.0f}s] "
-                            f"{km.get('description', '')} "
-                            f"(value: {km.get('editorial_value')})\n"
-                        )
-                if review.get("audio", {}).get("has_speech"):
-                    summary = review.get("audio", {}).get("speech_summary", "")
-                    if summary:
-                        prompt += f"    - Speech: {summary[:100]}\n"
-            prompt += "\n"
+            prompt += summarize_section_for_prompt(group, section, clip_reviews)
+            prompt += "\n\n"
 
-    # Constraint distribution instructions
+    # Constraint distribution
     if highlights or avoid:
         prompt += "## CONSTRAINT DISTRIBUTION\n\n"
         prompt += "The filmmaker specified these constraints:\n"
@@ -1037,27 +1090,27 @@ def build_storyline_prompt(
         if avoid:
             prompt += f"- MUST EXCLUDE: {avoid}\n"
         prompt += (
-            "\nFor each constraint, determine WHICH SECTION can satisfy it based on "
-            "the clip reviews above. Assign it to that section's must_include or "
-            "must_exclude list. If a constraint cannot be satisfied by any section, "
+            "\nFor each constraint, determine WHICH SCENE can satisfy it based on "
+            "the clip content above. Assign it to that scene's must_include or "
+            "must_exclude list. If a constraint cannot be satisfied by any scene, "
             "explain why in constraint_satisfaction.\n\n"
-            "DO NOT assign a constraint to a section that lacks the relevant footage.\n\n"
+            "DO NOT assign a constraint to a scene that lacks the relevant footage.\n\n"
         )
 
     prompt += (
         f"\nNow produce a SectionPlan for a {style}.\n\n"
         "For each section_narrative, provide:\n"
-        "- narrative_role: what this section contributes to the overall story\n"
+        "- section_id: must match a scene section_id from above\n"
+        "- narrative_role: what this scene contributes to the overall story\n"
         "- arc_phase: opening_context, rising_action, experience, climax, or closing_reflection\n"
         "- energy: high, medium, or low\n"
-        "- target_duration_sec: how long this section should be in the final edit\n"
-        "- section_goal: a clear, focused editorial objective for this section\n"
-        "- must_include: only constraints this section CAN satisfy (from the list above)\n"
-        "- must_exclude: only constraints relevant to this section\n"
-        "- key_clips: specific clip_ids from this section that serve the goal\n\n"
-        "Pick the section with the most visually compelling material for the "
-        "opening hook (hook_section_id). The hook is a 10-15 second cinematic "
-        "opening that grabs attention before the chronological story begins.\n"
+        "- target_duration_sec: how long this scene should be in the final edit\n"
+        "- section_goal: a clear, focused editorial objective\n"
+        "- must_include: only constraints this scene CAN satisfy\n"
+        "- must_exclude: only constraints relevant to this scene\n"
+        "- key_clips: specific clip_ids from this scene that serve the goal\n\n"
+        "Pick the scene with the most visually compelling material for the "
+        "opening hook (hook_section_id).\n"
     )
 
     return prompt
