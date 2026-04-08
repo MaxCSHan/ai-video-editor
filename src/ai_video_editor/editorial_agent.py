@@ -1339,7 +1339,9 @@ def _run_phase2_sections(
     # ── Editorial Director review ─────────────────────────────────────────
     if review_config and review_config.enabled:
         from .editorial_director import run_editorial_review
+        from .review_display import print_turn
 
+        print("  [Director] Autonomous review starting...")
         storyboard, _review_log = run_editorial_review(
             storyboard=storyboard,
             clip_reviews=clip_reviews,
@@ -1348,6 +1350,7 @@ def _run_phase2_sections(
             review_config=review_config,
             tracer=tracer,
             interactive=interactive,
+            turn_callback=print_turn,
             style_guidelines=style_supplement,
         )
 
