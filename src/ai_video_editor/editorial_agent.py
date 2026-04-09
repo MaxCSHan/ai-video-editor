@@ -789,6 +789,47 @@ def run_phase1_claude(
     return reviews, failed_ids
 
 
+def run_phase1(
+    editorial_paths: EditorialProjectPaths,
+    manifest: dict,
+    provider: str,
+    cfg: Config,
+    force: bool = False,
+    tracer=None,
+    style_supplement: str | None = None,
+    only_clip_ids: list[str] | None = None,
+    user_context: dict | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Unified Phase 1 entry point — dispatches to provider-specific implementation.
+
+    Returns (reviews, failed_clip_ids). Reviews are in original clip order.
+    """
+    if provider == "gemini":
+        return run_phase1_gemini(
+            editorial_paths,
+            manifest,
+            cfg.gemini,
+            force=force,
+            tracer=tracer,
+            style_supplement=style_supplement,
+            only_clip_ids=only_clip_ids,
+            user_context=user_context,
+        )
+    elif provider == "claude":
+        return run_phase1_claude(
+            editorial_paths,
+            manifest,
+            cfg.claude,
+            force=force,
+            tracer=tracer,
+            style_supplement=style_supplement,
+            only_clip_ids=only_clip_ids,
+            user_context=user_context,
+        )
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
+
+
 # ---------------------------------------------------------------------------
 # Response quality validation
 # ---------------------------------------------------------------------------
@@ -2628,25 +2669,16 @@ def _retry_failed_phase1(
             break
 
         print(f"\n  Retrying {len(failed)} clip(s)...\n")
-        if provider == "gemini":
-            reviews, failed = run_phase1_gemini(
-                editorial_paths,
-                manifest,
-                cfg.gemini,
-                tracer=tracer,
-                style_supplement=style_supplement,
-                only_clip_ids=failed,
-                user_context=user_context,
-            )
-        else:
-            reviews, failed = run_phase1_claude(
-                editorial_paths,
-                manifest,
-                cfg.claude,
-                style_supplement=style_supplement,
-                only_clip_ids=failed,
-                user_context=user_context,
-            )
+        reviews, failed = run_phase1(
+            editorial_paths,
+            manifest,
+            provider,
+            cfg,
+            tracer=tracer,
+            style_supplement=style_supplement,
+            only_clip_ids=failed,
+            user_context=user_context,
+        )
     return reviews, failed
 
 
@@ -2757,27 +2789,16 @@ def run_editorial_pipeline(
 
     # Phase 1 — per-clip reviews (with retry loop)
     print(f"[3/{total_phases}] Phase 1: Reviewing clips with {provider}...")
-    if provider == "gemini":
-        reviews, failed = run_phase1_gemini(
-            editorial_paths,
-            manifest,
-            cfg.gemini,
-            force=force,
-            tracer=tracer,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
-    elif provider == "claude":
-        reviews, failed = run_phase1_claude(
-            editorial_paths,
-            manifest,
-            cfg.claude,
-            force=force,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+    reviews, failed = run_phase1(
+        editorial_paths,
+        manifest,
+        provider,
+        cfg,
+        force=force,
+        tracer=tracer,
+        style_supplement=p1_supplement,
+        user_context=user_context,
+    )
     reviews, failed = _retry_failed_phase1(
         failed,
         reviews,

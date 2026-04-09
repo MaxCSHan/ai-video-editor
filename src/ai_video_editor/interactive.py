@@ -25,6 +25,7 @@ VX_STYLE = Style(
     ]
 )
 
+
 def _banner() -> str:
     return f"\n\033[1m  {t('app.title')}\033[0m\n\033[2m  {t('app.subtitle')}\033[0m\n"
 
@@ -712,16 +713,12 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
     if node_idx < len(PIPELINE_NODES) - 1:
         next_node = PIPELINE_NODES[node_idx + 1]
         choices.append(
-            questionary.Choice(
-                f"→ {_node_full_name(next_node)}", value=f"nav_{next_node}"
-            )
+            questionary.Choice(f"→ {_node_full_name(next_node)}", value=f"nav_{next_node}")
         )
     if node_idx > 0:
         prev_node = PIPELINE_NODES[node_idx - 1]
         choices.append(
-            questionary.Choice(
-                f"← {_node_full_name(prev_node)}", value=f"nav_{prev_node}"
-            )
+            questionary.Choice(f"← {_node_full_name(prev_node)}", value=f"nav_{prev_node}")
         )
 
     # --- Assembly (global) ---
@@ -892,8 +889,7 @@ def _new_project_flow(cfg):
         discover_source_clips,
         preprocess_all_clips,
         build_master_manifest,
-        run_phase1_gemini,
-        run_phase1_claude,
+        run_phase1,
         run_phase2,
         _retry_failed_phase1,
     )
@@ -995,23 +991,15 @@ def _new_project_flow(cfg):
         return
 
     print(f"\n  {t('phase1.running', provider=provider)}\n")
-    if provider == "gemini":
-        reviews, failed = run_phase1_gemini(
-            ep,
-            manifest,
-            cfg.gemini,
-            tracer=tracer,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
-    else:
-        reviews, failed = run_phase1_claude(
-            ep,
-            manifest,
-            cfg.claude,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
+    reviews, failed = run_phase1(
+        ep,
+        manifest,
+        provider,
+        cfg,
+        tracer=tracer,
+        style_supplement=p1_supplement,
+        user_context=user_context,
+    )
     reviews, failed = _retry_failed_phase1(
         failed,
         reviews,
@@ -1038,9 +1026,7 @@ def _new_project_flow(cfg):
     _render_tab_bar(_gather_pipeline_state(ep, meta), "P2")
 
     # Phase 2
-    if not questionary.confirm(
-        t("phase2.run_prompt"), default=True, style=VX_STYLE
-    ).ask():
+    if not questionary.confirm(t("phase2.run_prompt"), default=True, style=VX_STYLE).ask():
         print(f"\n  {t('phase2.skipped')}\n")
         return
 
@@ -1089,9 +1075,7 @@ def _new_project_flow(cfg):
 
     # Phase 3 — Visual Monologue (if preset supports it)
     if style_preset and style_preset.has_phase3:
-        if questionary.confirm(
-            t("phase3.run_prompt"), default=True, style=VX_STYLE
-        ).ask():
+        if questionary.confirm(t("phase3.run_prompt"), default=True, style=VX_STYLE).ask():
             from .editorial_agent import run_monologue
 
             print(f"\n  {t('phase3.running')}")
@@ -1209,7 +1193,9 @@ def _project_actions(name, cfg):
                     ).ask()
                     if selected is not None:
                         active_versions[active_node] = selected
-                        print(f"\n  {t('versions.switched', node=_node_label(active_node), version=selected)}")
+                        print(
+                            f"\n  {t('versions.switched', node=_node_label(active_node), version=selected)}"
+                        )
 
         # --- Node-specific actions ---
         elif action == "rescan":
@@ -1812,8 +1798,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         discover_clips_from_manifest,
         preprocess_all_clips,
         build_master_manifest,
-        run_phase1_gemini,
-        run_phase1_claude,
+        run_phase1,
         run_phase2,
         _retry_failed_phase1,
     )
@@ -1902,25 +1887,16 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         ).ask()
 
     print("\n  Phase 1: Reviewing clips...\n")
-    if provider == "gemini":
-        reviews, failed = run_phase1_gemini(
-            ep,
-            manifest,
-            cfg.gemini,
-            force=force_phase1,
-            tracer=tracer,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
-    else:
-        reviews, failed = run_phase1_claude(
-            ep,
-            manifest,
-            cfg.claude,
-            force=force_phase1,
-            style_supplement=p1_supplement,
-            user_context=user_context,
-        )
+    reviews, failed = run_phase1(
+        ep,
+        manifest,
+        provider,
+        cfg,
+        force=force_phase1,
+        tracer=tracer,
+        style_supplement=p1_supplement,
+        user_context=user_context,
+    )
     reviews, failed = _retry_failed_phase1(
         failed,
         reviews,
@@ -1984,9 +1960,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
 
     # Phase 3 — Visual Monologue (if preset supports it)
     if style_preset and style_preset.has_phase3:
-        if questionary.confirm(
-            t("phase3.run_prompt"), default=True, style=VX_STYLE
-        ).ask():
+        if questionary.confirm(t("phase3.run_prompt"), default=True, style=VX_STYLE).ask():
             from .editorial_agent import run_monologue
 
             print(f"\n  {t('phase3.running')}")
@@ -2743,9 +2717,7 @@ def _settings_flow(cfg):
             questionary.Choice(
                 t("settings.provider", current=ws.get("provider", "gemini")), value="provider"
             ),
-            questionary.Choice(
-                t("settings.style", current=ws.get("style", "vlog")), value="style"
-            ),
+            questionary.Choice(t("settings.style", current=ws.get("style", "vlog")), value="style"),
             questionary.Choice(t("settings.done"), value="done"),
         ]
 
@@ -2801,9 +2773,7 @@ def _settings_flow(cfg):
                 questionary.Choice(t("style.custom"), value="__custom__"),
             ]
             style_default = ws.get("style", "vlog")
-            if style_default not in [
-                c if isinstance(c, str) else c.value for c in style_choices
-            ]:
+            if style_default not in [c if isinstance(c, str) else c.value for c in style_choices]:
                 style_default = "vlog"
             style = questionary.select(
                 t("settings.style_prompt"),
