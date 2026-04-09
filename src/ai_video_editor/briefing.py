@@ -16,20 +16,8 @@ from .i18n import t
 import questionary
 from questionary import Style
 
-_GEMINI_UPLOAD_TIMEOUT_SEC = 300
-
-
-def _wait_for_gemini_file(video_file, client, timeout_sec: int = _GEMINI_UPLOAD_TIMEOUT_SEC):
-    """Poll until Gemini file processing completes, with timeout."""
-    start = time.monotonic()
-    while video_file.state.name == "PROCESSING":
-        if time.monotonic() - start > timeout_sec:
-            raise TimeoutError(
-                f"Gemini file processing timed out after {timeout_sec}s for {video_file.name}"
-            )
-        time.sleep(2)
-        video_file = client.files.get(name=video_file.name)
-    return video_file
+from .infra.gemini_client import GeminiClient
+from .domain.exceptions import FileUploadError
 
 
 # Custom style matching the vx aesthetic
@@ -268,14 +256,12 @@ def run_quick_scan(
 
     Returns QuickScanResult as dict, or None if no proxies or API unavailable.
     """
-    from google import genai
     from google.genai import types
 
     from .models import QuickScanResult
     from .tracing import otel_phase_span, traced_gemini_generate
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
+    if not os.environ.get("GEMINI_API_KEY"):
         print(f"  {t('briefing.quick_scan_skip')}")
         return None
 
@@ -298,7 +284,7 @@ def run_quick_scan(
     from .file_cache import load_file_api_cache, get_cached_uri, cache_file_uri
     from .preprocess import concat_proxies, format_concat_timeline
 
-    client = genai.Client(api_key=api_key)
+    client = GeminiClient.from_env()
 
     # Concatenate proxies into bundles (chronological order, ≤40 min each)
     # This avoids Gemini's 10-video-per-prompt limit.
@@ -317,9 +303,9 @@ def run_quick_scan(
             continue
 
         print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
-        video_file = client.files.upload(file=str(bundle["path"]))
-        video_file = _wait_for_gemini_file(video_file, client)
-        if video_file.state.name == "FAILED":
+        try:
+            video_file = client.upload_and_wait(Path(bundle["path"]), label=f"bundle_{i + 1}")
+        except FileUploadError:
             continue
         cache_file_uri(editorial_paths, cache_key, video_file.uri)
         video_parts.append(types.Part.from_uri(file_uri=video_file.uri, mime_type="video/mp4"))
@@ -339,7 +325,7 @@ def run_quick_scan(
     print(f"  Running quick scan ({gemini_model})...")
     with otel_phase_span("briefing_scan", stage="briefing", provider="gemini"):
         response = traced_gemini_generate(
-            client,
+            client.raw,
             model=gemini_model,
             contents=[types.Content(parts=[*video_parts, types.Part.from_text(text=prompt)])],
             config=types.GenerateContentConfig(

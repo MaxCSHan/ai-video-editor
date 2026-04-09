@@ -13,28 +13,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import ProjectPaths, TranscribeConfig
-
-_GEMINI_UPLOAD_TIMEOUT_SEC = 300
-
-
-def _wait_for_gemini_file(video_file, client, label: str = ""):
-    """Poll until Gemini file processing completes, with timeout."""
-    start = time.monotonic()
-    while video_file.state.name == "PROCESSING":
-        if time.monotonic() - start > _GEMINI_UPLOAD_TIMEOUT_SEC:
-            raise TimeoutError(
-                f"Gemini file processing timed out after {_GEMINI_UPLOAD_TIMEOUT_SEC}s ({label})"
-            )
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
-    if video_file.state.name == "FAILED":
-        raise RuntimeError(f"Gemini file processing failed for {label}")
-    return video_file
+from .infra.gemini_client import GeminiClient
 
 
 if TYPE_CHECKING:
@@ -273,14 +256,12 @@ def _transcribe_short_clip_gemini(
     editorial_paths,
 ) -> "GeminiTranscript":
     """Transcribe a short clip (≤TRANSCRIBE_CHUNK_SEC) via Gemini with file cache support."""
-    from google import genai
     from google.genai import types
 
     from .models import GeminiTranscript
     from .tracing import otel_phase_span, traced_gemini_generate
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+    client = GeminiClient.from_env()
 
     # Check file cache before uploading (may already be cached by briefing)
     cached_uri = None
@@ -293,8 +274,7 @@ def _transcribe_short_clip_gemini(
     if cached_uri:
         file_uri = cached_uri
     else:
-        video_file = client.files.upload(file=str(proxy_path))
-        video_file = _wait_for_gemini_file(video_file, client, clip_id)
+        video_file = client.upload_and_wait(proxy_path, label=clip_id)
         file_uri = video_file.uri
         if editorial_paths:
             cache_file_uri(editorial_paths, clip_id, file_uri)
@@ -303,7 +283,7 @@ def _transcribe_short_clip_gemini(
 
     with otel_phase_span("transcribe", stage="transcription", provider="gemini", clip_id=clip_id):
         response = traced_gemini_generate(
-            client,
+            client.raw,
             model=cfg.gemini_model,
             contents=[
                 types.Content(
@@ -349,26 +329,25 @@ def _transcribe_single_chunk_gemini(
     chunk_label: str,
 ) -> "GeminiTranscript":
     """Transcribe a single video chunk via Gemini. Returns parsed GeminiTranscript."""
-    from google import genai
     from google.genai import types
 
     from .models import GeminiTranscript
     from .tracing import otel_phase_span, traced_gemini_generate
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+    client = GeminiClient.from_env()
 
-    video_file = client.files.upload(file=str(chunk_path))
-    video_file = _wait_for_gemini_file(video_file, client, chunk_label)
+    video_file = client.upload_and_wait(chunk_path, label=chunk_label)
 
     prompt = _build_gemini_prompt(speaker_context)
 
     with otel_phase_span(
-        "transcribe", stage="transcription", provider="gemini",
+        "transcribe",
+        stage="transcription",
+        provider="gemini",
         clip_id=f"{clip_id_tag}/{chunk_label}",
     ):
         response = traced_gemini_generate(
-            client,
+            client.raw,
             model=cfg.gemini_model,
             contents=[
                 types.Content(
