@@ -220,6 +220,20 @@
 
   "status.tracing_connected": "Tracing: connected ({url})",
 
+  "settings.title": "Settings",
+  "settings.choose": "What would you like to change?",
+  "settings.language": "Language: {current}",
+  "settings.provider": "AI provider: {current}",
+  "settings.style": "Default style: {current}",
+  "settings.done": "← Done",
+  "settings.language_prompt": "Language / 語言 / 言語:",
+  "settings.language_changed": "Language changed to {name}. Restart VX to apply fully.",
+  "settings.provider_prompt": "Default AI provider:",
+  "settings.style_prompt": "Default video style:",
+  "settings.style_custom_prompt": "Describe your video style:",
+  "settings.style_custom_hint": "(e.g., 'lo-fi daily journal', 'drone landscape showcase')",
+  "settings.saved": "Settings saved.",
+
   "briefing.scan_running": "Running AI quick scan of all footage...",
   "briefing.scan_unavailable": "Quick scan unavailable — falling back to standard briefing.",
   "briefing.scan_results_title": "AI Quick Scan Results",
