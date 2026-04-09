@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import questionary
@@ -303,6 +304,35 @@ def _get_node_version_text(state: dict, node: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Display width helpers (CJK-aware)
+# ---------------------------------------------------------------------------
+
+
+def _display_width(text: str) -> int:
+    """Calculate terminal display width of a string.
+
+    CJK characters (Wide/Fullwidth) occupy 2 columns; all others occupy 1.
+    This ensures box-drawing tab bars align correctly for any language.
+    """
+    w = 0
+    for ch in text:
+        eaw = unicodedata.east_asian_width(ch)
+        w += 2 if eaw in ("W", "F") else 1
+    return w
+
+
+def _pad_center(text: str, width: int) -> str:
+    """Center-pad a string to a given display width, accounting for CJK characters."""
+    text_width = _display_width(text)
+    if text_width >= width:
+        return text
+    total_pad = width - text_width
+    left = total_pad // 2
+    right = total_pad - left
+    return " " * left + text + " " * right
+
+
+# ---------------------------------------------------------------------------
 # Tab bar rendering
 # ---------------------------------------------------------------------------
 
@@ -316,22 +346,22 @@ def _render_tab_bar(state: dict, active_node: str):
         is_active = node == active_node
         exists = state.get(node, {}).get("exists", False)
 
-        width = max(len(label), len(version_text)) + 2
+        width = max(_display_width(label), _display_width(version_text)) + 2
 
         if is_active:
             top = f"╭{'─' * width}╮"
-            mid1 = f"│{_GREEN}{label:^{width}}{_RESET}│"
-            mid2 = f"│{_GREEN}{version_text:^{width}}{_RESET}│"
+            mid1 = f"│{_GREEN}{_pad_center(label, width)}{_RESET}│"
+            mid2 = f"│{_GREEN}{_pad_center(version_text, width)}{_RESET}│"
             bot = f"╰{'─' * width}╯"
         elif exists:
             top = f"┌{'─' * width}┐"
-            mid1 = f"│{label:^{width}}│"
-            mid2 = f"│{version_text:^{width}}│"
+            mid1 = f"│{_pad_center(label, width)}│"
+            mid2 = f"│{_pad_center(version_text, width)}│"
             bot = f"└{'─' * width}┘"
         else:
             top = f"┌{'─' * width}┐"
-            mid1 = f"│{_DIM}{label:^{width}}{_RESET}│"
-            mid2 = f"│{_DIM}{version_text:^{width}}{_RESET}│"
+            mid1 = f"│{_DIM}{_pad_center(label, width)}{_RESET}│"
+            mid2 = f"│{_DIM}{_pad_center(version_text, width)}{_RESET}│"
             bot = f"└{'─' * width}┘"
 
         tabs.append((top, mid1, mid2, bot))
@@ -354,7 +384,7 @@ def _render_tab_bar(state: dict, active_node: str):
 def _render_node_detail(state: dict, active_node: str):
     """Render detail line for the active node."""
     s = state.get(active_node, {})
-    full_name = NODE_FULL_NAMES.get(active_node, active_node)
+    full_name = _node_full_name(active_node)
 
     if not s.get("exists"):
         print(f"\n {_DIM}{full_name} — not started{_RESET}")
@@ -2691,7 +2721,9 @@ def _show_status(name, meta, cfg):
 
 
 def _settings_flow(cfg):
-    """Edit workspace settings."""
+    """Edit workspace settings — selectable list of options."""
+    from .i18n import get_available_locales, get_locale, set_locale
+
     ws_path = Path(".vx.json")
     ws = (
         json.loads(ws_path.read_text())
@@ -2699,47 +2731,94 @@ def _settings_flow(cfg):
         else {"provider": "gemini", "style": "vlog"}
     )
 
-    provider_choices = ["gemini", "claude"]
-    provider_default = ws.get("provider", "gemini")
-    if provider_default not in provider_choices:
-        provider_default = "gemini"
+    while True:
+        current_locale = get_locale()
+        locale_map = {loc["code"]: loc["name"] for loc in get_available_locales()}
+        current_locale_name = locale_map.get(current_locale, current_locale)
 
-    provider = questionary.select(
-        "Default AI provider:",
-        choices=provider_choices,
-        default=provider_default,
-        style=VX_STYLE,
-    ).ask()
-    if provider:
-        ws["provider"] = provider
+        choices = [
+            questionary.Choice(
+                t("settings.language", current=current_locale_name), value="language"
+            ),
+            questionary.Choice(
+                t("settings.provider", current=ws.get("provider", "gemini")), value="provider"
+            ),
+            questionary.Choice(
+                t("settings.style", current=ws.get("style", "vlog")), value="style"
+            ),
+            questionary.Choice(t("settings.done"), value="done"),
+        ]
 
-    style_choices = [
-        "vlog",
-        "travel-vlog",
-        "family-video",
-        "event-recap",
-        "cinematic",
-        "short-form",
-        questionary.Choice("Custom...", value="__custom__"),
-    ]
-    style_default = ws.get("style", "vlog")
-    if style_default not in [c if isinstance(c, str) else c.value for c in style_choices]:
-        style_default = "vlog"
-
-    style = questionary.select(
-        "Default video style:",
-        choices=style_choices,
-        default=style_default,
-        style=VX_STYLE,
-    ).ask()
-    if style == "__custom__":
-        style = questionary.text(
-            "Describe your video style:",
-            instruction="(e.g., 'lo-fi daily journal', 'drone landscape showcase')",
+        action = questionary.select(
+            t("settings.choose"),
+            choices=choices,
             style=VX_STYLE,
         ).ask()
-    if style:
-        ws["style"] = style
+
+        if action is None or action == "done":
+            break
+
+        if action == "language":
+            locales = get_available_locales()
+            locale_choices = [
+                questionary.Choice(f"{loc['name']} ({loc['code']})", value=loc["code"])
+                for loc in locales
+            ]
+            new_locale = questionary.select(
+                t("settings.language_prompt"),
+                choices=locale_choices,
+                default=current_locale,
+                style=VX_STYLE,
+            ).ask()
+            if new_locale and new_locale != current_locale:
+                ws["locale"] = new_locale
+                set_locale(new_locale)
+                new_name = locale_map.get(new_locale, new_locale)
+                print(f"\n  {t('settings.language_changed', name=new_name)}\n")
+
+        elif action == "provider":
+            provider_choices = ["gemini", "claude"]
+            provider_default = ws.get("provider", "gemini")
+            if provider_default not in provider_choices:
+                provider_default = "gemini"
+            provider = questionary.select(
+                t("settings.provider_prompt"),
+                choices=provider_choices,
+                default=provider_default,
+                style=VX_STYLE,
+            ).ask()
+            if provider:
+                ws["provider"] = provider
+
+        elif action == "style":
+            style_choices = [
+                "vlog",
+                "travel-vlog",
+                "family-video",
+                "event-recap",
+                "cinematic",
+                "short-form",
+                questionary.Choice(t("style.custom"), value="__custom__"),
+            ]
+            style_default = ws.get("style", "vlog")
+            if style_default not in [
+                c if isinstance(c, str) else c.value for c in style_choices
+            ]:
+                style_default = "vlog"
+            style = questionary.select(
+                t("settings.style_prompt"),
+                choices=style_choices,
+                default=style_default,
+                style=VX_STYLE,
+            ).ask()
+            if style == "__custom__":
+                style = questionary.text(
+                    t("settings.style_custom_prompt"),
+                    instruction=t("settings.style_custom_hint"),
+                    style=VX_STYLE,
+                ).ask()
+            if style:
+                ws["style"] = style
 
     ws_path.write_text(json.dumps(ws, indent=2) + "\n")
-    print(f"\n  Settings saved: provider={ws['provider']}, style={ws['style']}\n")
+    print(f"\n  {t('settings.saved')}\n")

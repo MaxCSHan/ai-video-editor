@@ -3,7 +3,27 @@
 import json
 import re
 
+from .i18n import get_locale, locale_language_name
+
 from .storyboard_format import format_duration
+
+
+def _output_language_directive() -> str:
+    """Return a prompt directive for AI output language, or empty string for English.
+
+    When the user's locale is non-English, instructs the LLM to produce all
+    human-readable text fields in the user's language while keeping structural
+    fields (clip_id, timestamps, JSON keys) in English.
+    """
+    if get_locale() == "en":
+        return ""
+    lang = locale_language_name()
+    return (
+        f"\n\nIMPORTANT — Output Language: Produce ALL human-readable text fields in {lang}. "
+        f"This includes: narrative_summary, purpose, editorial_notes, description, "
+        f"audio_note descriptions, key_moments descriptions, mood, and any other descriptive text. "
+        f"Keep structural fields (clip_id, timestamps, JSON keys, content_type values) in English."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +423,7 @@ def build_phase2a_reasoning_prompt(
         "\n\nNow write your editorial plan. Think freely — address every point above, "
         "starting with the CONSTRAINT CHECK."
     )
+    prompt += _output_language_directive()
     return prompt
 
 
@@ -528,7 +549,7 @@ def build_phase2b_assembly_prompt(
         "\n- strategy: one of upbeat_background, emotional_underscore, ambient_texture, silence, natural_audio_only"
         "\n- notes: optional tempo/mood/genre suggestions (e.g. 'gentle acoustic, 100 BPM')"
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def classify_clip_priority(review: dict) -> str:
@@ -831,6 +852,7 @@ def build_clip_review_prompt(
         )
     if style_supplement:
         prompt += "\n\n" + style_supplement
+    prompt += _output_language_directive()
     return prompt
 
 
@@ -952,7 +974,7 @@ def build_editorial_assembly_prompt(
         "\n- strategy: one of upbeat_background, emotional_underscore, ambient_texture, silence, natural_audio_only"
         "\n- notes: optional tempo/mood/genre suggestions (e.g. 'gentle acoustic, 100 BPM')"
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 # ---------------------------------------------------------------------------
@@ -1029,7 +1051,7 @@ def build_scene_planner_prompt(
         "In reasoning, explain your overall grouping strategy.\n"
     )
 
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def build_narrative_planner_prompt(
@@ -1113,7 +1135,7 @@ def build_narrative_planner_prompt(
         "opening hook (hook_section_id).\n"
     )
 
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def build_hook_prompt(
@@ -1166,7 +1188,7 @@ def build_hook_prompt(
         "audio_note should be 'music_bed' for most hook segments.\n"
         "transition should be 'cut' between hook segments for energy.\n"
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def build_section_storyboard_prompt(
@@ -1285,7 +1307,7 @@ def build_section_storyboard_prompt(
         "why you ordered them this way, and how this section connects to the story.\n\n"
         "Optionally provide a music_cue with section, strategy, and notes.\n"
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 # ---------------------------------------------------------------------------
@@ -1343,7 +1365,7 @@ def build_monologue_call1_prompt(
         "or stream_of_consciousness) with rationale.\n\n"
         "Output as OverlayPlan JSON."
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def build_monologue_call2_prompt(
@@ -1398,7 +1420,7 @@ def build_monologue_call2_prompt(
         "- resolution segments: Wind down. Warm sign-off.\n\n"
         "Output as OverlayDrafts JSON with all overlays in chronological order."
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 def validate_monologue_overlays(
@@ -1523,7 +1545,7 @@ def build_monologue_prompt(
         transcripts=transcripts_text,
         user_context=user_context_text or "(no filmmaker context provided)",
     )
-    return prompt
+    return prompt + _output_language_directive()
 
 
 # ---------------------------------------------------------------------------

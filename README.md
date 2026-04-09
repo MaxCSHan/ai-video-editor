@@ -103,14 +103,65 @@ Raw Clips                       You shot 17 clips on your trip.
           preview.html           preview, export new JSON, re-cut.
 ```
 
-## Quick Start
+## Getting Started
+
+### One-line install (macOS / Linux)
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
-cp .env.example .env   # Add your GEMINI_API_KEY
-
-vx                     # Launch interactive mode
+curl -fsSL https://raw.githubusercontent.com/maxcshan/ai-video-editor/main/install.sh | bash
 ```
+
+This installs Python 3.11+, ffmpeg, and uv if needed, then sets up VX. At the end it launches the **first-run setup wizard** which walks you through API key configuration and language selection.
+
+### Manual install
+
+```bash
+# 1. Install prerequisites
+#    macOS: brew install python ffmpeg
+#    Linux: sudo apt install python3.11 ffmpeg
+
+# 2. Install uv (fast Python package manager)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 3. Clone and install
+git clone https://github.com/maxcshan/ai-video-editor.git
+cd ai-video-editor
+uv venv && uv pip install -e ".[dev]"
+
+# 4. Launch — the setup wizard runs automatically on first launch
+vx
+```
+
+### First-run setup wizard
+
+When you launch `vx` for the first time, a guided wizard helps you:
+
+1. **Choose your language** — English, 繁體中文, and more
+2. **Check prerequisites** — Python, ffmpeg, API keys
+3. **Configure an AI provider** — Gemini (recommended) or Claude
+4. **Save your API key** — written to `.env`, never leaves your machine
+
+You can re-run the wizard any time with `vx setup`.
+
+### Your first video
+
+```bash
+vx                              # Launch interactive mode
+# → "New project" → pick a folder of clips → follow the prompts
+```
+
+VX will preprocess your footage, ask you a few questions about who's in the video and what happened, then produce a storyboard and rough cut. The whole process for a typical set of 10-20 clips takes about 5 minutes.
+
+### Language / i18n
+
+VX supports multiple languages for both the TUI interface and AI-generated content (storyboard narratives, descriptions, monologue text).
+
+**Change language:**
+- In the TUI: Settings → Language
+- Environment variable: `VX_LANG=zh-TW vx`
+- Config file: set `"locale": "zh-TW"` in `.vx.json`
+
+When a non-English locale is active, AI prompts automatically request output in your language while keeping structural fields (timestamps, clip IDs, JSON keys) in English.
 
 ## Edit Modes
 
@@ -258,8 +309,10 @@ The preview (`storyboard/*_preview.html`) is an editing tool:
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) or pip
-- ffmpeg & ffprobe (`brew install ffmpeg`)
+- ffmpeg & ffprobe (`brew install ffmpeg` / `sudo apt install ffmpeg`)
 - `GEMINI_API_KEY` and/or `ANTHROPIC_API_KEY` in `.env`
+
+> **Tip:** The one-line installer (`install.sh`) handles all of these automatically. See [Getting Started](#getting-started).
 
 ## Setup
 

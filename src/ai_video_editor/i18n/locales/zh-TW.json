@@ -220,6 +220,20 @@
 
   "status.tracing_connected": "追蹤：已連接（{url}）",
 
+  "settings.title": "設定",
+  "settings.choose": "要更改什麼？",
+  "settings.language": "語言：{current}",
+  "settings.provider": "AI 供應商：{current}",
+  "settings.style": "預設風格：{current}",
+  "settings.done": "← 完成",
+  "settings.language_prompt": "語言 / Language / 言語：",
+  "settings.language_changed": "語言已切換為 {name}。重新啟動 VX 以完全套用。",
+  "settings.provider_prompt": "預設 AI 供應商：",
+  "settings.style_prompt": "預設影片風格：",
+  "settings.style_custom_prompt": "描述您的影片風格：",
+  "settings.style_custom_hint": "（例如：'日常隨拍日記'、'空拍風景集錦'）",
+  "settings.saved": "設定已儲存。",
+
   "briefing.scan_running": "正在對所有素材進行 AI 快速掃描...",
   "briefing.scan_unavailable": "快速掃描不可用 — 改用標準簡報。",
   "briefing.scan_results_title": "AI 快速掃描結果",
