@@ -44,6 +44,9 @@ from .file_cache import (
 )
 from .infra.gemini_client import GeminiClient
 from .domain.exceptions import FileUploadError
+from .domain.clip_resolution import resolve_clip_id_refs
+from .domain.timestamps import clamp_segments_to_usable
+from .domain.validation import validate_clip_review, validate_storyboard
 
 
 # ---------------------------------------------------------------------------
@@ -791,87 +794,6 @@ def run_phase1_claude(
 # ---------------------------------------------------------------------------
 
 
-def validate_clip_review(review: dict, clip_info: dict) -> tuple[list[str], bool]:
-    """Validate a Phase 1 clip review for structural correctness.
-
-    Returns (warnings, is_critical). is_critical means the review should be retried.
-    """
-    warnings = []
-    dur = clip_info.get("duration_sec", 0)
-    clip_id = clip_info.get("clip_id", "")
-
-    # Check clip_id match
-    review_cid = review.get("clip_id", "")
-    if review_cid and clip_id and not clip_id.endswith(review_cid):
-        warnings.append(f"clip_id mismatch: expected '{clip_id}', got '{review_cid}'")
-
-    # Check usable segments
-    for seg in review.get("usable_segments", []):
-        in_s = seg.get("in_sec", 0)
-        out_s = seg.get("out_sec", 0)
-        if in_s >= out_s:
-            warnings.append(f"Segment in_sec ({in_s}) >= out_sec ({out_s})")
-        if dur > 0 and out_s > dur + 1.0:
-            warnings.append(f"Segment out_sec ({out_s:.1f}) exceeds clip duration ({dur:.1f})")
-
-    # Check for empty review on non-trivial clips
-    has_segments = bool(review.get("usable_segments") or review.get("discard_segments"))
-    if not has_segments and dur > 5.0:
-        warnings.append("No usable or discard segments for a clip > 5s")
-
-    # Critical if: no segments on a real clip, or majority of segments have bad timestamps
-    bad_count = sum(
-        1
-        for seg in review.get("usable_segments", [])
-        if seg.get("in_sec", 0) >= seg.get("out_sec", 0)
-    )
-    total_segs = len(review.get("usable_segments", []))
-    is_critical = (not has_segments and dur > 5.0) or (
-        total_segs > 0 and bad_count > total_segs / 2
-    )
-
-    return warnings, is_critical
-
-
-def validate_storyboard(storyboard, clip_reviews: list[dict]) -> tuple[list[str], bool]:
-    """Validate a Phase 2 storyboard for structural correctness.
-
-    Returns (warnings, is_critical).
-    """
-    warnings = []
-    known_ids = {r.get("clip_id", "") for r in clip_reviews}
-    dur_map = {}
-    for r in clip_reviews:
-        cid = r.get("clip_id", "")
-        dur_map[cid] = r.get("duration_sec", 0)
-
-    unknown_count = 0
-    for seg in storyboard.segments:
-        if seg.clip_id not in known_ids:
-            warnings.append(f"Seg {seg.index}: unknown clip_id '{seg.clip_id}'")
-            unknown_count += 1
-        if seg.in_sec >= seg.out_sec:
-            warnings.append(f"Seg {seg.index}: in_sec ({seg.in_sec}) >= out_sec ({seg.out_sec})")
-        max_dur = dur_map.get(seg.clip_id, 0)
-        if max_dur > 0 and seg.out_sec > max_dur + 1.0:
-            warnings.append(
-                f"Seg {seg.index}: out_sec ({seg.out_sec:.1f}) > clip duration ({max_dur:.1f})"
-            )
-
-    if not storyboard.segments:
-        warnings.append("Storyboard has no segments")
-
-    # Check for duplicate indices
-    indices = [s.index for s in storyboard.segments]
-    if len(indices) != len(set(indices)):
-        warnings.append("Duplicate segment indices detected")
-
-    total = len(storyboard.segments)
-    is_critical = total == 0 or (total > 0 and unknown_count > total * 0.3)
-
-    return warnings, is_critical
-
-
 # ---------------------------------------------------------------------------
 # Phase 2 — Editorial assembly
 # ---------------------------------------------------------------------------
@@ -1283,35 +1205,10 @@ def _run_phase2_sections(
 
     # ── Resolve clip IDs and validate ─────────────────────────────────────
     known_clip_ids = {r["clip_id"] for r in clip_reviews}
-    _resolve_clip_id_refs(storyboard, known_clip_ids)
+    resolve_clip_id_refs(storyboard, known_clip_ids)
 
     # Auto-clamp timestamps
-    fix_log = []
-    for seg in storyboard.segments:
-        review = reviews_by_id.get(seg.clip_id)
-        if not review:
-            continue
-        usable = review.get("usable_segments", [])
-        best = None
-        best_overlap = -1
-        for us in usable:
-            us_in = us.get("in_sec", 0)
-            us_out = us.get("out_sec", 0)
-            overlap = min(seg.out_sec, us_out) - max(seg.in_sec, us_in)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best = us
-        if best:
-            if seg.in_sec < best.get("in_sec", 0):
-                fix_log.append(
-                    f"Seg {seg.index}: clamped in_sec {seg.in_sec:.1f} → {best['in_sec']:.1f}"
-                )
-                seg.in_sec = best["in_sec"]
-            if seg.out_sec > best.get("out_sec", 0):
-                fix_log.append(
-                    f"Seg {seg.index}: clamped out_sec {seg.out_sec:.1f} → {best['out_sec']:.1f}"
-                )
-                seg.out_sec = best["out_sec"]
+    fix_log = clamp_segments_to_usable(storyboard, reviews_by_id)
 
     val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
     if fix_log:
@@ -1717,37 +1614,11 @@ def _run_phase2_split(
 
     # ── Validate & fix ─────────────────────────────────────────────────────
     known_clip_ids = {r["clip_id"] for r in clip_reviews}
-    _resolve_clip_id_refs(storyboard, known_clip_ids)
+    resolve_clip_id_refs(storyboard, known_clip_ids)
 
-    # Enhanced validation: clamp timestamps to usable segment bounds
+    # Clamp timestamps to usable segment bounds
     reviews_by_id = {r["clip_id"]: r for r in clip_reviews}
-    fix_log = []
-    for seg in storyboard.segments:
-        review = reviews_by_id.get(seg.clip_id)
-        if not review:
-            continue
-        usable = review.get("usable_segments", [])
-        # Find matching usable segment by best overlap
-        best = None
-        best_overlap = -1
-        for us in usable:
-            us_in = us.get("in_sec", 0)
-            us_out = us.get("out_sec", 0)
-            overlap = min(seg.out_sec, us_out) - max(seg.in_sec, us_in)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best = us
-        if best:
-            if seg.in_sec < best.get("in_sec", 0):
-                fix_log.append(
-                    f"Seg {seg.index}: clamped in_sec {seg.in_sec:.1f} → {best['in_sec']:.1f}"
-                )
-                seg.in_sec = best["in_sec"]
-            if seg.out_sec > best.get("out_sec", 0):
-                fix_log.append(
-                    f"Seg {seg.index}: clamped out_sec {seg.out_sec:.1f} → {best['out_sec']:.1f}"
-                )
-                seg.out_sec = best["out_sec"]
+    fix_log = clamp_segments_to_usable(storyboard, reviews_by_id)
 
     val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
     if fix_log:
@@ -2128,7 +1999,7 @@ def run_phase2(
 
     # Resolve abbreviated clip IDs (e.g., LLM returns "C0073" but clip_id is "20260330114125_C0073")
     known_clip_ids = {r["clip_id"] for r in clip_reviews}
-    _resolve_clip_id_refs(storyboard, known_clip_ids)
+    resolve_clip_id_refs(storyboard, known_clip_ids)
 
     # Validate storyboard quality
     val_warnings, val_critical = validate_storyboard(storyboard, clip_reviews)
@@ -2720,40 +2591,6 @@ def _load_all_transcripts_for_monologue(
         if text:
             transcripts[clip_id] = text
     return transcripts if transcripts else None
-
-
-def _resolve_clip_id_refs(storyboard, known_ids: set[str]):
-    """Fix abbreviated clip IDs in the storyboard by matching against known IDs.
-
-    E.g., LLM returns "C0073" but actual clip_id is "20260330114125_C0073".
-    """
-    # Build a suffix lookup: "C0073" -> "20260330114125_C0073"
-    suffix_map = {}
-    for kid in known_ids:
-        # Try common abbreviation patterns
-        parts = kid.split("_")
-        for i in range(len(parts)):
-            suffix = "_".join(parts[i:])
-            if suffix not in suffix_map:
-                suffix_map[suffix] = kid
-
-    def resolve(clip_id: str) -> str:
-        if clip_id in known_ids:
-            return clip_id
-        if clip_id in suffix_map:
-            return suffix_map[clip_id]
-        # Try case-insensitive
-        for k, v in suffix_map.items():
-            if k.lower() == clip_id.lower():
-                return v
-        return clip_id  # give up, return as-is
-
-    for seg in storyboard.segments:
-        seg.clip_id = resolve(seg.clip_id)
-    for d in storyboard.discarded:
-        d.clip_id = resolve(d.clip_id)
-    for c in storyboard.cast:
-        c.appears_in = [resolve(cid) for cid in c.appears_in]
 
 
 # ---------------------------------------------------------------------------
