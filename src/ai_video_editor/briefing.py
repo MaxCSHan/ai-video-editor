@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .config import MODEL_GEMINI_25_FLASH
+from .i18n import t
 
 import questionary
 from questionary import Style
@@ -83,24 +84,29 @@ def run_briefing(reviews: list[dict], style: str, project_root: Path) -> dict | 
     # Reuse existing context
     if context_path:
         existing = json.loads(context_path.read_text())
-        print("\n  Existing user context found:")
+        print(f"\n  {t('briefing.existing_found')}")
         for k, v in existing.items():
             if v:
                 print(f"    {k}: {v[:80]}{'...' if len(v) > 80 else ''}")
 
         action = questionary.select(
-            "Use existing context?",
-            choices=["Yes, use as-is", "Edit it", "Start fresh", "Skip briefing"],
+            t("briefing.use_existing_prompt"),
+            choices=[
+                questionary.Choice(t("briefing.use_as_is"), value="use"),
+                questionary.Choice(t("briefing.edit_it"), value="edit"),
+                questionary.Choice(t("briefing.start_fresh"), value="fresh"),
+                questionary.Choice(t("briefing.skip_briefing"), value="skip"),
+            ],
             style=VX_STYLE,
         ).ask()
 
-        if action is None or action == "Skip briefing":
+        if action is None or action == "skip":
             return None
-        if action == "Yes, use as-is":
+        if action == "use":
             return existing
-        if action == "Start fresh":
+        if action == "fresh":
             pass  # continue to fresh questions
-        if action == "Edit it":
+        if action == "edit":
             return _edit_existing(existing, project_root)
 
     info = generate_questions(reviews, style)
@@ -109,21 +115,21 @@ def run_briefing(reviews: list[dict], style: str, project_root: Path) -> dict | 
 
 def _ask_questions(info: dict, project_root: Path) -> dict | None:
     """Ask the editorial briefing questions interactively."""
-    print("\n  Editorial Briefing")
-    print("  Help the AI editor make better decisions. Press Esc to skip any question.\n")
+    print(f"\n  {t('briefing.title')}")
+    print(f"  {t('briefing.subtitle')}\n")
 
     answers = {}
 
     # People
     if info["people_detected"]:
-        print("  AI detected these people:")
+        print(f"  {t('briefing.people_detected')}")
         for d in info["people_detected"]:
             print(f"    - {d}")
         print()
 
     people = questionary.text(
-        "Who are the main people? (names & roles)",
-        instruction="(e.g., 'Woman in blue is my sister Amy, man with glasses is my dad')",
+        t("briefing.people_prompt"),
+        instruction=t("briefing.people_hint"),
         style=VX_STYLE,
     ).ask()
     if people:
@@ -131,8 +137,8 @@ def _ask_questions(info: dict, project_root: Path) -> dict | None:
 
     # Activity
     activity = questionary.text(
-        "What was this activity/occasion?",
-        instruction="(e.g., 'Family day trip to Hsinchu Science Park')",
+        t("briefing.activity_prompt"),
+        instruction=t("briefing.activity_hint"),
         style=VX_STYLE,
     ).ask()
     if activity:
@@ -140,13 +146,13 @@ def _ask_questions(info: dict, project_root: Path) -> dict | None:
 
     # Highlights
     if info["highlights_detected"]:
-        print("\n  AI-flagged highlights:")
+        print(f"\n  {t('briefing.highlights_detected')}")
         for h in info["highlights_detected"]:
             print(f"    - {h}")
 
     highlights = questionary.text(
-        "Any must-include moments?",
-        instruction="(specific moments the editor should not miss)",
+        t("briefing.highlights_prompt"),
+        instruction=t("briefing.highlights_hint"),
         style=VX_STYLE,
     ).ask()
     if highlights:
@@ -154,27 +160,27 @@ def _ask_questions(info: dict, project_root: Path) -> dict | None:
 
     # Tone
     tone = questionary.select(
-        "Desired tone?",
+        t("briefing.tone_prompt"),
         choices=[
-            "Fun and lighthearted",
-            "Cinematic and epic",
-            "Chill and relaxed",
-            "Warm and nostalgic",
-            "Energetic and fast-paced",
-            questionary.Choice("Custom...", value="__custom__"),
-            questionary.Choice("Skip", value=""),
+            t("briefing.tone_fun"),
+            t("briefing.tone_cinematic"),
+            t("briefing.tone_chill"),
+            t("briefing.tone_warm"),
+            t("briefing.tone_energetic"),
+            questionary.Choice(t("briefing.tone_custom"), value="__custom__"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
     if tone == "__custom__":
-        tone = questionary.text("Describe the tone:", style=VX_STYLE).ask()
+        tone = questionary.text(t("briefing.tone_custom_prompt"), style=VX_STYLE).ask()
     if tone:
         answers["tone"] = tone
 
     # Avoid
     avoid = questionary.text(
-        "Anything to exclude?",
-        instruction="(unflattering moments, private conversations, specific clips)",
+        t("briefing.avoid_prompt"),
+        instruction=t("briefing.avoid_hint"),
         style=VX_STYLE,
     ).ask()
     if avoid:
@@ -183,19 +189,19 @@ def _ask_questions(info: dict, project_root: Path) -> dict | None:
     # Duration
     if info["total_minutes"] > 0:
         duration = questionary.text(
-            f"Preferred final length? (~{info['total_minutes']:.0f} min raw footage)",
-            instruction="(leave empty to let AI decide)",
+            t("briefing.duration_prompt", minutes=info["total_minutes"]),
+            instruction=t("briefing.duration_hint"),
             style=VX_STYLE,
         ).ask()
         if duration:
             answers["duration"] = duration
 
     if not answers:
-        print("\n  No context provided — proceeding without briefing.")
+        print(f"\n  {t('briefing.no_context')}")
         return None
 
     _save_user_context(project_root, answers)
-    print(f"\n  Context saved ({len(answers)} fields)")
+    print(f"\n  {t('briefing.context_saved', count=len(answers))}")
     return answers
 
 
@@ -214,7 +220,7 @@ def _edit_existing(existing: dict, project_root: Path) -> dict:
         updated[k] = new_val if new_val else v
 
     _save_user_context(project_root, updated)
-    print(f"\n  Context updated ({len(updated)} fields)")
+    print(f"\n  {t('briefing.context_updated', count=len(updated))}")
     return updated
 
 
@@ -270,7 +276,7 @@ def run_quick_scan(
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("  Skipping quick scan (GEMINI_API_KEY not set)")
+        print(f"  {t('briefing.quick_scan_skip')}")
         return None
 
     # Discover all proxy videos
@@ -387,32 +393,37 @@ def run_smart_briefing(
     # Reuse existing context
     if context_path:
         existing = json.loads(context_path.read_text())
-        print("\n  Existing user context found:")
+        print(f"\n  {t('briefing.existing_found')}")
         for k, v in existing.items():
             if isinstance(v, str) and v:
                 print(f"    {k}: {v[:80]}{'...' if len(v) > 80 else ''}")
 
         action = questionary.select(
-            "Use existing context?",
-            choices=["Yes, use as-is", "Edit it", "Re-scan and start fresh", "Skip briefing"],
+            t("briefing.use_existing_prompt"),
+            choices=[
+                questionary.Choice(t("briefing.use_as_is"), value="use"),
+                questionary.Choice(t("briefing.edit_it"), value="edit"),
+                questionary.Choice(t("briefing.rescan_fresh"), value="rescan"),
+                questionary.Choice(t("briefing.skip_briefing"), value="skip"),
+            ],
             style=VX_STYLE,
         ).ask()
 
-        if action is None or action == "Skip briefing":
+        if action is None or action == "skip":
             return None
-        if action == "Yes, use as-is":
+        if action == "use":
             return existing
-        if action == "Edit it":
+        if action == "edit":
             return _edit_existing(existing, editorial_paths.root)
-        if action == "Re-scan and start fresh":
+        if action == "rescan":
             pass  # Quick scan versioning handles this — new scan creates new version
 
     # Run quick scan
-    print("\n  Running AI quick scan of all footage...")
+    print(f"\n  {t('briefing.scan_running')}")
     scan = run_quick_scan(editorial_paths, gemini_model, tracer=tracer)
 
     if not scan:
-        print("  Quick scan unavailable — falling back to standard briefing.")
+        print(f"  {t('briefing.scan_unavailable')}")
         return _ask_questions(
             {"people_detected": [], "highlights_detected": [], "total_minutes": 0, "style": style},
             editorial_paths.root,
@@ -428,22 +439,22 @@ def run_smart_briefing(
     )
     total_raw_str = f", {total_raw / 60:.0f} min raw" if total_raw > 0 else ""
 
-    print(f"  Your footage: {clip_count} clips{total_raw_str}\n")
+    print(f"  {t('briefing.your_footage', count=clip_count, raw=total_raw_str)}\n")
 
     depth = questionary.select(
-        "Briefing depth?",
+        t("briefing.depth_prompt"),
         choices=[
-            questionary.Choice("Quick brief      (3 questions, ~30s)", value="quick"),
-            questionary.Choice("Director's brief (9 questions, ~2 min)", value="director"),
-            questionary.Choice("Deep brief       (all fields, ~5 min)", value="deep"),
-            questionary.Choice("Load from file   (creative_brief.md)", value="file"),
-            questionary.Choice("Skip briefing", value="skip"),
+            questionary.Choice(t("briefing.depth_quick"), value="quick"),
+            questionary.Choice(t("briefing.depth_director"), value="director"),
+            questionary.Choice(t("briefing.depth_deep"), value="deep"),
+            questionary.Choice(t("briefing.depth_file"), value="file"),
+            questionary.Choice(t("briefing.skip_briefing"), value="skip"),
         ],
         style=VX_STYLE,
     ).ask()
 
     if depth is None or depth == "skip":
-        print("\n  No context provided — proceeding without briefing.")
+        print(f"\n  {t('briefing.no_context')}")
         return None
 
     if depth == "file":
@@ -459,30 +470,30 @@ def run_smart_briefing(
     field_count = sum(
         1 for k, v in result.items() if v and k not in ("brief_version", "source", "preset_key")
     )
-    print(f"\n  Creative brief saved ({field_count} fields)")
+    print(f"\n  {t('briefing.creative_saved', count=field_count)}")
     return result
 
 
 def _display_scan_results(scan: dict) -> None:
     """Show quick scan results to the user."""
     print(f"\n  {'─' * 60}")
-    print("  AI Quick Scan Results")
+    print(f"  {t('briefing.scan_results_title')}")
     print(f"  {'─' * 60}")
     print(f"\n  {scan['overall_summary']}\n")
 
     if scan.get("people"):
-        print("  People spotted:")
+        print(f"  {t('briefing.people_spotted')}")
         for p in scan["people"]:
             role = f" ({p['role_guess']})" if p.get("role_guess") else ""
             print(f"    - {p['description']}{role}")
         print()
 
     if scan.get("activities"):
-        print("  Activities/locations: " + ", ".join(scan["activities"]))
+        print(f"  {t('briefing.activities_locations', list=', '.join(scan['activities']))}")
         print()
 
     if scan.get("mood"):
-        print(f"  Overall mood: {scan['mood']}\n")
+        print(f"  {t('briefing.overall_mood', mood=scan['mood'])}\n")
 
     print(f"  {'─' * 60}\n")
 
@@ -490,20 +501,20 @@ def _display_scan_results(scan: dict) -> None:
 def _ask_tone() -> str:
     """Ask tone preference (shared across briefing modes)."""
     tone = questionary.select(
-        "Desired tone?",
+        t("briefing.tone_prompt"),
         choices=[
-            "Fun and lighthearted",
-            "Cinematic and epic",
-            "Chill and relaxed",
-            "Warm and nostalgic",
-            "Energetic and fast-paced",
-            questionary.Choice("Custom...", value="__custom__"),
-            questionary.Choice("Skip", value=""),
+            t("briefing.tone_fun"),
+            t("briefing.tone_cinematic"),
+            t("briefing.tone_chill"),
+            t("briefing.tone_warm"),
+            t("briefing.tone_energetic"),
+            questionary.Choice(t("briefing.tone_custom"), value="__custom__"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
     if tone == "__custom__":
-        tone = questionary.text("Describe the tone:", style=VX_STYLE).ask()
+        tone = questionary.text(t("briefing.tone_custom_prompt"), style=VX_STYLE).ask()
     return tone or ""
 
 
@@ -517,14 +528,14 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # People
     if scan.get("people"):
-        print("  The AI spotted these people in your footage:")
+        print(f"  {t('briefing.people_spotted_in_footage')}")
         for i, p in enumerate(scan["people"], 1):
             print(f"    {i}. {p['description']}")
         print()
 
     people = questionary.text(
-        "Who are these people? (names, roles, relationships)",
-        instruction="(refer to the descriptions above — tell the AI who each person is)",
+        t("briefing.people_prompt_smart"),
+        instruction=t("briefing.people_hint_smart"),
         style=VX_STYLE,
     ).ask()
     if people:
@@ -533,7 +544,7 @@ def _ask_brief_questions(scan: dict, depth: str):
     # Activity
     activity_hint = ", ".join(scan.get("activities", []))[:80]
     activity = questionary.text(
-        "What was this activity/occasion?",
+        t("briefing.activity_prompt"),
         instruction=f"(AI observed: {activity_hint})" if activity_hint else "",
         style=VX_STYLE,
     ).ask()
@@ -543,8 +554,8 @@ def _ask_brief_questions(scan: dict, depth: str):
     if depth == "quick":
         # Quick mode: combined highlights/avoid question
         ha = questionary.text(
-            "Must-include or exclude anything?",
-            instruction="(e.g., 'include sunset at temple; skip first 30s of clip 3')",
+            t("briefing.must_include_exclude"),
+            instruction=t("briefing.must_include_exclude_hint"),
             style=VX_STYLE,
         ).ask()
         if ha:
@@ -557,7 +568,7 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # AI-suggested questions (context Q&A)
     if scan.get("suggested_questions"):
-        print("\n  The AI has additional questions:")
+        print(f"\n  {t('briefing.ai_questions')}")
         qa_pairs = []
         for q in scan["suggested_questions"]:
             answer = questionary.text(q, style=VX_STYLE).ask()
@@ -568,8 +579,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Intent — the single most impactful new question
     intent = questionary.text(
-        "What should viewers feel after watching?",
-        instruction="(the north star — e.g., 'feel the warmth of a perfect family day')",
+        t("briefing.intent_prompt"),
+        instruction=t("briefing.intent_hint"),
         style=VX_STYLE,
     ).ask()
     if intent:
@@ -577,13 +588,13 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Audience
     audience = questionary.select(
-        "Who is this for?",
+        t("briefing.audience_prompt"),
         choices=[
-            questionary.Choice("Friends and family", value="friends_and_family"),
-            questionary.Choice("YouTube audience", value="youtube"),
-            questionary.Choice("Social media (TikTok/Instagram)", value="social"),
-            questionary.Choice("Personal archive", value="personal"),
-            questionary.Choice("Skip", value=""),
+            questionary.Choice(t("briefing.audience_friends"), value="friends_and_family"),
+            questionary.Choice(t("briefing.audience_youtube"), value="youtube"),
+            questionary.Choice(t("briefing.audience_social"), value="social"),
+            questionary.Choice(t("briefing.audience_personal"), value="personal"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
@@ -597,13 +608,13 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Pacing
     pacing = questionary.select(
-        "Pacing preference?",
+        t("briefing.pacing_prompt"),
         choices=[
-            questionary.Choice("Let it breathe (slow, contemplative)", value="slow-contemplative"),
-            questionary.Choice("Balanced (natural rhythm)", value="balanced"),
-            questionary.Choice("Punchy (fast, energetic)", value="punchy"),
-            questionary.Choice("Builds to climax", value="builds-to-climax"),
-            questionary.Choice("Skip", value=""),
+            questionary.Choice(t("briefing.pacing_slow"), value="slow-contemplative"),
+            questionary.Choice(t("briefing.pacing_balanced"), value="balanced"),
+            questionary.Choice(t("briefing.pacing_punchy"), value="punchy"),
+            questionary.Choice(t("briefing.pacing_builds"), value="builds-to-climax"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
@@ -614,8 +625,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Highlights
     highlights = questionary.text(
-        "Any must-include moments?",
-        instruction="(specific moments the editor should not miss)",
+        t("briefing.highlights_prompt"),
+        instruction=t("briefing.highlights_hint"),
         style=VX_STYLE,
     ).ask()
     if highlights:
@@ -623,8 +634,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Avoid
     avoid = questionary.text(
-        "Anything to exclude?",
-        instruction="(unflattering moments, private conversations, specific clips)",
+        t("briefing.avoid_prompt"),
+        instruction=t("briefing.avoid_hint"),
         style=VX_STYLE,
     ).ask()
     if avoid:
@@ -632,8 +643,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Duration
     duration = questionary.text(
-        "Preferred final length?",
-        instruction="(leave empty to let AI decide)",
+        t("briefing.duration_prompt_smart"),
+        instruction=t("briefing.duration_hint_smart"),
         style=VX_STYLE,
     ).ask()
     if duration:
@@ -644,12 +655,12 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # ── Deep mode only ──────────────────────────────────────────────────────
 
-    print("\n  Extended creative direction (press Enter to skip any question)\n")
+    print(f"\n  {t('briefing.deep_intro')}\n")
 
     # Story thesis
     thesis = questionary.text(
-        "In one sentence, what is this video about?",
-        instruction="(the editorial north star — e.g., 'A family rediscovering each other through travel')",
+        t("briefing.thesis_prompt"),
+        instruction=t("briefing.thesis_hint"),
         style=VX_STYLE,
     ).ask()
     if thesis:
@@ -659,8 +670,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Key beats
     beats_text = questionary.text(
-        "Key moments in order? (comma-separated)",
-        instruction="(e.g., 'morning departure, discovering the garden, sunset together')",
+        t("briefing.beats_prompt"),
+        instruction=t("briefing.beats_hint"),
         style=VX_STYLE,
     ).ask()
     if beats_text:
@@ -670,8 +681,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Story hook
     hook = questionary.text(
-        "What should the opening look like?",
-        instruction="(e.g., 'flash-forward to the summit view')",
+        t("briefing.hook_prompt"),
+        instruction=t("briefing.hook_hint"),
         style=VX_STYLE,
     ).ask()
     if hook:
@@ -681,8 +692,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Ending
     ending = questionary.text(
-        "How should it end?",
-        instruction="(e.g., 'warm closure', 'bittersweet', 'looking forward')",
+        t("briefing.ending_prompt"),
+        instruction=t("briefing.ending_hint"),
         style=VX_STYLE,
     ).ask()
     if ending:
@@ -692,13 +703,13 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Structure
     structure = questionary.select(
-        "Narrative structure?",
+        t("briefing.structure_prompt"),
         choices=[
-            questionary.Choice("Chronological (follow the day)", value="chronological"),
-            questionary.Choice("Thematic (group by theme)", value="thematic"),
-            questionary.Choice("Circular (end where we began)", value="circular"),
-            questionary.Choice("Vignettes (independent scenes)", value="vignettes"),
-            questionary.Choice("Skip", value=""),
+            questionary.Choice(t("briefing.structure_chronological"), value="chronological"),
+            questionary.Choice(t("briefing.structure_thematic"), value="thematic"),
+            questionary.Choice(t("briefing.structure_circular"), value="circular"),
+            questionary.Choice(t("briefing.structure_vignettes"), value="vignettes"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
@@ -709,20 +720,20 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Music mood
     music = questionary.select(
-        "Music direction?",
+        t("briefing.music_prompt"),
         choices=[
-            questionary.Choice("Acoustic / indie", value="acoustic"),
-            questionary.Choice("Lo-fi / chill beats", value="lo-fi"),
-            questionary.Choice("Orchestral / cinematic", value="orchestral"),
-            questionary.Choice("Ambient / atmospheric", value="ambient"),
-            questionary.Choice("Natural audio only", value="natural-audio-only"),
-            questionary.Choice("Custom...", value="__custom__"),
-            questionary.Choice("Skip", value=""),
+            questionary.Choice(t("briefing.music_acoustic"), value="acoustic"),
+            questionary.Choice(t("briefing.music_lofi"), value="lo-fi"),
+            questionary.Choice(t("briefing.music_orchestral"), value="orchestral"),
+            questionary.Choice(t("briefing.music_ambient"), value="ambient"),
+            questionary.Choice(t("briefing.music_natural"), value="natural-audio-only"),
+            questionary.Choice(t("briefing.tone_custom"), value="__custom__"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
     if music == "__custom__":
-        music = questionary.text("Describe the music:", style=VX_STYLE).ask()
+        music = questionary.text(t("briefing.music_custom_prompt"), style=VX_STYLE).ask()
     if music:
         if not brief.style:
             brief.style = StyleDirection()
@@ -730,14 +741,14 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Visual tone
     visual = questionary.select(
-        "Visual tone?",
+        t("briefing.visual_prompt"),
         choices=[
-            questionary.Choice("Warm (golden, cozy)", value="warm"),
-            questionary.Choice("Cool (blue, crisp)", value="cool"),
-            questionary.Choice("Cinematic (high contrast)", value="cinematic"),
-            questionary.Choice("Bright (saturated, poppy)", value="bright"),
-            questionary.Choice("Natural (as shot)", value="natural"),
-            questionary.Choice("Skip", value=""),
+            questionary.Choice(t("briefing.visual_warm"), value="warm"),
+            questionary.Choice(t("briefing.visual_cool"), value="cool"),
+            questionary.Choice(t("briefing.visual_cinematic"), value="cinematic"),
+            questionary.Choice(t("briefing.visual_bright"), value="bright"),
+            questionary.Choice(t("briefing.visual_natural"), value="natural"),
+            questionary.Choice(t("briefing.tone_skip"), value=""),
         ],
         style=VX_STYLE,
     ).ask()
@@ -748,8 +759,8 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # References
     refs = questionary.text(
-        "Style inspiration? (creators, videos, moods)",
-        instruction="(e.g., 'Casey Neistat pacing, sueddu visual calm')",
+        t("briefing.refs_prompt"),
+        instruction=t("briefing.refs_hint"),
         style=VX_STYLE,
     ).ask()
     if refs:
@@ -757,7 +768,7 @@ def _ask_brief_questions(scan: dict, depth: str):
 
     # Free notes
     notes = questionary.text(
-        "Anything else the editor should know?",
+        t("briefing.notes_prompt"),
         style=VX_STYLE,
     ).ask()
     if notes:

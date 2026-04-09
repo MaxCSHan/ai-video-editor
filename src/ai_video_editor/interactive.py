@@ -39,22 +39,36 @@ _RESET = "\033[0m"
 
 # Pipeline node definitions — semantic names (not Phase 1/2/3)
 PIPELINE_NODES = ["scan", "brief", "speech", "review", "story", "mono"]
-NODE_LABELS = {
-    "scan": "Scan",
-    "brief": "Brief",
-    "speech": "Speech",
-    "review": "Review",
-    "story": "Story",
-    "mono": "Mono",
+
+_NODE_LABEL_KEYS = {
+    "scan": "pipeline.scan",
+    "brief": "pipeline.brief",
+    "speech": "pipeline.speech",
+    "review": "pipeline.review",
+    "story": "pipeline.story",
+    "mono": "pipeline.mono",
 }
-NODE_FULL_NAMES = {
-    "scan": "Quick Scan",
-    "brief": "Briefing Context",
-    "speech": "Transcription",
-    "review": "Clip Reviews",
-    "story": "Storyboard",
-    "mono": "Monologue",
+_NODE_FULL_NAME_KEYS = {
+    "scan": "pipeline.scan_full",
+    "brief": "pipeline.brief_full",
+    "speech": "pipeline.speech_full",
+    "review": "pipeline.review_full",
+    "story": "pipeline.story_full",
+    "mono": "pipeline.mono_full",
 }
+
+
+def _node_label(node: str) -> str:
+    return t(_NODE_LABEL_KEYS.get(node, node))
+
+
+def _node_full_name(node: str) -> str:
+    return t(_NODE_FULL_NAME_KEYS.get(node, node))
+
+
+# Backwards-compatible dicts for code that reads NODE_LABELS/NODE_FULL_NAMES directly
+NODE_LABELS = {n: t(k) for n, k in _NODE_LABEL_KEYS.items()}
+NODE_FULL_NAMES = {n: t(k) for n, k in _NODE_FULL_NAME_KEYS.items()}
 # Map TUI node names to internal phase names used by versioning
 NODE_TO_PHASE = {
     "scan": "quick_scan",
@@ -297,7 +311,7 @@ def _render_tab_bar(state: dict, active_node: str):
     """Render the pipeline tab bar with box-drawing characters."""
     tabs = []
     for node in PIPELINE_NODES:
-        label = NODE_LABELS[node]
+        label = _node_label(node)
         version_text = _get_node_version_text(state, node)
         is_active = node == active_node
         exists = state.get(node, {}).get("exists", False)
@@ -669,14 +683,14 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
         next_node = PIPELINE_NODES[node_idx + 1]
         choices.append(
             questionary.Choice(
-                f"→ Switch to {NODE_FULL_NAMES[next_node]}", value=f"nav_{next_node}"
+                f"→ {_node_full_name(next_node)}", value=f"nav_{next_node}"
             )
         )
     if node_idx > 0:
         prev_node = PIPELINE_NODES[node_idx - 1]
         choices.append(
             questionary.Choice(
-                f"← Switch to {NODE_FULL_NAMES[prev_node]}", value=f"nav_{prev_node}"
+                f"← {_node_full_name(prev_node)}", value=f"nav_{prev_node}"
             )
         )
 
@@ -1159,13 +1173,13 @@ def _project_actions(name, cfg):
                         label = f"v{art.version}{lineage}"
                         version_choices.append(questionary.Choice(label, value=art.version))
                     selected = questionary.select(
-                        f"{NODE_FULL_NAMES[active_node]} versions:",
+                        t("versions.prompt", node=_node_full_name(active_node)),
                         choices=version_choices,
                         style=VX_STYLE,
                     ).ask()
                     if selected is not None:
                         active_versions[active_node] = selected
-                        print(f"\n  Switched {NODE_LABELS[active_node]} to v{selected}")
+                        print(f"\n  {t('versions.switched', node=_node_label(active_node), version=selected)}")
 
         # --- Node-specific actions ---
         elif action == "rescan":
