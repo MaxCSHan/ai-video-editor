@@ -769,7 +769,31 @@ def concat_proxies(
                 "+faststart",
                 str(seg_path),
             ]
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+            except subprocess.CalledProcessError:
+                # Fallback: drawtext may not be supported (missing libfreetype).
+                # Retry without text overlay so the pipeline can continue.
+                cmd_no_text = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(c["proxy_path"]),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "28",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "64k",
+                    "-movflags",
+                    "+faststart",
+                    str(seg_path),
+                ]
+                subprocess.run(cmd_no_text, capture_output=True, text=True, check=True, timeout=60)
             segment_files.append(seg_path)
 
             clips_manifest.append(
