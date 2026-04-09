@@ -33,6 +33,7 @@ from .config import (
     Config,
     DEFAULT_CONFIG,
 )
+from .i18n import t
 from .storyboard_format import format_duration
 
 
@@ -119,15 +120,13 @@ def cmd_new(args, cfg: Config):
     name = args.name
 
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-        print(
-            f"{RED}Error:{RESET} Project name may only contain letters, digits, hyphens, and underscores."
-        )
+        print(f"{RED}{t('project.name_invalid')}{RESET}")
         sys.exit(1)
 
     source = Path(args.source).resolve()
 
     if not source.exists():
-        print(f"{RED}Error:{RESET} Source not found: {source}")
+        print(f"{RED}{t('project.source_not_found', path=source)}{RESET}")
         sys.exit(1)
 
     project_type = _detect_source_type(source)
@@ -151,9 +150,7 @@ def cmd_new(args, cfg: Config):
 
     project_root = cfg.library_dir / name
     if project_root.exists() and _read_project_meta(project_root):
-        print(
-            f"{YELLOW}Project '{name}' already exists.{RESET} Use {BOLD}vx analyze {name}{RESET} to re-run."
-        )
+        print(f"{YELLOW}{t('project.already_exists', name=name)}{RESET}")
         sys.exit(1)
 
     _header(f"Creating {project_type} project: {name}")
@@ -2053,6 +2050,18 @@ def cmd_config(args, cfg: Config):
 
 
 # ---------------------------------------------------------------------------
+# Setup command
+# ---------------------------------------------------------------------------
+
+
+def cmd_setup(args, cfg: Config):
+    """Run the first-time setup wizard."""
+    from .setup_wizard import run_setup_wizard
+
+    run_setup_wizard()
+
+
+# ---------------------------------------------------------------------------
 # Tracing command
 # ---------------------------------------------------------------------------
 
@@ -2675,6 +2684,9 @@ def main():
     p_config.add_argument("--provider", choices=["gemini", "claude"], help="Default AI provider")
     p_config.add_argument("--style", help="Default video style")
 
+    # --- setup ---
+    sub.add_parser("setup", help="Run the first-time setup wizard (prerequisites, API keys, language)")
+
     p_trace = sub.add_parser("trace", help="Start Phoenix tracing server (dev tool)")
     p_trace.add_argument("--port", type=int, default=6006, help="Server port (default: 6006)")
     p_trace.add_argument("--storage", type=str, help="Storage directory (default: ~/.vx/phoenix)")
@@ -2723,6 +2735,7 @@ def main():
         "eval": cmd_eval,
         "preset": cmd_preset,
         "config": cmd_config,
+        "setup": cmd_setup,
         "trace": cmd_trace,
     }
 
