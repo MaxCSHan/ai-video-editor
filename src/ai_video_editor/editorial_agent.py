@@ -1035,7 +1035,7 @@ def _run_phase2_sections(
         group_clips_by_date,
         merge_section_storyboards,
     )
-    from .tracing import LLMSpinner, traced_gemini_generate
+    from .tracing import LLMSpinner, otel_phase_span, traced_gemini_generate
     from .versioning import (
         begin_version,
         commit_version,
@@ -1096,19 +1096,22 @@ def _run_phase2_sections(
     )
 
     with LLMSpinner("Scene planning", provider=provider):
-        response_scene = traced_gemini_generate(
-            client,
-            model=gemini_cfg.phase2,
-            contents=scene_prompt,
-            config=types.GenerateContentConfig(
-                temperature=gemini_cfg.phase2_temperature,
-                response_mime_type="application/json",
-                response_schema=ScenePlan,
-            ),
-            phase="phase2_scene_planner",
-            tracer=tracer,
-            prompt_chars=len(scene_prompt),
-        )
+        with otel_phase_span(
+            "phase2_scene_planner", stage="storyboard", provider="gemini", call="scene"
+        ):
+            response_scene = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2,
+                contents=scene_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2_temperature,
+                    response_mime_type="application/json",
+                    response_schema=ScenePlan,
+                ),
+                phase="phase2_scene_planner",
+                tracer=tracer,
+                prompt_chars=len(scene_prompt),
+            )
     scene_plan = ScenePlan.model_validate_json(response_scene.text)
     section_groups = build_section_groups_from_scene_plan(date_groups, scene_plan)
 
@@ -1156,19 +1159,22 @@ def _run_phase2_sections(
     )
 
     with LLMSpinner("Narrative planning", provider=provider):
-        response_narr = traced_gemini_generate(
-            client,
-            model=gemini_cfg.phase2,
-            contents=narrative_prompt,
-            config=types.GenerateContentConfig(
-                temperature=gemini_cfg.phase2_temperature,
-                response_mime_type="application/json",
-                response_schema=SectionPlan,
-            ),
-            phase="phase2_narrative_planner",
-            tracer=tracer,
-            prompt_chars=len(narrative_prompt),
-        )
+        with otel_phase_span(
+            "phase2_narrative_planner", stage="storyboard", provider="gemini", call="narrative"
+        ):
+            response_narr = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2,
+                contents=narrative_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2_temperature,
+                    response_mime_type="application/json",
+                    response_schema=SectionPlan,
+                ),
+                phase="phase2_narrative_planner",
+                tracer=tracer,
+                prompt_chars=len(narrative_prompt),
+            )
     section_plan = SectionPlan.model_validate_json(response_narr.text)
     print(f'  [Narrative] "{section_plan.title}" — hook from {section_plan.hook_section_id}')
 
@@ -1211,19 +1217,22 @@ def _run_phase2_sections(
     )
 
     with LLMSpinner("Opening hook", provider=provider):
-        response_hook = traced_gemini_generate(
-            client,
-            model=gemini_cfg.phase2,
-            contents=hook_prompt,
-            config=types.GenerateContentConfig(
-                temperature=gemini_cfg.phase2b_temperature,
-                response_mime_type="application/json",
-                response_schema=HookStoryboard,
-            ),
-            phase="phase2_hook",
-            tracer=tracer,
-            prompt_chars=len(hook_prompt),
-        )
+        with otel_phase_span("phase2_hook", stage="storyboard", provider="gemini", call="hook"):
+            response_hook = traced_gemini_generate(
+                client,
+                model=gemini_cfg.phase2b,
+                contents=hook_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=gemini_cfg.phase2b_temperature,
+                    response_mime_type="application/json",
+                    response_schema=HookStoryboard,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    max_output_tokens=65536,
+                ),
+                phase="phase2_hook",
+                tracer=tracer,
+                prompt_chars=len(hook_prompt),
+            )
     hook_sb = HookStoryboard.model_validate_json(response_hook.text)
     hook_dur = sum(s.duration_sec for s in hook_sb.segments)
     print(f"  [Hook] {len(hook_sb.segments)} segments, {hook_dur:.1f}s")
@@ -1262,19 +1271,27 @@ def _run_phase2_sections(
         print(f"  [Section {idx}/{len(flat_sections)}] {label}...")
 
         with LLMSpinner(f"Section: {label}", provider=provider):
-            response_sec = traced_gemini_generate(
-                client,
-                model=gemini_cfg.phase2,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=gemini_cfg.phase2b_temperature,
-                    response_mime_type="application/json",
-                    response_schema=SectionStoryboard,
-                ),
-                phase=f"phase2_section_{section.section_id}",
-                tracer=tracer,
-                prompt_chars=len(prompt),
-            )
+            with otel_phase_span(
+                f"phase2_section_{section.section_id}",
+                stage="storyboard",
+                provider="gemini",
+                call=f"section_{idx}",
+            ):
+                response_sec = traced_gemini_generate(
+                    client,
+                    model=gemini_cfg.phase2b,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=gemini_cfg.phase2b_temperature,
+                        response_mime_type="application/json",
+                        response_schema=SectionStoryboard,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                        max_output_tokens=65536,
+                    ),
+                    phase=f"phase2_section_{section.section_id}",
+                    tracer=tracer,
+                    prompt_chars=len(prompt),
+                )
 
         ssb = SectionStoryboard.model_validate_json(response_sec.text)
         section_storyboards.append(ssb)
@@ -1341,7 +1358,11 @@ def _run_phase2_sections(
         from .editorial_director import run_editorial_review
         from .review_display import print_turn
 
-        print("  [Director] Autonomous review starting...")
+        print(
+            f"  [Director] Starting editorial review ({review_config.model}, "
+            f"up to {review_config.max_turns} turns, "
+            f"{review_config.wall_clock_timeout_sec:.0f}s timeout)..."
+        )
         storyboard, _review_log = run_editorial_review(
             storyboard=storyboard,
             clip_reviews=clip_reviews,
@@ -1352,6 +1373,11 @@ def _run_phase2_sections(
             interactive=interactive,
             turn_callback=print_turn,
             style_guidelines=style_supplement,
+        )
+        print(
+            f"  [Director] Review complete: {_review_log.convergence_reason} "
+            f"({_review_log.total_turns} turns, {_review_log.total_fixes} fixes, "
+            f"${_review_log.total_cost_usd:.3f}, {_review_log.total_duration_sec:.1f}s)"
         )
 
     # ── Version and save outputs ──────────────────────────────────────────
@@ -1371,9 +1397,12 @@ def _run_phase2_sections(
         if _um_sec:
             review_inputs["user_context"] = f"user_context:user:v{_um_sec.group(1)}"
     cfg_snap = {
-        "model": gemini_cfg.phase2,
+        "model_scene": gemini_cfg.phase2,
+        "model_narrative": gemini_cfg.phase2,
+        "model_hook": gemini_cfg.phase2b,
+        "model_section": gemini_cfg.phase2b,
         "pipeline": "sections",
-        "gap_minutes": gemini_cfg.section_gap_minutes,
+        "temperature": gemini_cfg.phase2_temperature,
     }
 
     rv_version = current_version(editorial_paths.root, f"review_{provider}")
@@ -1602,7 +1631,9 @@ def _run_phase2_split(
             contents_2a = reasoning_prompt
 
         with LLMSpinner("Editorial reasoning (Call 2A)", provider=provider):
-            with otel_phase_span("phase2a_reasoning", stage="storyboard", provider="gemini", call="2A"):
+            with otel_phase_span(
+                "phase2a_reasoning", stage="storyboard", provider="gemini", call="2A"
+            ):
                 response_2a = traced_gemini_generate(
                     client,
                     model=gemini_cfg.phase2,
@@ -1627,7 +1658,9 @@ def _run_phase2_split(
         )
 
         with LLMSpinner("Plan structuring (Call 2A.5)", provider=provider):
-            with otel_phase_span("phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5"):
+            with otel_phase_span(
+                "phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5"
+            ):
                 response_2a5 = traced_gemini_generate(
                     client,
                     model=gemini_cfg.structuring_model,
@@ -1685,7 +1718,9 @@ def _run_phase2_split(
             f"{len(story_plan.planned_segments)} segments)..."
         )
         with LLMSpinner("Precise assembly (Call 2B)", provider=provider):
-            with otel_phase_span("phase2b_assembly", stage="storyboard", provider="gemini", call="2B"):
+            with otel_phase_span(
+                "phase2b_assembly", stage="storyboard", provider="gemini", call="2B"
+            ):
                 response_2b = traced_gemini_generate(
                     client,
                     model=gemini_cfg.phase2b,
