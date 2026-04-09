@@ -2,7 +2,6 @@
 
 import json
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -43,37 +42,8 @@ from .file_cache import (
     cache_file_uri,
     get_cached_uri,
 )
-
-
-GEMINI_UPLOAD_TIMEOUT_SEC = 300  # 5 minutes
-
-
-def _wait_for_gemini_file(video_file, client, timeout_sec: int = GEMINI_UPLOAD_TIMEOUT_SEC):
-    """Poll until Gemini file processing completes, with timeout."""
-    start = time.monotonic()
-    while video_file.state.name == "PROCESSING":
-        if time.monotonic() - start > timeout_sec:
-            raise TimeoutError(
-                f"Gemini file processing timed out after {timeout_sec}s for {video_file.name}"
-            )
-        time.sleep(3)
-        video_file = client.files.get(name=video_file.name)
-    return video_file
-
-
-def _require_api_key(name: str) -> str:
-    """Get a required API key from the environment, or raise with a helpful message."""
-    key = os.environ.get(name)
-    if not key:
-        raise RuntimeError(f"{name} is not set. Add it to your .env file (see .env.example).")
-    return key
-
-
-def _get_gemini_client():
-    """Create a Gemini client with the API key from the environment."""
-    from google import genai
-
-    return genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+from .infra.gemini_client import GeminiClient
+from .domain.exceptions import FileUploadError
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +424,7 @@ def _review_single_clip_gemini(
         except json.JSONDecodeError:
             print(f"  {label}: corrupt cache, will re-review")
 
-    client = _get_gemini_client()
+    client = GeminiClient.from_env()
 
     # Check file cache before uploading (may already be cached by briefing or transcription)
     file_cache = load_file_api_cache(editorial_paths)
@@ -466,10 +436,9 @@ def _review_single_clip_gemini(
     else:
         print(f"  {label}: uploading proxy...")
         proxy_path = Path(clip_info["proxy_path"])
-        video_file = client.files.upload(file=str(proxy_path))
-        video_file = _wait_for_gemini_file(video_file, client)
-
-        if video_file.state.name == "FAILED":
+        try:
+            video_file = client.upload_and_wait(proxy_path, label=clip_id)
+        except FileUploadError:
             print(f"  {label}: WARNING — Gemini processing failed, skipping")
             return None
 
@@ -499,7 +468,7 @@ def _review_single_clip_gemini(
 
     with otel_phase_span("phase1", stage="review", provider="gemini", clip_id=clip_id):
         response = traced_gemini_generate(
-            client,
+            client.raw,
             model=cfg.model,
             contents=[
                 types.Content(
@@ -545,7 +514,7 @@ def _review_single_clip_gemini(
             extra_tags=["retry:true"],
         ):
             retry_response = traced_gemini_generate(
-                client,
+                client.raw,
                 model=cfg.model,
                 contents=[
                     types.Content(
@@ -962,7 +931,7 @@ def _validate_constraints(
         print(f"  [Validate] Checking constraint satisfaction ({model})...")
         with otel_phase_span("phase2_validation", stage="validation", provider="gemini"):
             response = traced_gemini_generate(
-                client,
+                client.raw,
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.1),
@@ -1045,7 +1014,7 @@ def _run_phase2_sections(
         versioned_path,
     )
 
-    client = _get_gemini_client()
+    client = GeminiClient.from_env()
     gemini_cfg = gemini_cfg or GeminiConfig()
 
     # Format brief WITHOUT constraints for section calls (constraints distributed by storyline)
@@ -1100,7 +1069,7 @@ def _run_phase2_sections(
             "phase2_scene_planner", stage="storyboard", provider="gemini", call="scene"
         ):
             response_scene = traced_gemini_generate(
-                client,
+                client.raw,
                 model=gemini_cfg.phase2,
                 contents=scene_prompt,
                 config=types.GenerateContentConfig(
@@ -1163,7 +1132,7 @@ def _run_phase2_sections(
             "phase2_narrative_planner", stage="storyboard", provider="gemini", call="narrative"
         ):
             response_narr = traced_gemini_generate(
-                client,
+                client.raw,
                 model=gemini_cfg.phase2,
                 contents=narrative_prompt,
                 config=types.GenerateContentConfig(
@@ -1219,7 +1188,7 @@ def _run_phase2_sections(
     with LLMSpinner("Opening hook", provider=provider):
         with otel_phase_span("phase2_hook", stage="storyboard", provider="gemini", call="hook"):
             response_hook = traced_gemini_generate(
-                client,
+                client.raw,
                 model=gemini_cfg.phase2b,
                 contents=hook_prompt,
                 config=types.GenerateContentConfig(
@@ -1278,7 +1247,7 @@ def _run_phase2_sections(
                 call=f"section_{idx}",
             ):
                 response_sec = traced_gemini_generate(
-                    client,
+                    client.raw,
                     model=gemini_cfg.phase2b,
                     contents=prompt,
                     config=types.GenerateContentConfig(
@@ -1577,7 +1546,7 @@ def _run_phase2_split(
     if provider == "gemini":
         from google.genai import types
 
-        client = _get_gemini_client()
+        client = GeminiClient.from_env()
 
         # Visual mode: attach proxy videos to Call 2A
         # Use all proxy clips from disk (same set as briefing/quick scan) so that
@@ -1605,9 +1574,11 @@ def _run_phase2_split(
                         cached_count += 1
                         continue
                     print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
-                    video_file = client.files.upload(file=str(bundle["path"]))
-                    video_file = _wait_for_gemini_file(video_file, client)
-                    if video_file.state.name == "FAILED":
+                    try:
+                        video_file = client.upload_and_wait(
+                            Path(bundle["path"]), label=f"bundle_{i + 1}"
+                        )
+                    except FileUploadError:
                         print(f"  WARNING: bundle {i + 1} upload failed")
                         continue
                     cache_file_uri(editorial_paths, cache_key, video_file.uri)
@@ -1635,7 +1606,7 @@ def _run_phase2_split(
                 "phase2a_reasoning", stage="storyboard", provider="gemini", call="2A"
             ):
                 response_2a = traced_gemini_generate(
-                    client,
+                    client.raw,
                     model=gemini_cfg.phase2,
                     contents=contents_2a,
                     config=types.GenerateContentConfig(
@@ -1662,7 +1633,7 @@ def _run_phase2_split(
                 "phase2a_structuring", stage="storyboard", provider="gemini", call="2A.5"
             ):
                 response_2a5 = traced_gemini_generate(
-                    client,
+                    client.raw,
                     model=gemini_cfg.structuring_model,
                     contents=structuring_prompt,
                     config=types.GenerateContentConfig(
@@ -1722,7 +1693,7 @@ def _run_phase2_split(
                 "phase2b_assembly", stage="storyboard", provider="gemini", call="2B"
             ):
                 response_2b = traced_gemini_generate(
-                    client,
+                    client.raw,
                     model=gemini_cfg.phase2b,
                     contents=assembly_prompt,
                     config=types.GenerateContentConfig(
@@ -2035,7 +2006,7 @@ def run_phase2(
         bundles = concat_proxies(editorial_paths, all_clip_ids)
 
         if bundles:
-            client = _get_gemini_client()
+            client = GeminiClient.from_env()
             file_cache = load_file_api_cache(editorial_paths)
             cached_count = 0
 
@@ -2050,9 +2021,11 @@ def run_phase2(
                     continue
 
                 print(f"  Uploading concat bundle {i + 1}/{len(bundles)}...")
-                video_file = client.files.upload(file=str(bundle["path"]))
-                video_file = _wait_for_gemini_file(video_file, client)
-                if video_file.state.name == "FAILED":
+                try:
+                    video_file = client.upload_and_wait(
+                        Path(bundle["path"]), label=f"bundle_{i + 1}"
+                    )
+                except FileUploadError:
                     print(f"  WARNING: bundle {i + 1} upload failed")
                     continue
                 cache_file_uri(editorial_paths, cache_key, video_file.uri)
@@ -2091,7 +2064,7 @@ def run_phase2(
         if not visual_timeline:
             from google.genai import types
 
-            client = _get_gemini_client()
+            client = GeminiClient.from_env()
 
         from .tracing import otel_phase_span, traced_gemini_generate
 
@@ -2104,7 +2077,7 @@ def run_phase2(
 
         with otel_phase_span("phase2", stage="storyboard", provider="gemini"):
             response = traced_gemini_generate(
-                client,
+                client.raw,
                 model=p2_model,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -2125,7 +2098,10 @@ def run_phase2(
 
         from .tracing import otel_phase_span, traced_claude_generate
 
-        client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        client = anthropic.Anthropic(api_key=anthropic_key)
         with otel_phase_span("phase2", stage="storyboard", provider="claude"):
             response = traced_claude_generate(
                 client,
@@ -2172,7 +2148,7 @@ def run_phase2(
             if not visual_timeline:
                 from google.genai import types  # noqa: F811
 
-                client = _get_gemini_client()
+                client = GeminiClient.from_env()
             _validate_constraints(
                 storyboard=storyboard,
                 user_context=user_context,
@@ -2349,7 +2325,7 @@ def _run_monologue_split(
             ctx = json.loads(context_path.read_text())
             user_context_text = format_brief_for_prompt(ctx, phase="phase2")
 
-    client = _get_gemini_client()
+    client = GeminiClient.from_env()
 
     # ── Call 1: Segment analysis & arc planning ────────────────────────────
     call1_prompt = build_monologue_call1_prompt(
@@ -2364,7 +2340,7 @@ def _run_monologue_split(
     with LLMSpinner("Segment analysis (Call M1)", provider=provider):
         with otel_phase_span("phase3_analysis", stage="monologue", provider="gemini", call="M1"):
             response_1 = traced_gemini_generate(
-                client,
+                client.raw,
                 model=gemini_cfg.model,
                 contents=call1_prompt,
                 config=types.GenerateContentConfig(
@@ -2400,7 +2376,7 @@ def _run_monologue_split(
     with LLMSpinner("Creative text (Call M2)", provider=provider):
         with otel_phase_span("phase3_creative", stage="monologue", provider="gemini", call="M2"):
             response_2 = traced_gemini_generate(
-                client,
+                client.raw,
                 model=gemini_cfg.model,
                 contents=call2_prompt,
                 config=types.GenerateContentConfig(
@@ -2605,12 +2581,12 @@ def run_monologue(
         from google.genai import types
         from .tracing import otel_phase_span, traced_gemini_generate
 
-        client = _get_gemini_client()
+        client = GeminiClient.from_env()
 
         with LLMSpinner("Generating visual monologue", provider="gemini"):
             with otel_phase_span("monologue", stage="monologue", provider="gemini"):
                 response = traced_gemini_generate(
-                    client,
+                    client.raw,
                     model=gemini_cfg.model,
                     contents=prompt,
                     config=types.GenerateContentConfig(
@@ -2629,7 +2605,10 @@ def run_monologue(
 
         from .tracing import otel_phase_span, traced_claude_generate
 
-        client = anthropic.Anthropic(api_key=_require_api_key("ANTHROPIC_API_KEY"))
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+        client = anthropic.Anthropic(api_key=anthropic_key)
         with LLMSpinner("Generating visual monologue", provider="claude"):
             with otel_phase_span("monologue", stage="monologue", provider="claude"):
                 response = traced_claude_generate(

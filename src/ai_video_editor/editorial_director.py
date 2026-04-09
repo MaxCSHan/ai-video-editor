@@ -209,7 +209,6 @@ def run_editorial_review(
 
     Returns (storyboard, review_log) tuple.
     """
-    from google import genai
     from google.genai import types
 
     from .director_prompts import (
@@ -218,6 +217,7 @@ def run_editorial_review(
         build_system_prompt,
         get_tool_declarations,
     )
+    from .infra.gemini_client import GeminiClient
     from .render import generate_contact_strip
     from .tracing import estimate_cost, otel_phase_span, otel_session_span, otel_tool_span
 
@@ -262,9 +262,7 @@ def run_editorial_review(
     messages = _build_gemini_contents(initial_parts)
 
     # Set up Gemini client with function calling
-    client = genai.Client(
-        api_key=_require_api_key("GEMINI_API_KEY"),
-    )
+    client = GeminiClient.from_env()
 
     tool_declarations = get_tool_declarations()
     config = types.GenerateContentConfig(
@@ -353,7 +351,7 @@ def run_editorial_review(
         turn_start = time.monotonic()
         try:
             with otel_phase_span("editorial_review", stage="director", provider="gemini"):
-                response = client.models.generate_content(
+                response = client.raw.models.generate_content(
                     model=review_config.model,
                     contents=messages,
                     config=turn_config,
@@ -621,7 +619,6 @@ def run_director_chat(
 
     Returns (storyboard, review_log) tuple.
     """
-    from google import genai
     from google.genai import types
 
     from .director_prompts import (
@@ -630,6 +627,7 @@ def run_director_chat(
         build_initial_message,
         get_chat_tool_declarations,
     )
+    from .infra.gemini_client import GeminiClient
     from .render import generate_contact_strip
     from .tracing import estimate_cost, otel_phase_span, otel_session_span, otel_tool_span
 
@@ -697,7 +695,7 @@ def run_director_chat(
         )
 
     # Set up Gemini with chat tools
-    client = genai.Client(api_key=_require_api_key("GEMINI_API_KEY"))
+    client = GeminiClient.from_env()
     tool_declarations = get_chat_tool_declarations()
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -817,10 +815,7 @@ def run_director_chat(
                             role="user",
                             parts=[
                                 types.Part.from_text(
-                                    text=(
-                                        "## Updated Segment List (after edits)\n\n"
-                                        + refreshed
-                                    )
+                                    text=("## Updated Segment List (after edits)\n\n" + refreshed)
                                 )
                             ],
                         )
@@ -902,7 +897,7 @@ def run_director_chat(
             turn_start = time.monotonic()
             try:
                 with otel_phase_span("director_chat", stage="director", provider="gemini"):
-                    response = client.models.generate_content(
+                    response = client.raw.models.generate_content(
                         model=review_config.model,
                         contents=messages,
                         config=config,
@@ -1115,16 +1110,6 @@ def run_director_chat(
     _session_cm.__exit__(None, None, None)
 
     return tool_ctx.storyboard, review_log
-
-
-def _require_api_key(name: str) -> str:
-    """Get a required API key from the environment."""
-    import os
-
-    key = os.environ.get(name)
-    if not key:
-        raise RuntimeError(f"{name} is not set. Add it to your .env file.")
-    return key
 
 
 # ---------------------------------------------------------------------------
