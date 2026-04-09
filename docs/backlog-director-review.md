@@ -2,6 +2,8 @@
 
 Review date: 2026-04-09. Applied the five design principles from the Timeline Mode refactoring (over-deterministic, bad context management, overloaded invoke, no feedback loop, no HITL).
 
+**Status**: Both auto-review (`vx review`) and chat (`vx chat`) are marked **experimental** as of 2026-04-09. Director review is disabled by default in the pipeline — opt-in via `--review` flag on `vx analyze` or manually via `vx review` / `vx chat`. Real-world testing revealed quality and reliability issues that need to be addressed before these features are production-ready.
+
 **Overall assessment**: The system is well-engineered tactically (tool implementations, error handling, session management) but over-constrained strategically (rigid quality bar, no LLM agency, weak feedback loops). The Chat mode's propose-approve-execute pattern is a good HITL foundation to build on.
 
 ---

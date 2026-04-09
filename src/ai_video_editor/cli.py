@@ -669,9 +669,9 @@ def cmd_analyze(args, cfg: Config):
             cfg.gemini.use_split_pipeline = False
             cfg.gemini.use_timeline_mode = False
 
-        # Apply review CLI overrides
-        if getattr(args, "no_review", False):
-            cfg.review.enabled = False
+        # Apply review CLI overrides (director review is opt-in, experimental)
+        if getattr(args, "review", False):
+            cfg.review.enabled = True
         if getattr(args, "review_budget", None) is not None:
             cfg.review.max_review_cost_usd = args.review_budget
         if getattr(args, "review_max_turns", None) is not None:
@@ -2436,9 +2436,9 @@ def main():
         help="Run analysis on an experiment track (outputs to track subdirectory)",
     )
     p_analyze.add_argument(
-        "--no-review",
+        "--review",
         action="store_true",
-        help="Skip Editorial Director review loop after Phase 2",
+        help="Enable Editorial Director auto-review after Phase 2 (experimental)",
     )
     p_analyze.add_argument(
         "--review-budget",
@@ -2685,7 +2685,9 @@ def main():
     p_config.add_argument("--style", help="Default video style")
 
     # --- setup ---
-    sub.add_parser("setup", help="Run the first-time setup wizard (prerequisites, API keys, language)")
+    sub.add_parser(
+        "setup", help="Run the first-time setup wizard (prerequisites, API keys, language)"
+    )
 
     p_trace = sub.add_parser("trace", help="Start Phoenix tracing server (dev tool)")
     p_trace.add_argument("--port", type=int, default=6006, help="Server port (default: 6006)")

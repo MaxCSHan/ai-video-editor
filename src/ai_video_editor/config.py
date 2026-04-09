@@ -264,7 +264,7 @@ class EditorialProjectPaths:
 class ReviewConfig:
     """Configuration for the Editorial Director review loop."""
 
-    enabled: bool = True
+    enabled: bool = False  # experimental — opt-in via --review or TUI
     model: str = MODEL_GEMINI_3_FLASH
     max_turns: int = 50
     max_fixes: int = 40
