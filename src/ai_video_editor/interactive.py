@@ -9,6 +9,7 @@ import questionary
 from questionary import Style
 
 from .config import DEFAULT_CONFIG
+from .i18n import t
 
 VX_STYLE = Style(
     [
@@ -23,10 +24,11 @@ VX_STYLE = Style(
     ]
 )
 
-BANNER = """
-\033[1m  VX — AI Video Editor\033[0m
-\033[2m  Turn raw footage into polished vlogs with AI\033[0m
-"""
+def _banner() -> str:
+    return f"\n\033[1m  {t('app.title')}\033[0m\n\033[2m  {t('app.subtitle')}\033[0m\n"
+
+
+BANNER = _banner()
 
 # ANSI codes
 _RED = "\033[31m"
@@ -714,7 +716,17 @@ def run_interactive():
 
     load_dotenv()
 
-    print(BANNER)
+    # First-run setup wizard — checks prerequisites and guides API key config
+    from .setup_wizard import needs_setup, run_setup_wizard
+
+    if needs_setup():
+        if not run_setup_wizard():
+            return
+        # Reload .env in case setup wizard wrote new API keys
+        load_dotenv(override=True)
+    else:
+        print(_banner())
+
     cfg = DEFAULT_CONFIG
 
     # Auto-connect to Phoenix tracing server if running
@@ -722,28 +734,28 @@ def run_interactive():
 
     if connect_phoenix():
         _, trace_url = get_phoenix_status()
-        print(f"  \033[2mTracing: connected ({trace_url})\033[0m\n")
+        print(f"  \033[2m{t('status.tracing_connected', url=trace_url)}\033[0m\n")
 
     while True:
         action = questionary.select(
-            "What would you like to do?",
+            t("menu.what_to_do"),
             choices=[
-                "New project",
-                "Open existing project",
-                "Settings",
-                questionary.Choice("Quit", value="quit"),
+                questionary.Choice(t("menu.new_project"), value="new"),
+                questionary.Choice(t("menu.open_project"), value="open"),
+                questionary.Choice(t("menu.settings"), value="settings"),
+                questionary.Choice(t("menu.quit"), value="quit"),
             ],
             style=VX_STYLE,
         ).ask()
 
         if action is None or action == "quit":
-            print("\n  Bye!\n")
+            print(f"\n  {t('app.bye')}\n")
             break
-        elif action == "New project":
+        elif action == "new":
             _new_project_flow(cfg)
-        elif action == "Open existing project":
+        elif action == "open":
             _open_project_flow(cfg)
-        elif action == "Settings":
+        elif action == "settings":
             _settings_flow(cfg)
 
 
@@ -751,15 +763,15 @@ def _new_project_flow(cfg):
     """Guided flow: create project → preprocess → brief → analyze."""
     print()
     name = questionary.text(
-        "Project name:",
-        instruction="(e.g., family-trip-hsinchu, puma-run)",
+        t("project.name_prompt"),
+        instruction=t("project.name_hint"),
         style=VX_STYLE,
     ).ask()
     if not name:
         return
 
     source = questionary.path(
-        "Footage folder (directory containing your raw video clips):",
+        t("project.source_prompt"),
         only_directories=True,
         style=VX_STYLE,
     ).ask()
@@ -768,11 +780,11 @@ def _new_project_flow(cfg):
     source_path = Path(source.strip().strip("'\"")).expanduser().resolve()
 
     if not source_path.is_dir():
-        print(f"\n  Error: {source_path} is not a directory\n")
+        print(f"\n  {t('project.source_not_dir', path=source_path)}\n")
         return
 
     style = questionary.select(
-        "Video style:",
+        t("style.prompt"),
         choices=[
             "vlog",
             "travel-vlog",
@@ -780,14 +792,14 @@ def _new_project_flow(cfg):
             "event-recap",
             "cinematic",
             "short-form",
-            questionary.Choice("Custom...", value="__custom__"),
+            questionary.Choice(t("style.custom"), value="__custom__"),
         ],
         style=VX_STYLE,
     ).ask()
     if style == "__custom__":
         style = questionary.text(
-            "Describe your video style:",
-            instruction="(e.g., 'lo-fi daily journal', 'drone landscape showcase')",
+            t("style.custom_prompt"),
+            instruction=t("style.custom_hint"),
             style=VX_STYLE,
         ).ask()
     if not style:
@@ -797,21 +809,21 @@ def _new_project_flow(cfg):
     from .style_presets import list_presets, get_preset
 
     presets = list_presets()
-    preset_choices = [questionary.Choice("None (standard editing)", value=None)]
+    preset_choices = [questionary.Choice(t("style.preset_none"), value=None)]
     for p in presets:
         preset_choices.append(questionary.Choice(f"{p.label} — {p.description}", value=p.key))
 
     preset_key = questionary.select(
-        "Style preset (optional — adds AI creative direction):",
+        t("style.preset_prompt"),
         choices=preset_choices,
         style=VX_STYLE,
     ).ask()
 
     style_preset = get_preset(preset_key) if preset_key else None
     if style_preset:
-        print(f"\n  Preset: {style_preset.label}")
+        print(f"\n  {t('style.preset_selected', label=style_preset.label)}")
         if style_preset.has_phase3:
-            print("  This preset will generate a Visual Monologue (text overlay narrative)")
+            print(f"  {t('style.preset_phase3')}")
 
     # Read workspace config for provider
     ws_path = Path(".vx.json")
@@ -821,8 +833,8 @@ def _new_project_flow(cfg):
     # Check API key
     key_var = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
     if not os.environ.get(key_var):
-        print(f"\n  Warning: {key_var} not set. Check your .env file.\n")
-        if not questionary.confirm("Continue anyway?", default=False, style=VX_STYLE).ask():
+        print(f"\n  {t('api_key.warning', key_var=key_var)}\n")
+        if not questionary.confirm(t("setup.continue_anyway"), default=False, style=VX_STYLE).ask():
             return
 
     print(f"\n  Creating project: {name}")
@@ -863,21 +875,21 @@ def _new_project_flow(cfg):
     # Discover
     clips = discover_source_clips(source_path)
     if not clips:
-        print(f"  No video files found in {source_path}\n")
+        print(f"  {t('clips.no_clips_found', path=source_path)}\n")
         return
 
-    print(f"  Found {len(clips)} clips\n")
+    print(f"  {t('clips.found', count=len(clips))}\n")
 
     # Let user deselect clips they don't want
     selected = questionary.checkbox(
-        "Select clips to include:",
+        t("clips.select"),
         choices=[questionary.Choice(c.name, value=c, checked=True) for c in clips],
         style=VX_STYLE,
     ).ask()
     if selected is None:
         return
     if not selected:
-        print("  No clips selected.\n")
+        print(f"  {t('clips.none_selected')}\n")
         return
     clips = selected
 
@@ -886,10 +898,10 @@ def _new_project_flow(cfg):
     (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
 
     # Preprocess
-    print(f"  Preprocessing {len(clips)} clips...\n")
+    print(f"  {t('clips.preprocessing', count=len(clips))}\n")
     clip_metadata = preprocess_all_clips(clips, ep, cfg.preprocess)
     manifest = build_master_manifest(clip_metadata, ep, name)
-    print(f"\n  Total footage: {manifest['total_duration_fmt']}")
+    print(f"\n  {t('clips.total_footage', duration=manifest['total_duration_fmt'])}")
 
     # Format analysis + selection
     clip_metadata, output_format = _run_format_selection(clip_metadata, meta, ep)
@@ -923,8 +935,8 @@ def _new_project_flow(cfg):
         )
 
     # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
-    if not questionary.confirm("Run transcription?", default=True, style=VX_STYLE).ask():
-        print("\n  Skipped transcription. Run from project menu later.\n")
+    if not questionary.confirm(t("transcription.run_prompt"), default=True, style=VX_STYLE).ask():
+        print(f"\n  {t('transcription.skipped')}\n")
     else:
         _run_transcription(ep, clip_metadata, cfg)
 
@@ -934,11 +946,11 @@ def _new_project_flow(cfg):
     _render_tab_bar(_gather_pipeline_state(ep, meta), "P1")
 
     # Phase 1
-    if not questionary.confirm("Run Phase 1 clip reviews?", default=True, style=VX_STYLE).ask():
-        print("\n  Skipped. Run 'vx analyze' later.\n")
+    if not questionary.confirm(t("phase1.run_prompt"), default=True, style=VX_STYLE).ask():
+        print(f"\n  {t('phase1.skipped')}\n")
         return
 
-    print(f"\n  Phase 1: Reviewing clips with {provider}...\n")
+    print(f"\n  {t('phase1.running', provider=provider)}\n")
     if provider == "gemini":
         reviews, failed = run_phase1_gemini(
             ep,
@@ -967,7 +979,7 @@ def _new_project_flow(cfg):
         style_supplement=p1_supplement,
         user_context=user_context,
     )
-    print(f"\n  Reviewed {len(reviews)} clips")
+    print(f"\n  {t('phase1.reviewed', count=len(reviews))}")
 
     # Manual briefing AFTER Phase 1 (non-Gemini path) — needs Phase 1 reviews
     # to generate smart questions about detected people and highlights.
@@ -983,22 +995,22 @@ def _new_project_flow(cfg):
 
     # Phase 2
     if not questionary.confirm(
-        "Generate editorial storyboard?", default=True, style=VX_STYLE
+        t("phase2.run_prompt"), default=True, style=VX_STYLE
     ).ask():
-        print("\n  Context saved. Run 'vx analyze' later.\n")
+        print(f"\n  {t('phase2.skipped')}\n")
         return
 
     # Ask about edit mode (Story vs Timeline)
     if provider == "gemini":
         edit_mode = questionary.select(
-            "Edit mode?",
+            t("phase2.edit_mode_prompt"),
             choices=[
                 questionary.Choice(
-                    "Story Mode    (AI freely structures the narrative)",
+                    t("phase2.story_mode"),
                     value="story",
                 ),
                 questionary.Choice(
-                    "Timeline Mode (scene-by-scene chronological — best for vlogs)",
+                    t("phase2.timeline_mode"),
                     value="timeline",
                 ),
             ],
@@ -1014,7 +1026,7 @@ def _new_project_flow(cfg):
         visual = _ask_visual_phase2(ep, reviews)
 
     mode_label = "Timeline" if cfg.gemini.use_timeline_mode else "Story"
-    print(f"\n  Phase 2: Generating storyboard ({mode_label} Mode)...\n")
+    print(f"\n  {t('phase2.running', mode=mode_label)}\n")
     run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,
@@ -1034,11 +1046,11 @@ def _new_project_flow(cfg):
     # Phase 3 — Visual Monologue (if preset supports it)
     if style_preset and style_preset.has_phase3:
         if questionary.confirm(
-            "Generate visual monologue (text overlay plan)?", default=True, style=VX_STYLE
+            t("phase3.run_prompt"), default=True, style=VX_STYLE
         ).ask():
             from .editorial_agent import run_monologue
 
-            print("\n  Phase 3: Visual Monologue")
+            print(f"\n  {t('phase3.running')}")
             run_monologue(
                 editorial_paths=ep,
                 provider=provider,
@@ -1050,26 +1062,26 @@ def _new_project_flow(cfg):
             )
 
     tracer.print_summary("Pipeline Total")
-    print("\n  Storyboard ready!")
+    print(f"\n  {t('phase2.storyboard_ready')}")
     _project_actions(name, cfg)
 
 
 def _open_project_flow(cfg):
     """Open an existing project and show actions."""
     if not cfg.library_dir.exists():
-        print("\n  No projects yet.\n")
+        print(f"\n  {t('project.no_projects')}\n")
         return
 
     projects = sorted(
         d.name for d in cfg.library_dir.iterdir() if d.is_dir() and (d / "project.json").exists()
     )
     if not projects:
-        print("\n  No projects yet.\n")
+        print(f"\n  {t('project.no_projects')}\n")
         return
 
     name = questionary.select(
-        "Select project:",
-        choices=projects + [questionary.Choice("← Back", value="")],
+        t("project.select"),
+        choices=projects + [questionary.Choice(t("menu.back"), value="")],
         style=VX_STYLE,
     ).ask()
     if not name:
@@ -1101,8 +1113,8 @@ def _project_actions(name, cfg):
         offline = bool(source_dir) and not Path(source_dir).is_dir()
 
         # Render tab bar + node detail
-        offline_tag = f"  {_DIM}[OFFLINE]{_RESET}" if offline else ""
-        print(f"\n  {_BOLD}Project: {name}{_RESET}{offline_tag}\n")
+        offline_tag = f"  {_DIM}{t('project.offline_tag')}{_RESET}" if offline else ""
+        print(f"\n  {_BOLD}{t('project.project_label', name=name)}{_RESET}{offline_tag}\n")
         _render_tab_bar(state, active_node)
         _render_node_detail(state, active_node)
 
@@ -1110,7 +1122,7 @@ def _project_actions(name, cfg):
         choices = _build_node_actions(active_node, state, ep, meta, offline)
 
         action = questionary.select(
-            "Action:",
+            t("menu.action"),
             choices=choices,
             style=VX_STYLE,
         ).ask()
@@ -1827,8 +1839,8 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         )
 
     # Transcription (benefits from cached Gemini URIs + speaker context from briefing)
-    if not questionary.confirm("Run transcription?", default=True, style=VX_STYLE).ask():
-        print("\n  Skipped transcription. Run from project menu later.\n")
+    if not questionary.confirm(t("transcription.run_prompt"), default=True, style=VX_STYLE).ask():
+        print(f"\n  {t('transcription.skipped')}\n")
     else:
         _run_transcription(ep, clip_metadata, cfg)
 
@@ -1909,7 +1921,7 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         visual = _ask_visual_phase2(ep, reviews)
 
     mode_label = "Timeline" if cfg.gemini.use_timeline_mode else "Story"
-    print(f"\n  Phase 2: Generating storyboard ({mode_label} Mode)...\n")
+    print(f"\n  {t('phase2.running', mode=mode_label)}\n")
     run_phase2(
         clip_reviews=reviews,
         editorial_paths=ep,
@@ -1929,11 +1941,11 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
     # Phase 3 — Visual Monologue (if preset supports it)
     if style_preset and style_preset.has_phase3:
         if questionary.confirm(
-            "Generate visual monologue (text overlay plan)?", default=True, style=VX_STYLE
+            t("phase3.run_prompt"), default=True, style=VX_STYLE
         ).ask():
             from .editorial_agent import run_monologue
 
-            print("\n  Phase 3: Visual Monologue")
+            print(f"\n  {t('phase3.running')}")
             run_monologue(
                 editorial_paths=ep,
                 provider=provider,
