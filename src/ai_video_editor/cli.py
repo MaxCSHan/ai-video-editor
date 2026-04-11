@@ -2159,7 +2159,7 @@ def cmd_versions(args, cfg: Config):
             try:
                 ts = datetime.fromisoformat(art.created_at)
                 ts_str = ts.strftime("%m-%d %H:%M")
-            except Exception:
+            except (ValueError, TypeError):
                 ts_str = ""
 
             latest_tag = f"  {GREEN}[latest]{RESET}" if art.version == latest_v else ""

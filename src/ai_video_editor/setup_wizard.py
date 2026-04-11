@@ -46,7 +46,7 @@ def needs_setup() -> bool:
             data = json.loads(vx_config.read_text())
             if data.get("setup_complete"):
                 return False
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     # No config at all, or setup not marked complete
@@ -168,7 +168,7 @@ def run_setup_wizard() -> bool:
     if vx_config.exists():
         try:
             config = json.loads(vx_config.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     config["setup_complete"] = True
@@ -225,7 +225,7 @@ def _check_prerequisites() -> dict:
             else:
                 result["ffmpeg_version"] = "found"
             result["ffmpeg_ok"] = True
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # API keys

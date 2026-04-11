@@ -148,7 +148,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                 try:
                     data = json.loads(tp.read_text())
                     t_provider = data.get("provider", "mlx") or "mlx"
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     t_provider = "?"
     state["speech"] = {
         "exists": t_count > 0,
@@ -196,7 +196,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
 
                 sb = EditorialStoryboard.model_validate_json(latest_sb.read_text())
                 sb_detail = f"{len(sb.segments)} seg, {format_duration(sb.total_segments_duration)}"
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 pass
     state["story"] = {
         "exists": len(sb_versions) > 0,
@@ -218,7 +218,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
 
                 mp = MonologuePlan.model_validate_json(latest_mono.read_text())
                 mono_detail = f"{len(mp.overlays)} overlays"
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 pass
     state["mono"] = {
         "exists": len(mono_versions) > 0,
@@ -243,7 +243,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                         if mono_ref:
                             mono_str = f"+{mono_ref.get('artifact_id', '')}"
                         ref = f"{sb_ref}{mono_str}"
-                    except Exception:
+                    except (json.JSONDecodeError, OSError):
                         pass
                 cuts.append({"cut_id": d.name, "ref": ref})
     state["cuts"] = cuts
@@ -264,7 +264,7 @@ def _file_date(path_or_artifact) -> str:
 
             dt = datetime.fromtimestamp(path_or_artifact.stat().st_mtime, tz=timezone.utc)
             return dt.strftime("%b %d")
-    except Exception:
+    except (ValueError, OSError):
         pass
     return ""
 
@@ -662,7 +662,7 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
 
             _sp = _gp(preset_key)
             has_phase3 = _sp.has_phase3 if _sp else False
-        except Exception:
+        except (ImportError, AttributeError, KeyError):
             pass
 
     # --- Node-specific actions ---
@@ -1396,7 +1396,7 @@ def _project_actions(name, cfg):
                     if mono_srt and caption_srt:
                         print("               (import as separate tracks for proper layering)")
                 print()
-            except Exception as exc:
+            except (json.JSONDecodeError, ValueError, OSError) as exc:
                 print(f"\n  {_RED}Export failed:{_RESET} {exc}\n")
 
         elif action == "regen_preview":
@@ -1512,7 +1512,7 @@ def _compose_cut_flow(name, ep):
                 data = EditorialStoryboard.model_validate_json(sb_path.read_text())
                 dur = format_duration(data.total_segments_duration)
                 label += f"  ({len(data.segments)} segments, {dur})"
-        except Exception:
+        except (IndexError, json.JSONDecodeError, ValueError, OSError):
             pass
         sb_choices.append(questionary.Choice(label, value=sb))
 
@@ -1619,7 +1619,7 @@ def _compare_versions_flow(name, ep):
         path_b = ep.storyboard / [f for f in sb_b.output_files if f.endswith(".json")][0]
         data_a = EditorialStoryboard.model_validate_json(path_a.read_text())
         data_b = EditorialStoryboard.model_validate_json(path_b.read_text())
-    except Exception as e:
+    except (IndexError, json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboards: {e}")
         return
 
@@ -1685,7 +1685,7 @@ def _version_history_flow(name, ep):
             try:
                 ts = datetime.fromisoformat(art.created_at)
                 ts_str = ts.strftime("%m-%d %H:%M")
-            except Exception:
+            except (ValueError, TypeError):
                 ts_str = ""
 
             lineage = ""
@@ -2008,7 +2008,7 @@ def _run_director_review(ep, meta, cfg):
 
     try:
         storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboard: {e}\n")
         return
 
@@ -2160,7 +2160,7 @@ def _run_director_review(ep, meta, cfg):
     try:
         _sp.run(["open", str(preview_path)], check=False)
         print("  Preview opened in browser.")
-    except Exception:
+    except OSError:
         pass
     print()
 
@@ -2236,7 +2236,7 @@ def _chat_with_director(ep, meta, cfg):
 
     try:
         storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboard: {e}\n")
         return
 

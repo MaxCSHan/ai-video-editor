@@ -303,7 +303,7 @@ def _get_clip_duration(clip_id: str, clips_dir: Path) -> float:
         import json as _json
 
         return float(_json.loads(result.stdout)["format"]["duration"])
-    except Exception:
+    except (json.JSONDecodeError, KeyError, ValueError, subprocess.CalledProcessError, OSError):
         return 0
 
 

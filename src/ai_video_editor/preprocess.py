@@ -40,7 +40,7 @@ def _resolve_drawtext_font() -> str | None:
             path = result.stdout.strip()
             if path and Path(path).exists():
                 return path
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # Static fallbacks for macOS / Linux

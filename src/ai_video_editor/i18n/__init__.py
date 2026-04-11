@@ -44,7 +44,7 @@ def _detect_locale() -> str:
             data = json.loads(vx_config.read_text())
             if loc := data.get("locale", "").strip():
                 return _normalize_locale(loc)
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     # 3. System locale
@@ -86,7 +86,7 @@ def _load_locale(locale: str) -> dict[str, str]:
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return {}
 
 

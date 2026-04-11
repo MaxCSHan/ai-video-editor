@@ -269,7 +269,7 @@ def run_phase1_gemini(
                     results_by_id[clip_id] = result
                 else:
                     failed_ids.append(clip_id)
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR reviewing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 
@@ -431,7 +431,7 @@ def run_phase1_claude(
                 clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review
             )
             reviews.append(review)
-        except Exception as e:
+        except Exception as e:  # Intentional: per-clip errors must not abort entire batch
             print(f"  ERROR reviewing {clip_id}: {e}")
             failed_ids.append(clip_id)
 

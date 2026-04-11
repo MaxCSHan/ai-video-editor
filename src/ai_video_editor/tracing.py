@@ -331,7 +331,7 @@ def _probe_phoenix(url: str, timeout: float = 0.15) -> bool:
     try:
         urllib.request.urlopen(url, timeout=timeout)
         return True
-    except Exception:
+    except (OSError, ValueError):  # URLError, timeout, bad URL
         return False
 
 
@@ -467,8 +467,7 @@ def otel_session_span(name: str, session_id: str, attributes: dict | None = None
         with tracer.start_as_current_span(name, attributes=span_attrs) as span:
             with using_session(session_id):
                 yield span
-    except Exception:
-        # Tracing should never break the pipeline
+    except Exception:  # Intentional: optional instrumentation must never break the pipeline
         yield None
 
 
@@ -497,7 +496,7 @@ def otel_tool_span(tool_name: str, tool_args: dict | None = None):
 
         with tracer.start_as_current_span(f"tool:{tool_name}", attributes=attrs) as span:
             yield span
-    except Exception:
+    except Exception:  # Intentional: optional instrumentation must never break the pipeline
         yield None
 
 
@@ -558,8 +557,7 @@ def otel_phase_span(
 
         with using_attributes(metadata=metadata, tags=tags):
             yield
-    except Exception:
-        # Tracing should never break the pipeline
+    except Exception:  # Intentional: optional instrumentation must never break the pipeline
         yield None
 
 
@@ -583,7 +581,7 @@ def otel_pipeline_span(project_name: str, pipeline_run_id: str):
             tags=[f"project:{project_name}"],
         ):
             yield
-    except Exception:
+    except Exception:  # Intentional: optional instrumentation must never break the pipeline
         yield None
 
 
@@ -639,7 +637,7 @@ def traced_gemini_generate(
                 tracer.record(trace)
             return response
 
-        except Exception as e:
+        except Exception as e:  # Intentional: retry wrapper must catch all, then re-raise
             last_exc = e
             if attempt < MAX_LLM_RETRIES and _is_retryable_gemini(e):
                 delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
@@ -719,7 +717,7 @@ def traced_claude_generate(
                 tracer.record(trace)
             return response
 
-        except Exception as e:
+        except Exception as e:  # Intentional: retry wrapper must catch all, then re-raise
             last_exc = e
             if attempt < MAX_LLM_RETRIES and _is_retryable_anthropic(e):
                 delay = BASE_RETRY_DELAY_SEC * (2**attempt) + random.uniform(0, 1)
