@@ -54,8 +54,10 @@ def discover_clips_from_manifest(
     if not manifest_path.exists():
         return [], {}
     try:
-        manifest = json.loads(manifest_path.read_text())
-    except json.JSONDecodeError as e:
+        from .config import load_manifest
+
+        manifest = load_manifest(manifest_path)
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"  WARN: corrupt manifest.json ({e}), treating as empty")
         return [], {}
     return manifest.get("clips", []), manifest

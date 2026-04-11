@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .infra.atomic_write import atomic_write_text
-from .models import ArtifactMeta, Composition
+from .models import ArtifactMeta, Composition, ProjectConfig
 
 # ---------------------------------------------------------------------------
 # Stage codes for lineage-prefixed version IDs
@@ -42,9 +42,17 @@ STAGE_FROM_CODE = {v: k for k, v in STAGE_CODES.items()}
 
 
 def read_project_meta(project_root: Path) -> dict:
+    """Load project.json, validating against ProjectConfig schema.
+
+    Returns a plain dict for backward compatibility. Invalid fields
+    are silently dropped by Pydantic's extra="allow" config.
+    """
     meta_path = project_root / "project.json"
     if meta_path.exists():
-        return json.loads(meta_path.read_text())
+        raw = json.loads(meta_path.read_text())
+        # Validate structure; returns dict for backward compat
+        ProjectConfig.model_validate(raw)
+        return raw
     return {}
 
 

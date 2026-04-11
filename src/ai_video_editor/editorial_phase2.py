@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .infra.atomic_write import atomic_write_text
 from .config import (
+    load_manifest,
     ClaudeConfig,
     EditorialProjectPaths,
     GeminiConfig,
@@ -217,7 +218,7 @@ def _run_phase2_sections(
     manifest_file = editorial_paths.master_manifest
     if not manifest_file.exists():
         raise RuntimeError(f"No manifest found: {manifest_file}")
-    manifest_data = json.loads(manifest_file.read_text())
+    manifest_data = load_manifest(manifest_file)
 
     date_groups = group_clips_by_date(manifest_data, clip_reviews)
     total_clips = sum(len(cid) for g in date_groups for s in g.sections for cid in [s.clip_ids])
@@ -626,7 +627,7 @@ def _run_phase2_split(
     filming_timeline = None
     manifest_file = editorial_paths.master_manifest
     if manifest_file.exists():
-        manifest_data = json.loads(manifest_file.read_text())
+        manifest_data = load_manifest(manifest_file)
         creation_times = {
             c["clip_id"]: c.get("creation_time") for c in manifest_data.get("clips", [])
         }
@@ -1093,7 +1094,7 @@ def run_phase2(
     filming_timeline = None
     manifest_file = editorial_paths.master_manifest
     if manifest_file.exists():
-        manifest_data = json.loads(manifest_file.read_text())
+        manifest_data = load_manifest(manifest_file)
         creation_times = {
             c["clip_id"]: c.get("creation_time") for c in manifest_data.get("clips", [])
         }

@@ -48,9 +48,13 @@ def _project_meta_path(project_root: Path) -> Path:
 
 
 def _read_project_meta(project_root: Path) -> dict | None:
+    from .models import ProjectConfig
+
     p = _project_meta_path(project_root)
     if p.exists():
-        return json.loads(p.read_text())
+        raw = json.loads(p.read_text())
+        ProjectConfig.model_validate(raw)  # validate structure
+        return raw
     return None
 
 
@@ -75,9 +79,12 @@ WORKSPACE_CONFIG_PATH = Path(".vx.json")
 
 
 def _read_workspace_config() -> dict:
+    from .models import WorkspaceConfig
+
     defaults = {"provider": "gemini", "style": "vlog"}
     if WORKSPACE_CONFIG_PATH.exists():
         stored = json.loads(WORKSPACE_CONFIG_PATH.read_text())
+        WorkspaceConfig.model_validate(stored)  # validate structure
         defaults.update(stored)
     return defaults
 
