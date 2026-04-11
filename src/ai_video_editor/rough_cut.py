@@ -30,9 +30,11 @@ log = logging.getLogger(__name__)
 
 def _build_source_map(editorial_paths: EditorialProjectPaths) -> dict[str, Path]:
     """Build clip_id → original source path map from the master manifest."""
+    from .config import load_manifest
+
     manifest_path = editorial_paths.master_manifest
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = load_manifest(manifest_path)
         return {
             clip["clip_id"]: Path(clip["source_path"])
             for clip in manifest.get("clips", [])
@@ -1322,9 +1324,11 @@ def _load_output_format(editorial_paths: EditorialProjectPaths) -> OutputFormat 
 
 def _build_clip_format_map(editorial_paths: EditorialProjectPaths) -> dict[str, dict]:
     """Build clip_id → format metadata dict from manifest."""
+    from .config import load_manifest
+
     manifest_path = editorial_paths.master_manifest
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = load_manifest(manifest_path)
         return {clip["clip_id"]: clip for clip in manifest.get("clips", [])}
     return {}
 

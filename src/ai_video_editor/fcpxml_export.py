@@ -146,9 +146,11 @@ def _timecode_to_frac(timecode: str, fps: float) -> str:
 
 def _build_source_map(editorial_paths: EditorialProjectPaths) -> dict[str, Path]:
     """Build clip_id -> original source path map from the master manifest."""
+    from .config import load_manifest
+
     manifest_path = editorial_paths.master_manifest
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = load_manifest(manifest_path)
         return {
             clip["clip_id"]: Path(clip["source_path"])
             for clip in manifest.get("clips", [])
@@ -182,9 +184,11 @@ def _resolve_clip_source(
 def _read_manifest_clips(editorial_paths: EditorialProjectPaths) -> dict[str, dict]:
     """Read clip metadata from the master manifest, keyed by clip_id."""
     manifest_path = editorial_paths.master_manifest
+    from .config import load_manifest
+
     if not manifest_path.exists():
         return {}
-    manifest = json.loads(manifest_path.read_text())
+    manifest = load_manifest(manifest_path)
     return {clip["clip_id"]: clip for clip in manifest.get("clips", [])}
 
 

@@ -327,3 +327,24 @@ class Config:
 
 
 DEFAULT_CONFIG = Config()
+
+
+# ---------------------------------------------------------------------------
+# Validated config/manifest loaders
+# ---------------------------------------------------------------------------
+
+
+def load_manifest(manifest_path: Path) -> dict:
+    """Load and validate manifest.json, returning a plain dict.
+
+    Validates structure against ProjectManifest schema. Raises
+    ValueError (from Pydantic) on invalid data, json.JSONDecodeError
+    on corrupt JSON.
+    """
+    import json
+
+    from .models import ProjectManifest
+
+    raw = json.loads(manifest_path.read_text())
+    ProjectManifest.model_validate(raw)
+    return raw
