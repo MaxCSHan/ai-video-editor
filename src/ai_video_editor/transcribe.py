@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+
+from .infra.atomic_write import atomic_write_text
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -70,7 +72,7 @@ def transcribe_clip(
         target_dir=clip_paths.audio,
     )
     out = versioned_path(clip_paths.audio / "transcript_mlx.json", meta.version)
-    out.write_text(json.dumps(transcript, indent=2, ensure_ascii=False))
+    atomic_write_text(out, json.dumps(transcript, indent=2, ensure_ascii=False))
     update_latest_symlink(out, link_name="transcript_latest.json")
     commit_version(clip_paths.root, meta, output_paths=[out], target_dir=clip_paths.audio)
     return transcript
@@ -467,7 +469,7 @@ def transcribe_clip_gemini(
         target_dir=clip_paths.audio,
     )
     out = versioned_path(clip_paths.audio / "transcript_gemini.json", meta.version)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    atomic_write_text(out, json.dumps(result, indent=2, ensure_ascii=False))
     update_latest_symlink(out, link_name="transcript_latest.json")
     commit_version(clip_paths.root, meta, output_paths=[out], target_dir=clip_paths.audio)
 

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     ClaudeConfig,
     EditorialProjectPaths,
@@ -262,7 +263,7 @@ def _run_phase2_sections(
 
     # Save scene plan artifact
     scene_plan_path = editorial_paths.storyboard / "scene_plan_latest.json"
-    scene_plan_path.write_text(scene_plan.model_dump_json(indent=2))
+    atomic_write_text(scene_plan_path, scene_plan.model_dump_json(indent=2))
 
     # ── HITL 1: Review scene grouping ─────────────────────────────────────
     if interactive:
@@ -277,7 +278,7 @@ def _run_phase2_sections(
                 # Save what we have so user can edit, then exit
                 sections_json = [g.model_dump() for g in section_groups]
                 sections_path = editorial_paths.storyboard / "sections_latest.json"
-                sections_path.write_text(json.dumps(sections_json, indent=2))
+                atomic_write_text(sections_path, json.dumps(sections_json, indent=2))
                 return sections_path
         except (ImportError, EOFError):
             pass  # Non-interactive environment
@@ -285,7 +286,7 @@ def _run_phase2_sections(
     # Save confirmed sections
     sections_json = [g.model_dump() for g in section_groups]
     sections_path = editorial_paths.storyboard / "sections_latest.json"
-    sections_path.write_text(json.dumps(sections_json, indent=2))
+    atomic_write_text(sections_path, json.dumps(sections_json, indent=2))
 
     # ── Narrative Planner LLM call (arc + constraint distribution) ────────
     print(f"  [Narrative] Planning story arc across {total_sections} scenes...")
@@ -338,7 +339,7 @@ def _run_phase2_sections(
 
     # Save narrative plan artifact
     storyline_path = editorial_paths.storyboard / "storyline_latest.json"
-    storyline_path.write_text(section_plan.model_dump_json(indent=2))
+    atomic_write_text(storyline_path, section_plan.model_dump_json(indent=2))
 
     # ── Opening Hook LLM call ─────────────────────────────────────────────
     print("  [Hook] Creating opening hook from best clips...")
@@ -540,7 +541,7 @@ def _run_phase2_sections(
 
     # Primary: structured JSON
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(storyboard.model_dump_json(indent=2))
+    atomic_write_text(json_path, storyboard.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     # Rendered: markdown
@@ -965,7 +966,7 @@ def _run_phase2_split(
 
     # Save StoryPlan intermediate
     plan_json_path = editorial_paths.storyboard / f"storyplan_{provider}_v{v}.json"
-    plan_json_path.write_text(story_plan.model_dump_json(indent=2))
+    atomic_write_text(plan_json_path, story_plan.model_dump_json(indent=2))
 
     # Save fix log if any
     if fix_log:
@@ -979,7 +980,7 @@ def _run_phase2_split(
 
     # Primary: structured JSON
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(storyboard.model_dump_json(indent=2))
+    atomic_write_text(json_path, storyboard.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     # Rendered: markdown
@@ -1349,7 +1350,7 @@ def run_phase2(
 
     # 1. Primary: structured JSON
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(storyboard.model_dump_json(indent=2))
+    atomic_write_text(json_path, storyboard.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     # 2. Rendered: markdown

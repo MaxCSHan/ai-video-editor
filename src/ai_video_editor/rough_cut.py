@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import EditorialProjectPaths, OutputFormat
 from .models import EditorialStoryboard, TextOverlayStyle
 from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
@@ -1506,7 +1507,7 @@ def run_rough_cut(
         output_format=of_data,
     )
     comp_path = vdir / "composition.json"
-    comp_path.write_text(cut_comp.model_dump_json(indent=2))
+    atomic_write_text(comp_path, cut_comp.model_dump_json(indent=2))
 
     # Commit version and symlink latest
     cuts_dir = editorial_paths.exports / "cuts"

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     ClaudeConfig,
     EditorialProjectPaths,
@@ -227,14 +228,14 @@ def _run_monologue_split(
 
     # Save intermediate artifacts
     plan_path = editorial_paths.storyboard / f"overlay_plan_{provider}_v{v}.json"
-    plan_path.write_text(overlay_plan.model_dump_json(indent=2))
+    atomic_write_text(plan_path, overlay_plan.model_dump_json(indent=2))
 
     if fix_log:
         fix_path = editorial_paths.storyboard / f"monologue_fixlog_{provider}_v{v}.txt"
         fix_path.write_text("\n".join(fix_log))
 
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(monologue.model_dump_json(indent=2))
+    atomic_write_text(json_path, monologue.model_dump_json(indent=2))
     commit_version(
         editorial_paths.root,
         art_meta,
@@ -439,7 +440,7 @@ def run_monologue(
     base = f"monologue_{provider}"
 
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(monologue.model_dump_json(indent=2))
+    atomic_write_text(json_path, monologue.model_dump_json(indent=2))
     commit_version(
         editorial_paths.root,
         art_meta,
