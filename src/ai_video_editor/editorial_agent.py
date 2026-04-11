@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     VIDEO_EXTENSIONS,
     Config,
@@ -184,7 +185,7 @@ def build_master_manifest(
         "total_duration_fmt": format_duration(total_duration),
         "clips": clip_metadata,
     }
-    editorial_paths.master_manifest.write_text(json.dumps(manifest, indent=2))
+    atomic_write_text(editorial_paths.master_manifest, json.dumps(manifest, indent=2))
     return manifest
 
 

@@ -7,6 +7,7 @@ transcription, Phase 1, and Phase 2 without redundant uploads.
 import json
 import time
 
+from .infra.atomic_write import atomic_write_text
 from .config import EditorialProjectPaths
 
 FILE_API_CACHE_MAX_AGE_SEC = 46 * 60 * 60  # 46 hours (Gemini retains files for 48 hours)
@@ -36,7 +37,7 @@ def load_file_api_cache(editorial_paths: EditorialProjectPaths) -> dict:
 def save_file_api_cache(editorial_paths: EditorialProjectPaths, cache: dict):
     """Save Gemini File API URI cache."""
     cache_path = editorial_paths.root / "file_api_cache.json"
-    cache_path.write_text(json.dumps(cache, indent=2))
+    atomic_write_text(cache_path, json.dumps(cache, indent=2))
 
 
 def cache_file_uri(editorial_paths: EditorialProjectPaths, clip_id: str, uri: str):

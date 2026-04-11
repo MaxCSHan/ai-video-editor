@@ -9,6 +9,7 @@ from pathlib import Path
 import questionary
 from questionary import Style
 
+from .infra.atomic_write import atomic_write_text
 from .config import DEFAULT_CONFIG
 from .i18n import t
 
@@ -910,7 +911,7 @@ def _new_project_flow(cfg):
     }
     if preset_key:
         meta["style_preset"] = preset_key
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     # Discover
     clips = discover_source_clips(source_path)
@@ -935,7 +936,7 @@ def _new_project_flow(cfg):
 
     meta["clip_count"] = len(clips)
     meta["included_clips"] = [c.stem for c in clips]
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     # Preprocess
     print(f"  {t('clips.preprocessing', count=len(clips))}\n")
@@ -1483,7 +1484,7 @@ def _project_actions(name, cfg):
                 else:
                     meta.pop("style_preset", None)
                     print("\n  Removed style preset.")
-                (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+                atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
 
 def _compose_cut_flow(name, ep):
@@ -1784,7 +1785,7 @@ def _manage_clips(name, meta, cfg):
     # Update project metadata
     meta["clip_count"] = len(selected_ids)
     meta["included_clips"] = sorted(selected_ids)
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     print(f"\n  Project now has {len(selected_ids)} clips.")
     if to_remove:
@@ -2131,7 +2132,7 @@ def _run_director_review(ep, meta, cfg):
     base = f"editorial_{provider}"
 
     json_path = versioned_path(ep.storyboard / f"{base}.json", v)
-    json_path.write_text(reviewed.model_dump_json(indent=2))
+    atomic_write_text(json_path, reviewed.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     md_path = versioned_path(ep.storyboard / f"{base}.md", v)
@@ -2511,7 +2512,7 @@ def _run_format_selection(clip_metadata, meta, ep):
 
     # Persist
     meta["output_format"] = output_format.to_dict()
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
     print(
         f"\n  Output format: {output_format.label}, {output_format.width}x{output_format.height}"
         f" @ {output_format.fps}fps, {output_format.codec}, fit={output_format.fit_mode}\n"
@@ -2790,5 +2791,5 @@ def _settings_flow(cfg):
             if style:
                 ws["style"] = style
 
-    ws_path.write_text(json.dumps(ws, indent=2) + "\n")
+    atomic_write_text(ws_path, json.dumps(ws, indent=2) + "\n")
     print(f"\n  {t('settings.saved')}\n")

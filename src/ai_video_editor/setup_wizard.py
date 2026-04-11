@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
+
 import questionary
 from questionary import Style
 
@@ -178,7 +180,7 @@ def run_setup_wizard() -> bool:
     if current_locale != "en":
         config["locale"] = current_locale
 
-    vx_config.write_text(json.dumps(config, indent=2) + "\n")
+    atomic_write_text(vx_config, json.dumps(config, indent=2) + "\n")
 
     print(f"\n  {_GREEN}✓{_RESET} {t('setup.setup_complete')}\n")
     return True

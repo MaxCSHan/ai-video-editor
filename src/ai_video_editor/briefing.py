@@ -10,6 +10,7 @@ import os
 import time
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import MODEL_GEMINI_25_FLASH
 from .i18n import t
 
@@ -223,7 +224,7 @@ def _save_user_context(project_root: Path, answers: dict):
         target_dir=project_root,
     )
     out = versioned_path(project_root / "user_context.json", meta.version)
-    out.write_text(json.dumps(answers, indent=2, ensure_ascii=False))
+    atomic_write_text(out, json.dumps(answers, indent=2, ensure_ascii=False))
     update_latest_symlink(out)
     commit_version(project_root, meta, output_paths=[out], target_dir=project_root)
 
@@ -353,7 +354,7 @@ def run_quick_scan(
         target_dir=editorial_paths.root,
     )
     out = versioned_path(editorial_paths.root / "quick_scan.json", meta.version)
-    out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    atomic_write_text(out, json.dumps(result, indent=2, ensure_ascii=False))
     update_latest_symlink(out)
     commit_version(editorial_paths.root, meta, output_paths=[out], target_dir=editorial_paths.root)
     return result
@@ -980,7 +981,7 @@ def save_creative_brief(project_root: Path, brief) -> Path:
         target_dir=project_root,
     )
     out = versioned_path(project_root / "user_context.json", meta.version)
-    out.write_text(json.dumps(brief.model_dump(), indent=2, ensure_ascii=False))
+    atomic_write_text(out, json.dumps(brief.model_dump(), indent=2, ensure_ascii=False))
     update_latest_symlink(out)
     commit_version(project_root, meta, output_paths=[out], target_dir=project_root)
     return out
@@ -1190,7 +1191,7 @@ def save_creative_preset(preset) -> Path:
     """Save a creative preset to ~/.vx/presets/{key}.json."""
     _ensure_presets_dir()
     path = _PRESETS_DIR / f"{preset.key}.json"
-    path.write_text(json.dumps(preset.model_dump(), indent=2, ensure_ascii=False))
+    atomic_write_text(path, json.dumps(preset.model_dump(), indent=2, ensure_ascii=False))
     return path
 
 

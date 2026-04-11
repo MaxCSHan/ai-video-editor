@@ -13,6 +13,8 @@ import logging
 import time
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
+
 from .config import ReviewBudget, ReviewConfig
 from .director_tools import (
     DirectorToolContext,
@@ -1159,7 +1161,7 @@ def auto_save_version(
     base = f"editorial_{provider}"
 
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(storyboard.model_dump_json(indent=2))
+    atomic_write_text(json_path, storyboard.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     md_path = versioned_path(editorial_paths.storyboard / f"{base}.md", v)
@@ -1238,7 +1240,7 @@ def save_session(session: ChatSession, editorial_paths) -> Path:
     sd = _session_dir(editorial_paths)
     path = sd / f"{session.session_id}.json"
     session.updated_at = datetime.now(timezone.utc).isoformat()
-    path.write_text(session.model_dump_json(indent=2))
+    atomic_write_text(path, session.model_dump_json(indent=2))
     return path
 
 
