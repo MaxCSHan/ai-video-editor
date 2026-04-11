@@ -48,7 +48,7 @@ def _load_transcripts(clips_dir: Path, clip_ids: set[str]) -> dict[str, list[dic
             try:
                 data = json.loads(transcript_path.read_text())
                 transcripts[clip_id] = data.get("segments", [])
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
     return transcripts
 
@@ -358,7 +358,7 @@ def run_editorial_review(
                     contents=messages,
                     config=turn_config,
                 )
-        except Exception as e:
+        except Exception as e:  # Intentional: Gemini SDK exceptions are varied; logs and breaks
             log.error("Gemini API error during review: %s", e)
             review_log.convergence_reason = "error"
             break
@@ -443,7 +443,7 @@ def run_editorial_review(
             with otel_tool_span(call_name, call_args) as tool_span:
                 try:
                     result = handler(tool_ctx, **call_args)
-                except Exception as e:
+                except Exception as e:  # Intentional: tool handlers can raise varied errors
                     log.error("Tool %s failed: %s", call_name, e)
                     result = {"type": "text", "data": f"Tool error: {e}"}
                 if tool_span:
@@ -904,7 +904,7 @@ def run_director_chat(
                         contents=messages,
                         config=config,
                     )
-            except Exception as e:
+            except Exception as e:  # Intentional: Gemini SDK exceptions are varied; logs and breaks
                 log.error("Gemini API error: %s", e)
                 print_fn(f"  [Error] API error: {e}")
                 break
@@ -988,7 +988,7 @@ def run_director_chat(
                 with otel_tool_span(call_name, call_args) as tool_span:
                     try:
                         result = handler(tool_ctx, **call_args)
-                    except Exception as e:
+                    except Exception as e:  # Intentional: tool handlers can raise varied errors
                         log.error("Tool %s failed: %s", call_name, e)
                         result = {"type": "text", "data": f"Tool error: {e}"}
                     if tool_span:
@@ -1228,7 +1228,7 @@ def find_active_session(editorial_paths) -> ChatSession | None:
             session = ChatSession.model_validate_json(f.read_text())
             if session.status == "active":
                 return session
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError):
             continue
     return None
 

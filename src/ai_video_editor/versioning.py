@@ -139,7 +139,7 @@ def _scan_meta_files(
             if provider and meta.provider != provider:
                 continue
             results.append(meta)
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError):
             continue
     return sorted(results, key=lambda m: m.version)
 
@@ -547,7 +547,7 @@ def list_artifacts(
                 if not include_failed and meta.status == "failed":
                     continue
                 results.append(meta)
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 continue
 
     # Deduplicate by artifact_id (overlapping search dirs may find same sidecar)
@@ -734,7 +734,7 @@ def _migrate_legacy_versions(project_root: Path):
                             clip_id=clip_dir.name,
                             provider_override=provider,
                         )
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     pass
 
     # Migrate bare quick_scan.json → quick_scan_v1.json + symlink
@@ -778,7 +778,7 @@ def _create_legacy_sidecar(
     # Use file mtime as creation timestamp
     try:
         mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
-    except Exception:
+    except OSError:
         mtime = datetime.now(timezone.utc)
 
     meta = ArtifactMeta(

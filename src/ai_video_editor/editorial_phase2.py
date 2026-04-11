@@ -129,7 +129,7 @@ def _validate_constraints(
             print("  [Validate] ✓ All constraints satisfied")
 
         return report
-    except Exception as e:
+    except Exception as e:  # Intentional: validation is best-effort, must not block pipeline
         print(f"  [Validate] Skipped — validation call failed: {e}")
         return None
 

@@ -1172,7 +1172,7 @@ def list_creative_presets() -> list[dict]:
             data = json.loads(f.read_text())
             preset = CreativePreset.model_validate(data)
             presets.append(preset.model_dump())
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError):
             continue
     return presets
 

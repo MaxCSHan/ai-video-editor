@@ -153,7 +153,7 @@ def preprocess_all_clips(
             clip_id = futures[fut]
             try:
                 results_by_id[clip_id] = fut.result()
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR preprocessing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 
@@ -312,7 +312,7 @@ def transcribe_all_clips(
                 _, transcript = fut.result()
                 if transcript:
                     results[clip_id] = transcript
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR transcribing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 

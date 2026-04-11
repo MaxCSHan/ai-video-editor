@@ -661,7 +661,7 @@ def _resolve_font_path(font_name: str) -> str:
             path = result.stdout.strip()
             if path and Path(path).exists():
                 return path
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # Static fallback paths for CJK-capable fonts
