@@ -1050,6 +1050,8 @@ def _new_project_flow(cfg):
         ).ask()
         if edit_mode == "timeline":
             cfg.gemini.use_timeline_mode = True
+        else:
+            cfg.gemini.use_timeline_mode = False
 
     # Ask about visual mode
     visual = False
@@ -1935,6 +1937,8 @@ def _run_analyze(name, meta, cfg, phase1_only=False, phase2_only=False):
         ).ask()
         if edit_mode == "timeline":
             cfg.gemini.use_timeline_mode = True
+        else:
+            cfg.gemini.use_timeline_mode = False
 
     # Ask about visual mode
     visual = False
