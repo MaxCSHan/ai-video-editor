@@ -602,7 +602,7 @@ def render_html_preview(
 <div class="meta">{len(sb.segments)} segments &middot; ~{format_duration(total_dur)} &middot; {len(sb.cast)} cast &middot; {_esc(sb.style)}</div>
 <p class="concept">{_esc(sb.story_concept)}</p>
 
-{"<details class='reasoning'><summary><h2 style='display:inline;cursor:pointer'>Editorial Reasoning</h2></summary><pre style='white-space:pre-wrap;font-family:inherit;margin:1em 0;padding:1em;background:#f8f9fa;border-radius:6px;font-size:0.95em;line-height:1.5'>" + _esc(sb.editorial_reasoning) + "</pre></details>" if sb.editorial_reasoning else ""}
+{"<details class='reasoning'><summary><h2 style='display:inline;cursor:pointer'>Editorial Reasoning</h2></summary><pre style='white-space:pre-wrap;font-family:inherit;margin:1em 0;padding:1em;background:#1a1a1a;border-radius:6px;font-size:0.95em;line-height:1.5;color:#ccc'>" + _esc(sb.editorial_reasoning) + "</pre></details>" if sb.editorial_reasoning else ""}
 
 <h2>Timeline <span style="font-weight:400;color:#555;text-transform:none;letter-spacing:0">(click a segment to preview &amp; adjust)</span></h2>
 <div class="timeline" id="timeline">{timeline_blocks}</div>
