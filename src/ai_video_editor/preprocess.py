@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import PreprocessConfig, ProjectPaths
 
 
@@ -39,7 +40,7 @@ def _resolve_drawtext_font() -> str | None:
             path = result.stdout.strip()
             if path and Path(path).exists():
                 return path
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # Static fallbacks for macOS / Linux
@@ -434,7 +435,7 @@ def extract_frames(
         )
 
     manifest_path = frames_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    atomic_write_text(manifest_path, json.dumps(manifest, indent=2))
     return frames_dir, manifest
 
 
@@ -480,7 +481,7 @@ def detect_scenes(
             "scene_count": 0,
             "scenes": [],
         }
-        (scenes_dir / "manifest.json").write_text(json.dumps(empty_manifest, indent=2))
+        atomic_write_text(scenes_dir / "manifest.json", json.dumps(empty_manifest, indent=2))
         return []
 
     scenes = []
@@ -505,7 +506,7 @@ def detect_scenes(
         "scene_count": len(scenes),
         "scenes": scenes,
     }
-    (scenes_dir / "manifest.json").write_text(json.dumps(scenes_manifest, indent=2))
+    atomic_write_text(scenes_dir / "manifest.json", json.dumps(scenes_manifest, indent=2))
     return scenes
 
 
@@ -841,7 +842,7 @@ def concat_proxies(
     manifest_data = [
         {"bundle": f"bundle_{i}.mp4", "clips": r["clips"]} for i, r in enumerate(results)
     ]
-    manifest_path.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False))
+    atomic_write_text(manifest_path, json.dumps(manifest_data, indent=2, ensure_ascii=False))
 
     total_clips = sum(len(r["clips"]) for r in results)
     if all_cached:

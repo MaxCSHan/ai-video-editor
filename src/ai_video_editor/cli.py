@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     VIDEO_EXTENSIONS,
     Config,
@@ -47,14 +48,18 @@ def _project_meta_path(project_root: Path) -> Path:
 
 
 def _read_project_meta(project_root: Path) -> dict | None:
+    from .models import ProjectConfig
+
     p = _project_meta_path(project_root)
     if p.exists():
-        return json.loads(p.read_text())
+        raw = json.loads(p.read_text())
+        ProjectConfig.model_validate(raw)  # validate structure
+        return raw
     return None
 
 
 def _write_project_meta(project_root: Path, meta: dict):
-    _project_meta_path(project_root).write_text(json.dumps(meta, indent=2))
+    atomic_write_text(_project_meta_path(project_root), json.dumps(meta, indent=2))
 
 
 def _detect_source_type(source: Path) -> str:
@@ -74,15 +79,18 @@ WORKSPACE_CONFIG_PATH = Path(".vx.json")
 
 
 def _read_workspace_config() -> dict:
+    from .models import WorkspaceConfig
+
     defaults = {"provider": "gemini", "style": "vlog"}
     if WORKSPACE_CONFIG_PATH.exists():
         stored = json.loads(WORKSPACE_CONFIG_PATH.read_text())
+        WorkspaceConfig.model_validate(stored)  # validate structure
         defaults.update(stored)
     return defaults
 
 
 def _write_workspace_config(cfg: dict):
-    WORKSPACE_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    atomic_write_text(WORKSPACE_CONFIG_PATH, json.dumps(cfg, indent=2) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -943,7 +951,7 @@ def cmd_review(args, cfg: Config):
         base = f"editorial_{provider}"
 
         json_path = versioned_path(ep.storyboard / f"{base}.json", v)
-        json_path.write_text(reviewed.model_dump_json(indent=2))
+        atomic_write_text(json_path, reviewed.model_dump_json(indent=2))
         update_latest_symlink(json_path)
 
         md_path = versioned_path(ep.storyboard / f"{base}.md", v)
@@ -2158,7 +2166,7 @@ def cmd_versions(args, cfg: Config):
             try:
                 ts = datetime.fromisoformat(art.created_at)
                 ts_str = ts.strftime("%m-%d %H:%M")
-            except Exception:
+            except (ValueError, TypeError):
                 ts_str = ""
 
             latest_tag = f"  {GREEN}[latest]{RESET}" if art.version == latest_v else ""

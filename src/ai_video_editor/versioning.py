@@ -15,7 +15,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import ArtifactMeta, Composition
+from .infra.atomic_write import atomic_write_text
+from .models import ArtifactMeta, Composition, ProjectConfig
 
 # ---------------------------------------------------------------------------
 # Stage codes for lineage-prefixed version IDs
@@ -41,14 +42,22 @@ STAGE_FROM_CODE = {v: k for k, v in STAGE_CODES.items()}
 
 
 def read_project_meta(project_root: Path) -> dict:
+    """Load project.json, validating against ProjectConfig schema.
+
+    Returns a plain dict for backward compatibility. Invalid fields
+    are silently dropped by Pydantic's extra="allow" config.
+    """
     meta_path = project_root / "project.json"
     if meta_path.exists():
-        return json.loads(meta_path.read_text())
+        raw = json.loads(meta_path.read_text())
+        # Validate structure; returns dict for backward compat
+        ProjectConfig.model_validate(raw)
+        return raw
     return {}
 
 
 def write_project_meta(project_root: Path, meta: dict):
-    (project_root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(project_root / "project.json", json.dumps(meta, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ def _scan_meta_files(
             if provider and meta.provider != provider:
                 continue
             results.append(meta)
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError):
             continue
     return sorted(results, key=lambda m: m.version)
 
@@ -292,7 +301,7 @@ def begin_version(
 
     # Write pending sidecar to reserve the version number
     sidecar = target_dir / f".pending_{phase}_{provider}_v{v}.meta.json"
-    sidecar.write_text(meta.model_dump_json(indent=2))
+    atomic_write_text(sidecar, meta.model_dump_json(indent=2))
     return meta
 
 
@@ -332,7 +341,7 @@ def commit_version(
         sidecar = _sidecar_path_for(primary)
     else:
         sidecar = target_dir / f"{meta.phase}_{meta.provider}_v{meta.version}.meta.json"
-    sidecar.write_text(meta.model_dump_json(indent=2))
+    atomic_write_text(sidecar, meta.model_dump_json(indent=2))
 
     # Update project.json version counter
     proj_meta = read_project_meta(project_root)
@@ -379,7 +388,7 @@ def fail_version(
 
     # Write failed sidecar
     sidecar = target_dir / f".failed_{meta.phase}_{meta.provider}_v{meta.version}.meta.json"
-    sidecar.write_text(meta.model_dump_json(indent=2))
+    atomic_write_text(sidecar, meta.model_dump_json(indent=2))
 
 
 def _compat_phase_key(phase: str, provider: str) -> str | None:
@@ -546,7 +555,7 @@ def list_artifacts(
                 if not include_failed and meta.status == "failed":
                     continue
                 results.append(meta)
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 continue
 
     # Deduplicate by artifact_id (overlapping search dirs may find same sidecar)
@@ -612,7 +621,7 @@ def save_composition(project_root: Path, composition: Composition):
     comps = [c for c in comps if c.name != composition.name]
     comps.append(composition)
     path = _compositions_path(project_root)
-    path.write_text(json.dumps([c.model_dump() for c in comps], indent=2))
+    atomic_write_text(path, json.dumps([c.model_dump() for c in comps], indent=2))
 
 
 def get_composition(project_root: Path, name: str) -> Composition | None:
@@ -628,7 +637,7 @@ def delete_composition(project_root: Path, name: str) -> bool:
     if len(filtered) == len(comps):
         return False
     path = _compositions_path(project_root)
-    path.write_text(json.dumps([c.model_dump() for c in filtered], indent=2))
+    atomic_write_text(path, json.dumps([c.model_dump() for c in filtered], indent=2))
     return True
 
 
@@ -733,7 +742,7 @@ def _migrate_legacy_versions(project_root: Path):
                             clip_id=clip_dir.name,
                             provider_override=provider,
                         )
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     pass
 
     # Migrate bare quick_scan.json → quick_scan_v1.json + symlink
@@ -777,7 +786,7 @@ def _create_legacy_sidecar(
     # Use file mtime as creation timestamp
     try:
         mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
-    except Exception:
+    except OSError:
         mtime = datetime.now(timezone.utc)
 
     meta = ArtifactMeta(
@@ -794,4 +803,4 @@ def _create_legacy_sidecar(
 
     sidecar = _sidecar_path_for(file_path)
     if not sidecar.exists():
-        sidecar.write_text(meta.model_dump_json(indent=2))
+        atomic_write_text(sidecar, meta.model_dump_json(indent=2))

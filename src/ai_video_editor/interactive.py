@@ -9,6 +9,7 @@ from pathlib import Path
 import questionary
 from questionary import Style
 
+from .infra.atomic_write import atomic_write_text
 from .config import DEFAULT_CONFIG
 from .i18n import t
 
@@ -147,7 +148,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                 try:
                     data = json.loads(tp.read_text())
                     t_provider = data.get("provider", "mlx") or "mlx"
-                except Exception:
+                except (json.JSONDecodeError, OSError):
                     t_provider = "?"
     state["speech"] = {
         "exists": t_count > 0,
@@ -195,7 +196,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
 
                 sb = EditorialStoryboard.model_validate_json(latest_sb.read_text())
                 sb_detail = f"{len(sb.segments)} seg, {format_duration(sb.total_segments_duration)}"
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 pass
     state["story"] = {
         "exists": len(sb_versions) > 0,
@@ -217,7 +218,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
 
                 mp = MonologuePlan.model_validate_json(latest_mono.read_text())
                 mono_detail = f"{len(mp.overlays)} overlays"
-            except Exception:
+            except (json.JSONDecodeError, ValueError, OSError):
                 pass
     state["mono"] = {
         "exists": len(mono_versions) > 0,
@@ -242,7 +243,7 @@ def _gather_pipeline_state(ep, meta) -> dict:
                         if mono_ref:
                             mono_str = f"+{mono_ref.get('artifact_id', '')}"
                         ref = f"{sb_ref}{mono_str}"
-                    except Exception:
+                    except (json.JSONDecodeError, OSError):
                         pass
                 cuts.append({"cut_id": d.name, "ref": ref})
     state["cuts"] = cuts
@@ -263,7 +264,7 @@ def _file_date(path_or_artifact) -> str:
 
             dt = datetime.fromtimestamp(path_or_artifact.stat().st_mtime, tz=timezone.utc)
             return dt.strftime("%b %d")
-    except Exception:
+    except (ValueError, OSError):
         pass
     return ""
 
@@ -661,7 +662,7 @@ def _build_node_actions(active_node, state, ep, meta, offline) -> list:
 
             _sp = _gp(preset_key)
             has_phase3 = _sp.has_phase3 if _sp else False
-        except Exception:
+        except (ImportError, AttributeError, KeyError):
             pass
 
     # --- Node-specific actions ---
@@ -910,7 +911,7 @@ def _new_project_flow(cfg):
     }
     if preset_key:
         meta["style_preset"] = preset_key
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     # Discover
     clips = discover_source_clips(source_path)
@@ -935,7 +936,7 @@ def _new_project_flow(cfg):
 
     meta["clip_count"] = len(clips)
     meta["included_clips"] = [c.stem for c in clips]
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     # Preprocess
     print(f"  {t('clips.preprocessing', count=len(clips))}\n")
@@ -1395,7 +1396,7 @@ def _project_actions(name, cfg):
                     if mono_srt and caption_srt:
                         print("               (import as separate tracks for proper layering)")
                 print()
-            except Exception as exc:
+            except (json.JSONDecodeError, ValueError, OSError) as exc:
                 print(f"\n  {_RED}Export failed:{_RESET} {exc}\n")
 
         elif action == "regen_preview":
@@ -1483,7 +1484,7 @@ def _project_actions(name, cfg):
                 else:
                     meta.pop("style_preset", None)
                     print("\n  Removed style preset.")
-                (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+                atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
 
 def _compose_cut_flow(name, ep):
@@ -1511,7 +1512,7 @@ def _compose_cut_flow(name, ep):
                 data = EditorialStoryboard.model_validate_json(sb_path.read_text())
                 dur = format_duration(data.total_segments_duration)
                 label += f"  ({len(data.segments)} segments, {dur})"
-        except Exception:
+        except (IndexError, json.JSONDecodeError, ValueError, OSError):
             pass
         sb_choices.append(questionary.Choice(label, value=sb))
 
@@ -1618,7 +1619,7 @@ def _compare_versions_flow(name, ep):
         path_b = ep.storyboard / [f for f in sb_b.output_files if f.endswith(".json")][0]
         data_a = EditorialStoryboard.model_validate_json(path_a.read_text())
         data_b = EditorialStoryboard.model_validate_json(path_b.read_text())
-    except Exception as e:
+    except (IndexError, json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboards: {e}")
         return
 
@@ -1684,7 +1685,7 @@ def _version_history_flow(name, ep):
             try:
                 ts = datetime.fromisoformat(art.created_at)
                 ts_str = ts.strftime("%m-%d %H:%M")
-            except Exception:
+            except (ValueError, TypeError):
                 ts_str = ""
 
             lineage = ""
@@ -1784,7 +1785,7 @@ def _manage_clips(name, meta, cfg):
     # Update project metadata
     meta["clip_count"] = len(selected_ids)
     meta["included_clips"] = sorted(selected_ids)
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
 
     print(f"\n  Project now has {len(selected_ids)} clips.")
     if to_remove:
@@ -2007,7 +2008,7 @@ def _run_director_review(ep, meta, cfg):
 
     try:
         storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboard: {e}\n")
         return
 
@@ -2131,7 +2132,7 @@ def _run_director_review(ep, meta, cfg):
     base = f"editorial_{provider}"
 
     json_path = versioned_path(ep.storyboard / f"{base}.json", v)
-    json_path.write_text(reviewed.model_dump_json(indent=2))
+    atomic_write_text(json_path, reviewed.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     md_path = versioned_path(ep.storyboard / f"{base}.md", v)
@@ -2159,7 +2160,7 @@ def _run_director_review(ep, meta, cfg):
     try:
         _sp.run(["open", str(preview_path)], check=False)
         print("  Preview opened in browser.")
-    except Exception:
+    except OSError:
         pass
     print()
 
@@ -2235,7 +2236,7 @@ def _chat_with_director(ep, meta, cfg):
 
     try:
         storyboard = EditorialStoryboard.model_validate_json(sb_path.read_text())
-    except Exception as e:
+    except (json.JSONDecodeError, ValueError, OSError) as e:
         print(f"\n  Error loading storyboard: {e}\n")
         return
 
@@ -2511,7 +2512,7 @@ def _run_format_selection(clip_metadata, meta, ep):
 
     # Persist
     meta["output_format"] = output_format.to_dict()
-    (ep.root / "project.json").write_text(json.dumps(meta, indent=2))
+    atomic_write_text(ep.root / "project.json", json.dumps(meta, indent=2))
     print(
         f"\n  Output format: {output_format.label}, {output_format.width}x{output_format.height}"
         f" @ {output_format.fps}fps, {output_format.codec}, fit={output_format.fit_mode}\n"
@@ -2790,5 +2791,5 @@ def _settings_flow(cfg):
             if style:
                 ws["style"] = style
 
-    ws_path.write_text(json.dumps(ws, indent=2) + "\n")
+    atomic_write_text(ws_path, json.dumps(ws, indent=2) + "\n")
     print(f"\n  {t('settings.saved')}\n")

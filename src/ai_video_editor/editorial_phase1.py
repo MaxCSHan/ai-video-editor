@@ -12,6 +12,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     ClaudeConfig,
     Config,
@@ -215,7 +216,7 @@ def _review_single_clip_gemini(
         target_dir=clip_paths.review,
     )
     vpath = versioned_path(clip_paths.review / "review_gemini.json", meta.version)
-    vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+    atomic_write_text(vpath, json.dumps(review, indent=2, ensure_ascii=False))
     commit_version(clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review)
     print(f"  {label}: review complete (v{meta.version})")
     return review
@@ -268,7 +269,7 @@ def run_phase1_gemini(
                     results_by_id[clip_id] = result
                 else:
                     failed_ids.append(clip_id)
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR reviewing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 
@@ -425,12 +426,12 @@ def run_phase1_claude(
                 target_dir=clip_paths.review,
             )
             vpath = versioned_path(clip_paths.review / "review_claude.json", meta.version)
-            vpath.write_text(json.dumps(review, indent=2, ensure_ascii=False))
+            atomic_write_text(vpath, json.dumps(review, indent=2, ensure_ascii=False))
             commit_version(
                 clip_paths.root, meta, output_paths=[vpath], target_dir=clip_paths.review
             )
             reviews.append(review)
-        except Exception as e:
+        except Exception as e:  # Intentional: per-clip errors must not abort entire batch
             print(f"  ERROR reviewing {clip_id}: {e}")
             failed_ids.append(clip_id)
 

@@ -106,7 +106,7 @@ class GeminiClient:
 
         try:
             video_file = self._client.files.upload(file=str(file_path))
-        except Exception as e:
+        except Exception as e:  # Intentional: translates all SDK errors to domain exception
             raise FileUploadError(
                 f"Upload failed for {display_name}: {e}",
                 provider="gemini",

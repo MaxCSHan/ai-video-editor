@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
+
 import questionary
 from questionary import Style
 
@@ -44,7 +46,7 @@ def needs_setup() -> bool:
             data = json.loads(vx_config.read_text())
             if data.get("setup_complete"):
                 return False
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     # No config at all, or setup not marked complete
@@ -166,7 +168,7 @@ def run_setup_wizard() -> bool:
     if vx_config.exists():
         try:
             config = json.loads(vx_config.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
 
     config["setup_complete"] = True
@@ -178,7 +180,7 @@ def run_setup_wizard() -> bool:
     if current_locale != "en":
         config["locale"] = current_locale
 
-    vx_config.write_text(json.dumps(config, indent=2) + "\n")
+    atomic_write_text(vx_config, json.dumps(config, indent=2) + "\n")
 
     print(f"\n  {_GREEN}✓{_RESET} {t('setup.setup_complete')}\n")
     return True
@@ -223,7 +225,7 @@ def _check_prerequisites() -> dict:
             else:
                 result["ffmpeg_version"] = "found"
             result["ffmpeg_ok"] = True
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # API keys

@@ -13,6 +13,8 @@ import logging
 import time
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
+
 from .config import ReviewBudget, ReviewConfig
 from .director_tools import (
     DirectorToolContext,
@@ -46,7 +48,7 @@ def _load_transcripts(clips_dir: Path, clip_ids: set[str]) -> dict[str, list[dic
             try:
                 data = json.loads(transcript_path.read_text())
                 transcripts[clip_id] = data.get("segments", [])
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
     return transcripts
 
@@ -356,7 +358,7 @@ def run_editorial_review(
                     contents=messages,
                     config=turn_config,
                 )
-        except Exception as e:
+        except Exception as e:  # Intentional: Gemini SDK exceptions are varied; logs and breaks
             log.error("Gemini API error during review: %s", e)
             review_log.convergence_reason = "error"
             break
@@ -441,7 +443,7 @@ def run_editorial_review(
             with otel_tool_span(call_name, call_args) as tool_span:
                 try:
                     result = handler(tool_ctx, **call_args)
-                except Exception as e:
+                except Exception as e:  # Intentional: tool handlers can raise varied errors
                     log.error("Tool %s failed: %s", call_name, e)
                     result = {"type": "text", "data": f"Tool error: {e}"}
                 if tool_span:
@@ -902,7 +904,7 @@ def run_director_chat(
                         contents=messages,
                         config=config,
                     )
-            except Exception as e:
+            except Exception as e:  # Intentional: Gemini SDK exceptions are varied; logs and breaks
                 log.error("Gemini API error: %s", e)
                 print_fn(f"  [Error] API error: {e}")
                 break
@@ -986,7 +988,7 @@ def run_director_chat(
                 with otel_tool_span(call_name, call_args) as tool_span:
                     try:
                         result = handler(tool_ctx, **call_args)
-                    except Exception as e:
+                    except Exception as e:  # Intentional: tool handlers can raise varied errors
                         log.error("Tool %s failed: %s", call_name, e)
                         result = {"type": "text", "data": f"Tool error: {e}"}
                     if tool_span:
@@ -1159,7 +1161,7 @@ def auto_save_version(
     base = f"editorial_{provider}"
 
     json_path = versioned_path(editorial_paths.storyboard / f"{base}.json", v)
-    json_path.write_text(storyboard.model_dump_json(indent=2))
+    atomic_write_text(json_path, storyboard.model_dump_json(indent=2))
     update_latest_symlink(json_path)
 
     md_path = versioned_path(editorial_paths.storyboard / f"{base}.md", v)
@@ -1226,7 +1228,7 @@ def find_active_session(editorial_paths) -> ChatSession | None:
             session = ChatSession.model_validate_json(f.read_text())
             if session.status == "active":
                 return session
-        except Exception:
+        except (json.JSONDecodeError, ValueError, OSError):
             continue
     return None
 
@@ -1238,7 +1240,7 @@ def save_session(session: ChatSession, editorial_paths) -> Path:
     sd = _session_dir(editorial_paths)
     path = sd / f"{session.session_id}.json"
     session.updated_at = datetime.now(timezone.utc).isoformat()
-    path.write_text(session.model_dump_json(indent=2))
+    atomic_write_text(path, session.model_dump_json(indent=2))
     return path
 
 

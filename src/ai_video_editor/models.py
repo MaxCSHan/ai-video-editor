@@ -880,3 +880,61 @@ class CutComposition(BaseModel):
     briefing: str = ""  # user_context artifact_id or filename
     style_preset: str = ""
     output_format: dict = {}  # {width, height, fps, codec, label}
+
+
+# ---------------------------------------------------------------------------
+# Config file schemas — validated on load to catch typos early
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceConfig(BaseModel):
+    """Schema for .vx.json — workspace-level settings."""
+
+    provider: str = "gemini"
+    style: str | None = None
+    locale: str = "en"
+    setup_complete: bool = False
+
+    model_config = {"extra": "allow"}  # forward-compatible with new fields
+
+
+class ProjectConfig(BaseModel):
+    """Schema for project.json — per-project metadata and version counters."""
+
+    name: str = ""
+    type: str = "editorial"
+    provider: str = "gemini"
+    style_preset: str | None = None
+    clip_count: int = 0
+    included_clips: list[str] = []
+    output_format: dict = {}
+    versions: dict[str, int] = {}
+    tracks: list[str] = []
+
+    model_config = {"extra": "allow"}  # forward-compatible with new fields
+
+
+class ManifestClip(BaseModel):
+    """Schema for a single clip entry in manifest.json."""
+
+    clip_id: str
+    filename: str
+    source_path: str = ""
+    duration_sec: float = 0.0
+    resolution: str = ""
+    fps: float | str = 0.0  # may be fractional string from ffprobe (e.g. "60000/1001")
+    creation_time: str = ""
+
+    model_config = {"extra": "allow"}
+
+
+class ProjectManifest(BaseModel):
+    """Schema for manifest.json — clip inventory for a project."""
+
+    project: str = ""
+    clip_count: int = 0
+    total_duration_sec: float = 0.0
+    total_duration_fmt: str = ""
+    clips: list[ManifestClip] = []
+
+    model_config = {"extra": "allow"}

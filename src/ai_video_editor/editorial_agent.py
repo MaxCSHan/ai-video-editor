@@ -5,6 +5,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import (
     VIDEO_EXTENSIONS,
     Config,
@@ -53,8 +54,10 @@ def discover_clips_from_manifest(
     if not manifest_path.exists():
         return [], {}
     try:
-        manifest = json.loads(manifest_path.read_text())
-    except json.JSONDecodeError as e:
+        from .config import load_manifest
+
+        manifest = load_manifest(manifest_path)
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"  WARN: corrupt manifest.json ({e}), treating as empty")
         return [], {}
     return manifest.get("clips", []), manifest
@@ -152,7 +155,7 @@ def preprocess_all_clips(
             clip_id = futures[fut]
             try:
                 results_by_id[clip_id] = fut.result()
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR preprocessing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 
@@ -184,7 +187,7 @@ def build_master_manifest(
         "total_duration_fmt": format_duration(total_duration),
         "clips": clip_metadata,
     }
-    editorial_paths.master_manifest.write_text(json.dumps(manifest, indent=2))
+    atomic_write_text(editorial_paths.master_manifest, json.dumps(manifest, indent=2))
     return manifest
 
 
@@ -311,7 +314,7 @@ def transcribe_all_clips(
                 _, transcript = fut.result()
                 if transcript:
                     results[clip_id] = transcript
-            except Exception as e:
+            except Exception as e:  # Intentional: per-clip errors must not abort entire batch
                 print(f"  ERROR transcribing {clip_id}: {e}")
                 failed_ids.append(clip_id)
 

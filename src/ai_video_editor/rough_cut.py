@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .infra.atomic_write import atomic_write_text
 from .config import EditorialProjectPaths, OutputFormat
 from .models import EditorialStoryboard, TextOverlayStyle
 from .preprocess import get_hwaccel_args, get_hwenc_codec, get_video_duration
@@ -29,9 +30,11 @@ log = logging.getLogger(__name__)
 
 def _build_source_map(editorial_paths: EditorialProjectPaths) -> dict[str, Path]:
     """Build clip_id → original source path map from the master manifest."""
+    from .config import load_manifest
+
     manifest_path = editorial_paths.master_manifest
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = load_manifest(manifest_path)
         return {
             clip["clip_id"]: Path(clip["source_path"])
             for clip in manifest.get("clips", [])
@@ -660,7 +663,7 @@ def _resolve_font_path(font_name: str) -> str:
             path = result.stdout.strip()
             if path and Path(path).exists():
                 return path
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError):
             pass
 
     # Static fallback paths for CJK-capable fonts
@@ -1321,9 +1324,11 @@ def _load_output_format(editorial_paths: EditorialProjectPaths) -> OutputFormat 
 
 def _build_clip_format_map(editorial_paths: EditorialProjectPaths) -> dict[str, dict]:
     """Build clip_id → format metadata dict from manifest."""
+    from .config import load_manifest
+
     manifest_path = editorial_paths.master_manifest
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = load_manifest(manifest_path)
         return {clip["clip_id"]: clip for clip in manifest.get("clips", [])}
     return {}
 
@@ -1506,7 +1511,7 @@ def run_rough_cut(
         output_format=of_data,
     )
     comp_path = vdir / "composition.json"
-    comp_path.write_text(cut_comp.model_dump_json(indent=2))
+    atomic_write_text(comp_path, cut_comp.model_dump_json(indent=2))
 
     # Commit version and symlink latest
     cuts_dir = editorial_paths.exports / "cuts"
