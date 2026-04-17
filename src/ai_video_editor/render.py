@@ -479,7 +479,11 @@ def render_html_preview(
 
     video_html = ""
     if rough_cut_path and rough_cut_path.exists():
-        video_html = f'<video controls preload="metadata"><source src="{_esc(rough_cut_path.name)}" type="video/mp4" /></video>'
+        if output_dir:
+            rc_src = os.path.relpath(rough_cut_path, output_dir)
+        else:
+            rc_src = str(rough_cut_path)
+        video_html = f'<video controls preload="metadata"><source src="{_esc(rc_src)}" type="video/mp4" /></video>'
     else:
         video_html = '<p class="muted">Run <code>vx cut</code> to generate the rough cut video.</p>'
 

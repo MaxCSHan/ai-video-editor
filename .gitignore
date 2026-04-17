@@ -34,3 +34,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Local Claude session artifacts and nested git clones
+.claude/
+mazsola2k-ai-video-editor/
