@@ -10,6 +10,7 @@ Usage:
 
 import json
 import logging
+import textwrap
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -224,7 +225,8 @@ def _detect_dominant_format(manifest_clips: dict[str, dict]) -> OutputFormat:
         return OutputFormat()
 
     (w, h, fps), _ = combos.most_common(1)[0]
-    return OutputFormat(width=w, height=h, fps=fps)
+    orientation = "portrait" if h > w else "landscape"
+    return OutputFormat(width=w, height=h, fps=fps, orientation=orientation)
 
 
 def _add_title_overlay(
@@ -233,6 +235,7 @@ def _add_title_overlay(
     clip_start: Fraction,
     clip_fps: float,
     title_effect_id: str,
+    is_portrait: bool = False,
 ) -> None:
     """Add a monologue text overlay as a connected title on an asset-clip.
 
@@ -242,6 +245,9 @@ def _add_title_overlay(
 
     The title is placed on lane 1 (above the video).  ``offset`` is relative
     to the parent clip's local timeline (clip ``start`` + overlay appear_at).
+
+    Portrait (vertical) timelines use a smaller font (30) and wrap text at 40
+    characters per line to prevent overflow on narrow frames.
     """
     style = _MONOLOGUE_STYLE
 
@@ -250,6 +256,8 @@ def _add_title_overlay(
         text = text.lower()
     elif style.case == "sentence":
         text = text.capitalize()
+    if is_portrait:
+        text = "\n".join(textwrap.wrap(text, width=40))
 
     # Title offset is relative to the parent clip's start attribute
     title_offset = clip_start + Fraction(overlay.appear_at).limit_denominator(_FRAC_LIMIT)
@@ -292,7 +300,7 @@ def _add_title_overlay(
         ts_def,
         "text-style",
         font="Open Sans",
-        fontSize="59",
+        fontSize="30" if is_portrait else "59",
         fontColor="1 1 1 1",
         bold="1",
         italic="0",
@@ -325,6 +333,7 @@ def _add_caption_title(
     title_effect_id: str,
     caption_index: int,
     upper: bool = False,
+    is_portrait: bool = False,
 ) -> None:
     """Add a speech caption as a connected title on an asset-clip.
 
@@ -332,12 +341,17 @@ def _add_caption_title(
     is placed at the upper position (lane 2, position ``0 62.5``, fontSize 55).
     Otherwise it sits at the default lower-third position (lane 2, position
     ``0 -8.148148``, fontSize 55).
+
+    Portrait (vertical) timelines use a smaller font (30) and wrap text at 40
+    characters per line to prevent overflow on narrow frames.
     """
     # Caption offset is clip_start + segment-relative start of the cue
     title_offset = (clip_start + caption_start).limit_denominator(_FRAC_LIMIT)
     title_dur = (caption_end - caption_start).limit_denominator(_FRAC_LIMIT)
 
     cue_text = text.lower()
+    if is_portrait:
+        cue_text = "\n".join(textwrap.wrap(cue_text, width=40))
 
     title_el = ET.SubElement(
         parent_clip,
@@ -361,13 +375,14 @@ def _add_caption_title(
     # Empty second text field (Middle template)
     ET.SubElement(title_el, "text", **{"roll-up-height": "0"})
 
-    # Style definition
+    # Style definition — portrait uses smaller font to fit narrow frame
+    caption_font_size = "30" if is_portrait else "55"
     ts_def = ET.SubElement(title_el, "text-style-def", id=ts_id)
     ET.SubElement(
         ts_def,
         "text-style",
         font="Open Sans",
-        fontSize="55",
+        fontSize=caption_font_size,
         fontColor="1 1 1 1",
         bold="1",
         italic="0",
@@ -606,6 +621,7 @@ def export_fcpxml(
     # Walk segments and build timeline
     timeline_offset = Fraction(0)
     caption_counter = 0
+    is_portrait = fmt.orientation == "portrait"
 
     for i, seg in enumerate(storyboard.segments):
         if seg.clip_id not in asset_id_map:
@@ -671,7 +687,7 @@ def export_fcpxml(
         seg_overlays = overlay_map.get(seg.index)
         if seg_overlays:
             for ov in seg_overlays:
-                _add_title_overlay(clip_el, ov, clip_start, clip_fps, title_effect_id)
+                _add_title_overlay(clip_el, ov, clip_start, clip_fps, title_effect_id, is_portrait=is_portrait)
 
         # Add speech caption titles (lane 2) when monologue is present
         seg_mono_intervals = mono_intervals_by_seg.get(seg.index)
@@ -722,6 +738,7 @@ def export_fcpxml(
                     title_effect_id,
                     caption_counter,
                     upper=is_upper,
+                    is_portrait=is_portrait,
                 )
                 caption_counter += 1
 

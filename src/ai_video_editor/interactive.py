@@ -2478,6 +2478,33 @@ def _run_format_selection(clip_metadata, meta, ep):
         else:
             output_format = recommended
 
+    # Orientation override
+    current_orient = output_format.orientation
+    other_orient = "portrait" if current_orient == "landscape" else "landscape"
+    orient = questionary.select(
+        "Orientation:",
+        choices=[
+            questionary.Choice(
+                f"{'Landscape (horizontal)' if current_orient == 'landscape' else 'Portrait (vertical)'}"
+                f" — detected from source",
+                value=current_orient,
+            ),
+            questionary.Choice(
+                "Landscape (horizontal)" if other_orient == "landscape" else "Portrait (vertical)",
+                value=other_orient,
+            ),
+        ],
+        style=VX_STYLE,
+    ).ask()
+    if orient and orient != current_orient:
+        output_format.orientation = orient
+        # Swap width/height to match new orientation
+        w, h = output_format.width, output_format.height
+        if orient == "portrait" and w > h:
+            output_format.width, output_format.height = h, w
+        elif orient == "landscape" and h > w:
+            output_format.width, output_format.height = h, w
+
     # Fit mode
     if analysis["has_mixed_aspects"]:
         fit = questionary.select(
