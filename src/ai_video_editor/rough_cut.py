@@ -1,5 +1,6 @@
 """Rough cut executor — load structured EDL, validate, assemble with ffmpeg."""
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -1068,6 +1069,44 @@ def _load_clip_transcript(editorial_paths: EditorialProjectPaths, clip_id: str) 
     return None
 
 
+def _segment_cache_name(
+    seg,
+    *,
+    seg_overlays,
+    caption_segments,
+    color_target: str,
+    output_format: "OutputFormat | None",
+    proxy_mode: bool,
+) -> str:
+    """Content-addressed cache filename for an extracted segment.
+
+    Keys on everything that affects the rendered pixels — clip, in/out,
+    transition, overlays, captions, color target, output format, and
+    proxy-vs-source mode — but NOT the segment's index. This fixes two bugs in
+    the old ``seg_{index}_{clip_id}`` scheme: (1) a trim that kept the same
+    index served a STALE cached segment (wrong pixels), and (2) a pure reorder
+    re-encoded identical pixels under a new name. Now a trim invalidates the
+    cache and a reorder reuses it; proxy and full renders never collide.
+    """
+    fmt_sig = ""
+    if output_format is not None:
+        f = output_format
+        fmt_sig = f"{f.width}x{f.height}@{f.fps}/{f.fit_mode}/{f.codec}/{f.color_target}"
+    parts = [
+        str(seg.clip_id),
+        f"{seg.in_sec:.3f}",
+        f"{seg.out_sec:.3f}",
+        str(getattr(seg, "transition", "") or ""),
+        str(seg_overlays) if seg_overlays else "",
+        "cap" if caption_segments else "",
+        color_target or "",
+        fmt_sig,
+        "proxy" if proxy_mode else "src",
+    ]
+    digest = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:10]
+    return f"seg_{digest}.mp4"
+
+
 def assemble_rough_cut(
     storyboard: EditorialStoryboard,
     editorial_paths: EditorialProjectPaths,
@@ -1095,7 +1134,6 @@ def assemble_rough_cut(
 
     # Load transcripts for caption burning
     transcript_cache: dict[str, list | None] = {}
-    has_text = monologue is not None or burn_captions
 
     # -----------------------------------------------------------------------
     # Resolve color target — device-aware color normalization
@@ -1162,10 +1200,18 @@ def assemble_rough_cut(
                 transcript_cache[seg.clip_id] = _load_clip_transcript(editorial_paths, seg.clip_id)
             caption_segments = transcript_cache[seg.clip_id]
 
-        # Use different filename when text overlays present to avoid caching conflicts
+        # Content-addressed cache name (see _segment_cache_name): keys on the
+        # rendered-pixel inputs, NOT the segment index — so trims invalidate and
+        # reorders reuse. Overlay/caption presence is part of the signature.
         seg_overlays = overlay_map.get(seg.index)
-        suffix = "_txt" if has_text else ""
-        seg_path = segments_dir / f"seg_{seg.index:03d}_{seg.clip_id}{suffix}.mp4"
+        seg_path = segments_dir / _segment_cache_name(
+            seg,
+            seg_overlays=seg_overlays,
+            caption_segments=caption_segments,
+            color_target=color_target,
+            output_format=output_format,
+            proxy_mode=proxy_mode,
+        )
 
         overlay_count = len(seg_overlays) if seg_overlays else 0
         labels = []
