@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -228,6 +229,61 @@ def load_all_traces(project_root: Path) -> list[dict]:
     return traces
 
 
+# ---------------------------------------------------------------------------
+# Stage timing — wall-clock per pipeline stage, so before/after optimization
+# wins are provable and the app can show honest durations. Separate file from
+# traces.jsonl (which is LLM-cost only); deterministic stages (ffmpeg) record
+# here too.
+# ---------------------------------------------------------------------------
+def record_stage_timing(
+    project_root: Path, stage: str, seconds: float, meta: dict | None = None
+) -> None:
+    """Append one stage-timing record to library/<project>/stage_timings.jsonl."""
+    project_root = Path(project_root)
+    project_root.mkdir(parents=True, exist_ok=True)
+    record = {
+        "stage": stage,
+        "seconds": round(float(seconds), 3),
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    if meta:
+        record["meta"] = meta
+    with (project_root / "stage_timings.jsonl").open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def load_stage_timings(project_root: Path) -> list[dict]:
+    """Load all stage-timing records for a project (newest entries last)."""
+    path = Path(project_root) / "stage_timings.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().strip().split("\n"):
+        if line:
+            out.append(json.loads(line))
+    return out
+
+
+@contextmanager
+def time_stage(project_root: Path, stage: str, meta: dict | None = None):
+    """Context manager that records a stage's wall-clock on exit (even on error)."""
+    start = time.monotonic()
+    ok = True
+    try:
+        yield
+    except BaseException:
+        ok = False
+        raise
+    finally:
+        elapsed = time.monotonic() - start
+        m = dict(meta or {})
+        m["ok"] = ok
+        try:
+            record_stage_timing(project_root, stage, elapsed, m)
+        except Exception:
+            pass  # timing must never break the pipeline
+
+
 def summarize_traces(traces: list[dict]) -> dict:
     """Summarize historical traces."""
     if not traces:
@@ -433,8 +489,6 @@ def get_phoenix_status() -> tuple[bool, str | None]:
 # ---------------------------------------------------------------------------
 # OTel span helpers for agent tracing
 # ---------------------------------------------------------------------------
-
-from contextlib import contextmanager
 
 
 @contextmanager
