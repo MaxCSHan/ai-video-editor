@@ -20,6 +20,11 @@ dev = [
 scene = [
     "scenedetect[opencv]",
 ]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "websockets>=12",
+]
 whisper = [
     "mlx-whisper",
 ]
